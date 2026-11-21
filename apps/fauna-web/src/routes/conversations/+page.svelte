@@ -45,6 +45,7 @@
     unopenableMailCount,
   } from '#lib/conversations';
   import { conversationsDisplayError } from '#lib/conversations-display-error';
+  import { showEmptyState } from '#lib/conversations-empty-state';
   import { memberReviewRoster, refreshMemberReviewRoster } from '#lib/member-reviews';
   import { consumePendingSearchNav, setPendingSearchNav } from '#lib/search';
   import { t } from '#lib/i18n/strings';
@@ -55,7 +56,7 @@
   import { nodeUrl } from '#lib/api';
   import LinkPreviewCard from '#lib/components/LinkPreviewCard.svelte';
   import ContentLabelBadge from '#lib/components/ContentLabelBadge.svelte';
-  import { typedAddressDisplay, warmupDeferredText, threadLabelDisplay, recipientResolveStatus, nextSortOrder, quicksetEmojis, moreGridEmojis, contentLabelBadgeFor } from '#lib/wasm';
+  import { typedAddressDisplay, warmupDeferredText, threadLabelDisplay, recipientResolveStatus, nextSortOrder, sortOrderLabel, quicksetEmojis, moreGridEmojis, contentLabelBadgeFor } from '#lib/wasm';
   // The room model's render mappings — the wasm twins of the same
   // `fauna_conversations::room` helpers tui and linux call directly and the
   // UniFFI apps reach through their own twins, so this page hand-types no
@@ -77,8 +78,14 @@
     roomNoticeAttrToken,
     roomInvitationText,
     roomPendingInviteText,
-    offlineAffordance,
+    offlinePossibility,
+    threadControlPossibility,
+    threadSendPossibility,
+    newThreadControlPossibility,
+    type ThreadControl,
+    type NewThreadControl,
   } from '#lib/wasm';
+  import { paintPossibility, type Possibility } from '#lib/possibility';
   import { makeOfflineGate } from '#lib/offline-gate';
   import RoomLabelerRows from '#lib/components/RoomLabelerRows.svelte';
   import { resolveLocalized, resolveLocalizedNested, type LocalizedText } from '#lib/i18n/localized';
@@ -225,7 +232,12 @@
       await memberReviewKeep(person);
       await refreshMemberReviewRoster();
     } catch (e) {
-      pageError = e instanceof Error ? e.message : String(e);
+      // A Keep that did not land says so — the person stays listed until it
+      // does — never only the console (`ui/README.md` § Offer only what is
+      // possible, rule 7).
+      pageError = t.settings.recovery_kit.review_keep_failed({
+        reason: e instanceof Error ? e.message : String(e),
+      });
     }
   }
 
@@ -253,6 +265,8 @@
     // No actor id means a rail with no removable identity beneath the address;
     // the chip is not a control there and the capability gate already hid it.
     if (!id || !actorIdHex) return;
+    // The same answer the chip painted: an inert chip removes nobody.
+    if (!controlPossible('remove_member')) return;
     const handle = detail?.participant_displays?.[index] ?? '';
     run(async () => {
       await manager?.removeParticipant(id, handle, actorIdHex);
@@ -800,6 +814,77 @@
     return !!caps && supported === false;
   }
 
+  // The controls a role or the rail decides answer one shared predicate,
+  // `ThreadCapabilities::possibility` over its wasm twin
+  // (`ui/conversations.md` § Errors & edge cases → *Controls this person can
+  // never use*): absent → not painted; blocked (the owner's walk-out alone) →
+  // painted disabled with its reason; possible → live. The paint reads `ctl`,
+  // and each handler asks `controlPossible` — the same answer — before it
+  // acts, so a control that is not offered never acts for a driver either.
+  // Never a role branch here (§ Architectural rules 5).
+  function controlAnswer(control: ThreadControl): Possibility {
+    return threadControlPossibility(detail?.capabilities, control, detail?.room?.my_role);
+  }
+  // A picker value's localized label, for the viewer who reads the policy as
+  // a line: the same choice list the select offers, so the line and the
+  // option never word one value two ways.
+  function choiceLabel(choices: { token: string; label: string }[], token: string): string {
+    return choices.find((choice) => choice.token === token)?.label ?? token;
+  }
+  function controlPossible(control: ThreadControl): boolean {
+    return controlAnswer(control).state === 'possible';
+  }
+  let ctl = $derived.by(() => {
+    const paint = (control: ThreadControl) => paintPossibility(controlAnswer(control));
+    return {
+      invite: paint('invite'),
+      removeMember: paint('remove_member'),
+      setPolicy: paint('set_policy'),
+      appointAdmins: paint('appoint_admins'),
+      transferOwnership: paint('transfer_ownership'),
+      leaveRoom: paint('leave_room'),
+      localRemove: paint('local_remove'),
+      subject: paint('subject'),
+    };
+  });
+
+  // The new-thread composer's Send, attach and topic answer one shared
+  // predicate over the draft, `new_thread_possibility` over its wasm twin
+  // (`ui/conversations.md` § Errors & edge cases → *The new-thread composer
+  // offers only what it can send*): Send waits for anyone to send to, attach
+  // and topic take a draft not yet addressed and then follow the recipient's
+  // rail. The paint reads `ntc`; each handler asks `newThreadPossible` — the
+  // same answer — and a refusal says why on `error-message`.
+  function newThreadAnswer(control: NewThreadControl): Possibility {
+    return newThreadControlPossibility(newCompose, control);
+  }
+  function newThreadPossible(control: NewThreadControl): boolean {
+    const answer = newThreadAnswer(control);
+    if (answer.state === 'blocked') pageError = resolveLocalized(answer.reason);
+    return answer.state === 'possible';
+  }
+  let ntc = $derived.by(() => {
+    const paint = (control: NewThreadControl) => paintPossibility(newThreadAnswer(control));
+    return { send: paint('send'), attach: paint('attach'), topic: paint('topic') };
+  });
+  // The new-thread composer has no caps: its attach and Send paint from the
+  // shared new-thread answer above; a thread's from its caps.
+  let attachBlocked = $derived(mode === 'new' ? ntc.attach.disabled : isGated(caps?.supports_attachments));
+  // A thread's reply bar (`dm-text-field`, `dm-send-button`) answers the shared
+  // `ThreadCapabilities::send_possibility` (`threadSendPossibility`): blocked by
+  // the room notice's own sentence when the rail cannot take a send — the
+  // notice already says it, so the reason rides only Send's `title`. No caps
+  // (no detail read yet) → nothing to gate on, as before. `send` asks the same
+  // answer before it acts.
+  function replySendAnswer(): Possibility | null {
+    return caps ? threadSendPossibility(caps) : null;
+  }
+  let replySend = $derived.by(() => {
+    const answer = replySendAnswer();
+    return answer ? paintPossibility(answer) : null;
+  });
+  let sendBlocked = $derived(mode === 'new' ? ntc.send.disabled : (replySend?.disabled ?? false));
+
   // ── mutator glue (every handler refreshes the snapshot after) ────────
   async function run(fn: () => unknown | Promise<unknown>): Promise<void> {
     // Refuse while the wasm ConversationsManager is still building (it arrives
@@ -929,15 +1014,27 @@
   }
   function toggleTopic() {
     if (mode === 'new') {
+      if (!newThreadPossible('topic')) return;
       const cur = newCompose?.subject_draft;
       run(() => manager?.setNewThreadSubject(cur == null ? '' : undefined));
-    } else if (selectedId) {
+    } else if (selectedId && controlPossible('subject')) {
       run(() => manager?.toggleTopic(selectedId));
     }
   }
   function send() {
-    if (mode === 'new') run(async () => { await manager?.sendNewThread(); });
-    else if (selectedId) run(async () => { await manager?.send(selectedId); });
+    // The send's returned error is never dropped: `run` puts it on
+    // `error-message` (a refusal is also stamped on the draft's `send_state`).
+    if (mode === 'new') {
+      if (newThreadPossible('send')) run(async () => { await manager?.sendNewThread(); });
+    }
+    else if (selectedId) {
+      const answer = replySendAnswer();
+      if (answer && answer.state !== 'possible') {
+        if (answer.state === 'blocked') pageError = resolveLocalized(answer.reason);
+        return;
+      }
+      run(async () => { await manager?.send(selectedId); });
+    }
   }
   // `attachment-button` (a real `<input type="file">`, not a dialog-opening
   // button — Playwright drives it directly via `set_input_files`, the same
@@ -947,6 +1044,7 @@
   // conversations.md` § Attachments: `attachment-button` row).
   async function stageAttachments(fileList: FileList | null) {
     if (!fileList || fileList.length === 0) return;
+    if (mode === 'new' && !newThreadPossible('attach')) return;
     const files = Array.from(fileList);
     await run(async () => {
       for (const file of files) {
@@ -1002,7 +1100,8 @@
 
   // Add-participant overlay.
   function openAddParticipant() {
-    if (selectedId) {
+    // No picker opens for a viewer the control is absent for.
+    if (selectedId && controlPossible('invite')) {
       run(async () => {
         manager?.openAddParticipant(selectedId);
         await manager?.refreshContactRoster();
@@ -1145,11 +1244,12 @@
     roomLeaveConfirm = false;
     roomRemoveConfirm = false;
   }
-  // The walk-out. `room-leave-button` is greyed off `can_leave_room`; the
-  // capability is RE-CHECKED here at open, not only at paint, so a greyed
-  // control a driver clicks anyway opens nothing.
+  // The walk-out. `room-leave-button` paints the `leave_room` answer (blocked
+  // for the owner, with the hand-over as its reason); the same answer is
+  // RE-ASKED here at open, not only at paint, so a dead control a driver
+  // clicks anyway opens nothing.
   function openRoomLeave() {
-    if (!detail?.capabilities?.can_leave_room) return;
+    if (!controlPossible('leave_room')) return;
     roomLeaveConfirm = true;
   }
   function confirmRoomLeave() {
@@ -1159,13 +1259,13 @@
     // in the leaver's list, and a refusal rides the page's `error-message`.
     if (id) run(async () => { await manager?.leaveRoom(id); });
   }
-  // The local remove. Greyed off `capabilities.supports_local_remove`, and
-  // re-checked here at open like the walk-out. The confirm is one verb: the
+  // The local remove. Absent off a rail without it (the `local_remove`
+  // answer), and re-asked here at open like the walk-out. The confirm is one verb: the
   // thread leaves the manager — and the selection with it, so the page goes
   // back to the list — only once the nest answered; a refusal rides the
   // page's `error-message` and the thread stays open.
   function openRoomRemove() {
-    if (!detail?.capabilities?.supports_local_remove) return;
+    if (!controlPossible('local_remove')) return;
     roomRemoveConfirm = true;
   }
   function confirmRoomRemove() {
@@ -1174,26 +1274,28 @@
     cancelRoomSettings();
     if (id) run(async () => { await manager?.removeThread(id); });
   }
-  // The four staging gestures below carry no such guard on purpose: they are
-  // reachable only from inside an OPEN editor, and the editor opens only where
-  // `openRoomSettings` found a manager — so `manager?.` here cannot be the
-  // invisible no-op the guard above exists for.
+  // The four staging gestures below carry no manager guard on purpose: they
+  // are reachable only from inside an OPEN editor, and the editor opens only
+  // where `openRoomSettings` found a manager — so `manager?.` here cannot be
+  // the invisible no-op the guard above exists for. Each asks its control's
+  // answer, the one its paint read.
   function stageJoinRule(e: Event) {
     const token = (e.target as HTMLSelectElement).value;
-    if (roomDraft) roomDraft = manager?.roomSettingsSetJoinRule(roomDraft, token) ?? roomDraft;
+    if (roomDraft && controlPossible('set_policy')) roomDraft = manager?.roomSettingsSetJoinRule(roomDraft, token) ?? roomDraft;
   }
   function stageHistoryPolicy(e: Event) {
     const token = (e.target as HTMLSelectElement).value;
-    if (roomDraft)
+    if (roomDraft && controlPossible('set_policy'))
       roomDraft = manager?.roomSettingsSetHistoryPolicy(roomDraft, token) ?? roomDraft;
   }
   function stageAdmin(i: number) {
     const id = selectedId;
-    if (roomDraft && id) roomDraft = manager?.roomSettingsToggleAdmin(roomDraft, id, i) ?? roomDraft;
+    if (roomDraft && id && controlPossible('appoint_admins'))
+      roomDraft = manager?.roomSettingsToggleAdmin(roomDraft, id, i) ?? roomDraft;
   }
   function stageTransfer(i: number) {
     const id = selectedId;
-    if (roomDraft && id)
+    if (roomDraft && id && controlPossible('transfer_ownership'))
       roomDraft = manager?.roomSettingsToggleTransfer(roomDraft, id, i) ?? roomDraft;
   }
   // Save is ONE call. The editor must OUTLIVE it — `apply_room_settings` stops
@@ -1204,7 +1306,7 @@
   function saveRoomSettings() {
     const id = selectedId;
     const draft = roomDraft;
-    if (!id || !draft) return;
+    if (!id || !draft || !controlPossible('set_policy')) return;
     run(async () => {
       const edits = manager?.roomSettingsEdits(draft, id);
       const allLanded = await manager?.applyRoomSettings(id, edits);
@@ -1219,7 +1321,7 @@
   // *The community room's three controls*, *Pending invitations*, *The room's
   // labeler set*). Painters over the shared manager: every choice, gate and
   // sentence below is a wasm twin of the Rust the other six apps call.
-  const offlineGate = makeOfflineGate(offlineAffordance, connectionStatus.subscribe);
+  const offlineGate = makeOfflineGate(offlinePossibility, connectionStatus.subscribe);
 
   // `room-invitation[i]` rows atop the list — absent while none stands.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1265,10 +1367,10 @@
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let pendingInvites = $derived<any[]>(detail?.room?.pending_invites ?? []);
   function stageNestRead() {
-    if (roomDraft) roomDraft = manager?.roomSettingsToggleNestRead(roomDraft) ?? roomDraft;
+    if (roomDraft && controlPossible('set_policy')) roomDraft = manager?.roomSettingsToggleNestRead(roomDraft) ?? roomDraft;
   }
   function stageLabeler(labelerId: string) {
-    if (roomDraft) roomDraft = manager?.roomSettingsToggleLabeler(roomDraft, labelerId) ?? roomDraft;
+    if (roomDraft && controlPossible('set_policy')) roomDraft = manager?.roomSettingsToggleLabeler(roomDraft, labelerId) ?? roomDraft;
   }
   // Withdrawing acts AT ONCE, outside Save's staged set (like leaving); the
   // editor stays open and the manager re-lists on success.
@@ -1460,7 +1562,7 @@
     <div class="list-top">
       <h1 data-testid={IDS.PAGE_HEADING}>{t.conversations.list.title}</h1>
       <button data-testid={IDS.NEW_CONVERSATION_BUTTON} class="icon-btn" title={t.conversations.list.new_conversation} disabled={!manager} onclick={newConversation}>+</button>
-      <button data-testid={IDS.CONVERSATION_SORT} class="icon-btn" title={t.conversations.list.sort} onclick={cycleSort}>{'↕'}</button>
+      <button data-testid={IDS.CONVERSATION_SORT} class="icon-btn" title={resolveLocalized(sortOrderLabel(snap?.sort))} data-value={snap?.sort ?? 'LatestActivity'} onclick={cycleSort}>{'↕'}</button>
     </div>
     <input
       data-testid={IDS.CONVERSATION_SEARCH_BOX}
@@ -1475,7 +1577,7 @@
       <p class="muted">{t.common.loading}</p>
     {:else if !$identity}
       <p class="muted">{t.common.identity_required}</p>
-    {:else if threads.length === 0}
+    {:else if showEmptyState(snap?.loaded, threads.length)}
       <p class="muted">{t.conversations.list.no_conversations}</p>
     {/if}
 
@@ -1636,21 +1738,16 @@
                  the grant plane's Remove half. Gated on
                  `supports_membership_change` like tui's own branch — Keep
                  beside a chip that cannot remove anyone is half a ratified
-                 pair. Two gates, meaning different things, exactly as linux's
-                 header does it. The rail's `supports_membership_change`
-                 decides whether the chip is a control at all: where the rail
-                 models no membership (mail) it is a label — no role, no tab
-                 stop, no handler. The viewer's role decides whether that
-                 control is LIVE — the roles table applied in shared Rust
-                 (`RoomSnapshot::gate`), never re-derived here
-                 (`conversation-rooms.md` § Roles and authorization) — and a
-                 control the role withholds is GREYED, never demoted to a label
-                 (`ui/conversations.md` § Architectural rules 5):
-                 `role="button"` + `aria-disabled`, which is also what a driver
-                 reads as disabled. A bare span here read as ENABLED to every
-                 driver and swallowed the click. -->
-            {@const membershipRail = !!detail.capabilities?.supports_membership_change}
-            {@const removable = membershipRail && !!detail.capabilities?.can_remove_members}
+                 pair. The chip carries the remove only where the shared
+                 `remove_member` answer is possible — the rail models
+                 membership AND the viewer's role may remove, the roles table
+                 applied in shared Rust (`ThreadCapabilities::possibility`),
+                 never re-derived here (`ui/conversations.md` § Errors & edge
+                 cases → *Controls this person can never use*). Everywhere
+                 else the remove is absent and the chip is the inert roster —
+                 a label, no role, no tab stop, no handler — as a mail
+                 thread's always was; the chip itself is never absent. -->
+            {@const removable = ctl.removeMember.shown && !ctl.removeMember.disabled}
             <!-- The member's role on a governed room: the `role` attribute a
                  driver reads off the chip, and the localized owner/admin mark
                  in its text. `null` on a policy-less room and on every non-room
@@ -1659,31 +1756,30 @@
                  construction — `RoomSnapshot::members` is index-parallel with
                  `ThreadDetail::participants`, and so with these chips. -->
             {@const memberRole = (detail.room?.members ?? [])[i]?.role ?? null}
-            <!-- The role and the tab stop are applied together or not at all,
-                 so a chip that carries `tabindex` is always `role="button"`.
-                 svelte-check reads the conditional `role` as unresolvable and
-                 judges the span noninteractive on that basis alone. -->
-            <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+            <!-- Two branches, never one span with conditional handlers: Svelte
+                 hangs a dispatching wrapper on the element for
+                 `onclick={cond ? fn : undefined}` whatever `cond` says, so the
+                 inert roster chip would still CARRY a click handler, and the
+                 automation gate (convention 11 — `e2e-conventions.md` §
+                 Implementation status today, web) would drive it as live. The
+                 inert chip is a bare label with no role, tab stop or handler;
+                 the removable one carries all three together. -->
+            {#if removable}
             <span
               data-testid={IDS.THREAD_MEMBER_CHIP}
-              class="chip"
-              class:removable
-              class:greyed={membershipRail && !removable}
+              class="chip removable"
               data-role={memberRole ? roomRoleAttrToken(memberRole) : undefined}
-              role={membershipRail ? 'button' : undefined}
-              aria-disabled={membershipRail && !removable ? 'true' : undefined}
-              tabindex={membershipRail ? (removable ? 0 : -1) : undefined}
-              onclick={removable ? () => removeMember(i) : undefined}
-              onkeydown={removable
-                ? (e: KeyboardEvent) => {
-                    if (e.key !== 'Enter' && e.key !== ' ') return;
-                    e.preventDefault();
-                    removeMember(i);
-                  }
-                : undefined}
+              role="button"
+              tabindex="0"
+              onclick={() => removeMember(i)}
+              onkeydown={(e: KeyboardEvent) => {
+                if (e.key !== 'Enter' && e.key !== ' ') return;
+                e.preventDefault();
+                removeMember(i);
+              }}
             >
               {roomMemberChipText(disp, memberRole)}
-              {#if removable && memberMarks[i]}
+              {#if memberMarks[i]}
                 <span data-testid={IDS.THREAD_MEMBER_UNATTESTED_MARK} class="chip-mark"
                   >{t.conversations.detail.member_unattested_mark}</span
                 >
@@ -1703,21 +1799,26 @@
                 >
               {/if}
             </span>
+            {:else}
+            <span
+              data-testid={IDS.THREAD_MEMBER_CHIP}
+              class="chip"
+              data-role={memberRole ? roomRoleAttrToken(memberRole) : undefined}
+              >{roomMemberChipText(disp, memberRole)}</span
+            >
+            {/if}
           {/each}
         </div>
-        <!-- Present off the RAIL's `supports_membership_change` (does this
-             rail model membership at all), then GREYED — never hidden — off
-             the viewer's role permitting an invite (`ui/conversations.md`
-             § Architectural rules 5). The role half used to be missing
-             entirely: every app gated add/remove on the rail capability
-             alone, so a plain member of a governed room was offered an Add
-             the room would refuse. linux fixed it 2026-09-09; this is web's
-             half of the same correction. -->
-        {#if detail.capabilities?.supports_membership_change}
+        <!-- Painted only where the viewer may add someone: the rail's
+             membership is mutable AND the viewer's role may invite — the
+             shared `invite` answer (`ui/conversations.md` § Errors & edge
+             cases → *Controls this person can never use*); a plain member of
+             a governed room is offered no Add the room would refuse. -->
+        {#if ctl.invite.shown}
           <button
             data-testid={IDS.THREAD_ADD_PARTICIPANT_BUTTON}
             class="hdr-btn"
-            disabled={!detail.capabilities?.can_invite}
+            disabled={ctl.invite.disabled}
             onclick={openAddParticipant}
           >
             {t.conversations.unified.thread_add_participant}
@@ -2316,7 +2417,7 @@
             placeholder={t.conversations.compose.write_message}
             markdownEnabled={markdownEnabled}
             markersShown={composeMarkersShown}
-            disabled={isGated(caps?.can_send)}
+            disabled={mode !== 'new' && sendBlocked}
           />
           <!-- List send (`mail-mass-mailing.md` § Composing a list message):
                present only while the compose's one mail recipient is one of the
@@ -2336,14 +2437,34 @@
             {#if mode === 'new'}
               <button data-testid={IDS.NEW_CONVERSATION_CANCEL} class="action-btn" onclick={cancelNewConversation}>{t.common.cancel}</button>
             {/if}
-            <button data-testid={IDS.TOPIC_TOGGLE_BUTTON} class="action-btn" class:disabled={isGated(caps?.supports_subject)} data-disabled={String(isGated(caps?.supports_subject))} disabled={isGated(caps?.supports_subject)} onclick={() => { if (!isGated(caps?.supports_subject)) toggleTopic(); }}>{t.conversations.unified.topic_toggle_add}</button>
-            <label class="action-btn attachment-field" class:disabled={isGated(caps?.supports_attachments)}>
+            <!-- A rail with no subject has no topic toggle at all (the shared
+                 `subject` answer, absent there); the new-thread compose has no
+                 rail yet and keeps it. -->
+            {#if mode !== 'new' && (!caps || ctl.subject.shown)}
+              <button data-testid={IDS.TOPIC_TOGGLE_BUTTON} class="action-btn" onclick={toggleTopic}>{t.conversations.unified.topic_toggle_add}</button>
+            {:else if mode === 'new' && ntc.topic.shown}
+              <!-- The new thread has no rail yet: its toggle answers the
+                   shared new-thread predicate (`ntc`). -->
+              <button
+                data-testid={IDS.TOPIC_TOGGLE_BUTTON}
+                class="action-btn"
+                disabled={ntc.topic.disabled}
+                title={ntc.topic.reason ? resolveLocalized(ntc.topic.reason) : undefined}
+                onclick={toggleTopic}>{t.conversations.unified.topic_toggle_add}</button
+              >
+            {/if}
+            <label
+              class="action-btn attachment-field"
+              class:disabled={attachBlocked}
+              title={mode === 'new' && ntc.attach.reason ? resolveLocalized(ntc.attach.reason) : undefined}
+            >
               {t.conversations.unified.attachment_button}{#if activeCompose.attachments?.length} ({activeCompose.attachments.length}){/if}
               <input
                 data-testid={IDS.ATTACHMENT_BUTTON}
-                class:disabled={isGated(caps?.supports_attachments)}
-                data-disabled={String(isGated(caps?.supports_attachments))}
-                disabled={isGated(caps?.supports_attachments)}
+                class:disabled={attachBlocked}
+                data-disabled={String(attachBlocked)}
+                disabled={attachBlocked}
+                title={mode === 'new' && ntc.attach.reason ? resolveLocalized(ntc.attach.reason) : undefined}
                 type="file"
                 multiple
                 onchange={(e) => {
@@ -2364,10 +2485,22 @@
                 data-testid={IDS.DM_SEND_BUTTON}
                 class="action-btn primary"
                 use:offlineGate={{ kind: 'fauna.conversations.room.create' }}
+                disabled={ntc.send.disabled}
+                title={ntc.send.reason ? resolveLocalized(ntc.send.reason) : undefined}
                 onclick={send}>{t.common.send}</button
               >
             {:else}
-              <button data-testid={IDS.DM_SEND_BUTTON} class="action-btn primary" class:disabled={isGated(caps?.can_send)} data-disabled={String(isGated(caps?.can_send))} disabled={isGated(caps?.can_send)} onclick={send}>{t.common.send}</button>
+              <button
+                data-testid={IDS.DM_SEND_BUTTON}
+                class="action-btn primary"
+                class:disabled={sendBlocked}
+                data-disabled={String(sendBlocked)}
+                disabled={sendBlocked}
+                title={mode === 'new'
+                  ? (ntc.send.reason ? resolveLocalized(ntc.send.reason) : undefined)
+                  : (replySend?.reason ? resolveLocalized(replySend.reason) : undefined)}
+                onclick={send}>{t.common.send}</button
+              >
             {/if}
           </div>
         </div>
@@ -2438,12 +2571,17 @@
                roles, read or labelers to show, greyed or otherwise, so only
                the walk-out and the remove are painted. -->
           {#if detail.room?.policy}
+          <!-- A viewer the policy editor is absent for (the shared
+               `set_policy` answer) reads the two values as plain lines where
+               the pickers would sit (`ui/conversations.md` § Errors & edge
+               cases → *Controls this person can never use*). -->
+          {#if ctl.setPolicy.shown}
           <label class="room-row">
             <span>{t.conversations.unified.room_join_rule_label}</span>
             <select
               data-testid={IDS.ROOM_JOIN_RULE_SELECT}
               class="input"
-              disabled={!detail.capabilities?.can_set_policy}
+              disabled={ctl.setPolicy.disabled}
               value={roomJoinRuleToken(roomDraftJoinRule)}
               onchange={stageJoinRule}
             >
@@ -2458,7 +2596,7 @@
             <select
               data-testid={IDS.ROOM_HISTORY_POLICY_SELECT}
               class="input"
-              disabled={!detail.capabilities?.can_set_policy}
+              disabled={ctl.setPolicy.disabled}
               value={roomHistoryPolicyToken(roomDraftHistoryPolicy)}
               onchange={stageHistoryPolicy}
             >
@@ -2467,6 +2605,24 @@
               {/each}
             </select>
           </label>
+          {:else}
+            <div class="room-row">
+              <span>{t.conversations.unified.room_join_rule_label}</span>
+              <span
+                data-testid={IDS.ROOM_JOIN_RULE_LINE}
+                data-value={roomJoinRuleToken(roomDraftJoinRule)}
+                >{choiceLabel(roomJoinRuleEditorChoices(), roomJoinRuleToken(roomDraftJoinRule))}</span
+              >
+            </div>
+            <div class="room-row">
+              <span>{t.conversations.unified.room_history_policy_label}</span>
+              <span
+                data-testid={IDS.ROOM_HISTORY_POLICY_LINE}
+                data-value={roomHistoryPolicyToken(roomDraftHistoryPolicy)}
+                >{choiceLabel(roomHistoryPolicyEditorChoices(), roomHistoryPolicyToken(roomDraftHistoryPolicy))}</span
+              >
+            </div>
+          {/if}
 
           <!-- One row per member, indexed exactly like `thread-member-chip[i]`
                so a driver's index means the same person on both. Every state
@@ -2474,53 +2630,74 @@
                control may act on this row at all — is READ FROM THE DRAFT
                (`roomSettingsRows`), never re-derived here: the owner's own row
                and a non-Fauna row are ineligible, and the at-most-one-staged
-               hand-over rule lives in the draft too. -->
+               hand-over rule lives in the draft too. Each list is painted only
+               for a viewer whose role holds it (the shared `appoint_admins` /
+               `transfer_ownership` answers); a shown list keeps one row per
+               participant, the ineligible rows dead, so `[i]` stays the
+               chip's index. -->
+          {#if ctl.appointAdmins.shown || ctl.transferOwnership.shown}
           {#each detail.participant_displays ?? [] as disp, i}
             {@const row = roomSettingsRows[i]}
             <div class="room-row">
               <span>{disp}</span>
+              {#if ctl.appointAdmins.shown}
               <button
                 data-testid={IDS.ROOM_ADMIN_TOGGLE}
                 class="action-btn"
                 data-checked={row?.admin ? 'true' : 'false'}
-                disabled={!detail.capabilities?.can_appoint_admins || !row?.eligible}
+                disabled={ctl.appointAdmins.disabled || !row?.eligible}
                 onclick={() => stageAdmin(i)}
               >
                 {row?.admin
                   ? t.conversations.unified.room_admin_yes
                   : t.conversations.unified.room_admin_no}
               </button>
+              {/if}
+              {#if ctl.transferOwnership.shown}
               <button
                 data-testid={IDS.ROOM_OWNER_TRANSFER_BUTTON}
                 class="action-btn"
                 data-checked={row?.transfer ? 'true' : 'false'}
-                disabled={!detail.capabilities?.can_transfer_ownership || !row?.eligible}
+                disabled={ctl.transferOwnership.disabled || !row?.eligible}
                 onclick={() => stageTransfer(i)}
               >
                 {row?.transfer
                   ? t.conversations.unified.room_transfer_staged
                   : t.conversations.unified.room_transfer_mark}
               </button>
+              {/if}
             </div>
           {/each}
+          {/if}
 
           <!-- Whether the room's home nest reads it — painted only where the
-               draft carries a value to stage (a community room), greyed unless
-               the viewer may set policy, and STAGED: Save commits it as a
-               rotation with the nest in or out. -->
+               draft carries a value to stage (a community room), and STAGED:
+               Save commits it as a rotation with the nest in or out. A viewer
+               who may never set policy reads the same sentence as a line. -->
           {#if roomDraftNestRead !== null}
             <div class="room-row">
+              {#if ctl.setPolicy.shown}
               <button
                 data-testid={IDS.ROOM_NEST_READ_TOGGLE}
                 class="action-btn"
                 data-checked={roomDraftNestRead ? 'true' : 'false'}
-                disabled={!detail.capabilities?.can_set_policy}
+                disabled={ctl.setPolicy.disabled}
                 onclick={stageNestRead}
               >
                 {roomDraftNestRead
                   ? t.conversations.unified.room_nest_read_yes
                   : t.conversations.unified.room_nest_read_no}
               </button>
+              {:else}
+              <span
+                data-testid={IDS.ROOM_NEST_READ_LINE}
+                data-checked={roomDraftNestRead ? 'true' : 'false'}
+              >
+                {roomDraftNestRead
+                  ? t.conversations.unified.room_nest_read_yes
+                  : t.conversations.unified.room_nest_read_no}
+              </span>
+              {/if}
             </div>
           {/if}
 
@@ -2558,32 +2735,44 @@
             <RoomLabelerRows
               {manager}
               draft={roomDraft}
-              canSetPolicy={!!detail.capabilities?.can_set_policy}
+              setPolicy={ctl.setPolicy}
               ontoggle={stageLabeler}
             />
           {/if}
 
           <div class="overlay-actions">
             <button class="action-btn" onclick={cancelRoomSettings}>{t.common.cancel}</button>
+            <!-- Absent for a member, who opens this editor to read it and to
+                 leave: every staged edit behind Save is owner-or-admin work. -->
+            {#if ctl.setPolicy.shown}
             <button
               data-testid={IDS.ROOM_SETTINGS_SAVE_BUTTON}
               class="action-btn primary"
-              disabled={!detail.capabilities?.can_set_policy}
+              disabled={ctl.setPolicy.disabled}
               onclick={saveRoomSettings}>{t.common.save}</button
             >
+            {/if}
           </div>
           {/if}
 
-          <!-- The walk-out, below Save and OUTSIDE the staged set. Greyed —
-               never hidden — for the owner, who hands the room over first. -->
+          <!-- The walk-out, below Save and OUTSIDE the staged set: the shared
+               `leave_room` answer. Blocked for the owner — painted dead with
+               the hand-over as its reason, the hand-over controls live above
+               it — and absent where the room has no walk-out. -->
+          {#if ctl.leaveRoom.shown}
           <div class="overlay-actions">
             <button
               data-testid={IDS.ROOM_LEAVE_BUTTON}
               class="action-btn"
-              disabled={!detail.capabilities?.can_leave_room}
+              disabled={ctl.leaveRoom.disabled}
+              title={ctl.leaveRoom.reason ? resolveLocalized(ctl.leaveRoom.reason) : undefined}
               onclick={openRoomLeave}>{t.conversations.unified.room_leave}</button
             >
+            {#if ctl.leaveRoom.reason}
+              <span class="muted">{resolveLocalized(ctl.leaveRoom.reason)}</span>
+            {/if}
           </div>
+          {/if}
           {#if roomLeaveConfirm}
             <div class="overlay-actions">
               <button class="action-btn" onclick={() => (roomLeaveConfirm = false)}
@@ -2592,7 +2781,7 @@
               <button
                 data-testid={IDS.ROOM_LEAVE_CONFIRM}
                 class="action-btn primary"
-                disabled={!detail.capabilities?.can_leave_room}
+                disabled={ctl.leaveRoom.disabled}
                 use:offlineGate={{ kind: 'fauna.conversations.room.leave' }}
                 onclick={confirmRoomLeave}>{t.common.leave}</button
               >
@@ -2600,17 +2789,20 @@
           {/if}
 
           <!-- The local remove, beside the walk-out and outside the staged
-               set. Greyed unless `capabilities.supports_local_remove` (a
-               bridged room today); its confirm is immediate. -->
+               set: the shared `local_remove` answer — painted on a bridged
+               room, absent on every rail without the act; its confirm is
+               immediate. -->
+          {#if ctl.localRemove.shown}
           <div class="overlay-actions">
             <button
               data-testid={IDS.ROOM_REMOVE_BUTTON}
               class="action-btn"
-              disabled={!detail.capabilities?.supports_local_remove}
+              disabled={ctl.localRemove.disabled}
               onclick={openRoomRemove}>{t.conversations.unified.room_remove}</button
             >
           </div>
-          {#if roomRemoveConfirm}
+          {/if}
+          {#if roomRemoveConfirm && ctl.localRemove.shown}
             <div class="overlay-actions">
               <button class="action-btn" onclick={() => (roomRemoveConfirm = false)}
                 >{t.common.cancel}</button
@@ -2620,7 +2812,7 @@
                 class="action-btn primary"
                 use:offlineGate={{
                   kind: 'fauna.bridges.conversation.rooms.remove',
-                  disabled: !detail.capabilities?.supports_local_remove,
+                  disabled: ctl.localRemove.disabled,
                 }}
                 onclick={confirmRoomRemove}>{t.conversations.unified.room_remove_confirm}</button
               >
@@ -2700,7 +2892,6 @@
   .chip { background: var(--bg-hover); border-radius: 999px; padding: 0.1rem 0.5rem; font-size: 0.75rem; display: inline-flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; }
   /* Only a membership-change-capable chip is Remove, so only that one points. */
   .chip.removable { cursor: pointer; border: none; color: inherit; font-family: inherit; }
-  .chip.greyed { opacity: 0.55; cursor: not-allowed; }
   /* The room's class statement, on the thread header and on the new-thread
      picker alike — a quiet caption, like linux's dim caption label. */
   .room-class { font-size: 0.75rem; color: var(--text-muted); }

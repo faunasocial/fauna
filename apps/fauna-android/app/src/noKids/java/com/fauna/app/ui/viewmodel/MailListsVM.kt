@@ -66,7 +66,12 @@ class MailListsVM @Inject constructor(
     fun delete(listIdHex: String) = dispatch(MailListsAction.Delete(listIdHex = listIdHex))
 
     private fun dispatch(action: MailListsAction) {
-        val m = machine ?: return
+        // Rule 7 (ui/README.md § Offer only what is possible): a gesture whose
+        // machine was never built says so on `error-message`, never silently.
+        val m = machine ?: run {
+            errorMessage.value = api.mailUnbuiltRefusal()
+            return
+        }
         viewModelScope.launch {
             try {
                 m.dispatch(action)

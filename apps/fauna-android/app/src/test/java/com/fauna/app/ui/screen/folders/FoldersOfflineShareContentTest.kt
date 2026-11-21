@@ -14,6 +14,8 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
+import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
 
 /**
  * Compose-level coverage for the co-present offline-share affordance on the
@@ -37,13 +39,17 @@ class FoldersOfflineShareContentTest {
 
     private val ownCode = "ab".repeat(32) + "-c0a80105d431"
 
+    // The shared answer an empty code gives (`OfflineShareView::begin_possibility`).
+    private val codeNeeded: Possibility =
+        Possibility.Blocked(LocalizedText("folders.offline_share_code_needed", emptyMap()))
+
     private fun paint(
         panel: OfflinePanel = OfflinePanel.CLOSED,
         peerCode: String = "",
         statusText: String = "Not started",
         codeHint: String? = null,
-        canBegin: Boolean = false,
-        canExpect: Boolean = false,
+        beginAnswer: Possibility = codeNeeded,
+        expectAnswer: Possibility = codeNeeded,
     ) = OfflineSharePaint(
         panel = panel,
         ownCode = ownCode,
@@ -52,8 +58,8 @@ class FoldersOfflineShareContentTest {
         codeHint = codeHint,
         showsEntryButtons = panel == OfflinePanel.CLOSED,
         showsCodeWidgets = panel != OfflinePanel.CLOSED,
-        canBegin = canBegin,
-        canExpect = canExpect,
+        beginAnswer = beginAnswer,
+        expectAnswer = expectAnswer,
         showsCancel = panel != OfflinePanel.CLOSED,
     )
 
@@ -136,7 +142,7 @@ class FoldersOfflineShareContentTest {
     fun beginFollowsTheSharedGateAndFires() {
         var begun = false
         render(
-            offlineShare = paint(panel = OfflinePanel.INITIATE, peerCode = "cd".repeat(32), canBegin = true),
+            offlineShare = paint(panel = OfflinePanel.INITIATE, peerCode = "cd".repeat(32), beginAnswer = Possibility.Possible),
             actions = FoldersActions(onBeginOfflineShare = { begun = true }),
         )
         node("offline-share-begin-button").performScrollTo().assertIsEnabled().performClick()
@@ -144,10 +150,35 @@ class FoldersOfflineShareContentTest {
     }
 
     @Test
+    fun aBlockedBeginPaintsTheSharedReasonAndRefusesThePress() {
+        var begun = false
+        render(
+            offlineShare = paint(panel = OfflinePanel.INITIATE),
+            actions = FoldersActions(onBeginOfflineShare = { begun = true }),
+        )
+        node("offline-share-begin-button").performScrollTo().assertIsNotEnabled()
+        composeTestRule.onNodeWithText("Type the other person's code first.").assertExists()
+        assertEquals(false, begun)
+    }
+
+    @Test
+    fun anAbsentAnswerComposesNoButton() {
+        render(offlineShare = paint(panel = OfflinePanel.INITIATE, beginAnswer = Possibility.Absent))
+        node("offline-share-begin-button").assertDoesNotExist()
+    }
+
+    @Test
+    fun aBlockedExpectPaintsTheSharedReason() {
+        render(offlineShare = paint(panel = OfflinePanel.RECEIVE))
+        node("offline-receive-expect-button").performScrollTo().assertIsNotEnabled()
+        composeTestRule.onNodeWithText("Type the other person's code first.").assertExists()
+    }
+
+    @Test
     fun theRecipientPanelShowsExpectNotBegin() {
         var expected = false
         render(
-            offlineShare = paint(panel = OfflinePanel.RECEIVE, peerCode = "cd".repeat(32), canExpect = true),
+            offlineShare = paint(panel = OfflinePanel.RECEIVE, peerCode = "cd".repeat(32), expectAnswer = Possibility.Possible),
             actions = FoldersActions(onExpectOfflineShare = { expected = true }),
         )
         node("offline-share-own-code").performScrollTo().assertTextEquals(ownCode)

@@ -15,6 +15,8 @@ private final class RecordingTrainer: ModerationTraining, @unchecked Sendable {
     private(set) var corrections: [(contentId: String, isSpam: Bool)] = []
     private(set) var standaloneTrains = 0
     var failure: String?
+    /// A failing local-row (standalone) train dispatch.
+    var standaloneFailure: String?
 
     struct Failure: Error, LocalizedError {
         let message: String
@@ -29,9 +31,27 @@ private final class RecordingTrainer: ModerationTraining, @unchecked Sendable {
 
     func trainSpamModelClient(text: String, isSpam: Bool) async throws -> SpamModelClientWrite {
         standaloneTrains += 1
+        if let standaloneFailure { throw Failure(message: standaloneFailure) }
         return SpamModelClientWrite(sealed: true, sampleCount: 1)
     }
 }
+
+/// The conversations session's local-detection half, recorded.
+private final class RecordingDetections: ModerationLocalDetections {
+    var body: String? = "retained text"
+    private(set) var removed: [String] = []
+
+    func moderationLocalDetections() -> [LocalDetection] { [] }
+    func moderationMessageBody(contentId: String) -> String? { body }
+    func moderationRemoveLocalDetection(contentId: String) -> Bool {
+        removed.append(contentId)
+        return true
+    }
+}
+
+private let localRow = QueueRow(contentId: "content-3", contentType: "post",
+                                category: "spam", confidencePerMille: 900, action: nil,
+                                timestamp: 0, source: .local)
 
 private let serverRow = QueueRow(contentId: "content-1", contentType: "post",
                                  category: "spam", confidencePerMille: 900, action: 1,
@@ -74,6 +94,56 @@ struct ModerationQueueCorrectionTests {
         await vm.correct(row: serverRow)
 
         #expect(vm.errorMessage?.contains("no mail settings machine") == true)
+    }
+}
+
+@Suite("ModerationQueueVM local-row correction")
+@MainActor
+struct ModerationQueueLocalCorrectionTests {
+    @Test("a local-row correction trains first, then drops the flag")
+    func trainsThenDropsTheFlag() async {
+        let trainer = RecordingTrainer()
+        let detections = RecordingDetections()
+        let vm = ModerationQueueVM()
+        vm.seedMailSettingsForTest(trainer)
+        vm.seedLocalDetectionsForTest(detections)
+
+        await vm.correct(row: localRow)
+
+        #expect(trainer.standaloneTrains == 1)
+        #expect(detections.removed == ["content-3"])
+        #expect(vm.errorMessage == nil)
+    }
+
+    @Test("a failed train dispatch keeps the flag and says so on error-message")
+    func failedTrainKeepsTheFlag() async {
+        let trainer = RecordingTrainer()
+        trainer.standaloneFailure = "train dispatch failed"
+        let detections = RecordingDetections()
+        let vm = ModerationQueueVM()
+        vm.seedMailSettingsForTest(trainer)
+        vm.seedLocalDetectionsForTest(detections)
+
+        await vm.correct(row: localRow)
+
+        #expect(detections.removed.isEmpty, "the flag stays so the correction can be tried again")
+        #expect(vm.errorMessage?.contains("train dispatch failed") == true)
+    }
+
+    @Test("no retained text: the flag is dropped with no train and no error")
+    func noTextDropsTheFlagSilently() async {
+        let trainer = RecordingTrainer()
+        let detections = RecordingDetections()
+        detections.body = nil
+        let vm = ModerationQueueVM()
+        vm.seedMailSettingsForTest(trainer)
+        vm.seedLocalDetectionsForTest(detections)
+
+        await vm.correct(row: localRow)
+
+        #expect(trainer.standaloneTrains == 0)
+        #expect(detections.removed == ["content-3"])
+        #expect(vm.errorMessage == nil)
     }
 }
 

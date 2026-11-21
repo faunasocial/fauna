@@ -228,12 +228,17 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
     match action {
         Action::Submit => {
             let manager = app.search.manager.clone()?;
-            let query = app.search.query_buffer.trim().to_string();
-            // The empty-query guard every app's search bar shares. Checked
-            // here as well as in the manager so no op is even spawned.
-            if query.is_empty() {
+            // The shared predicate the submit button is painted from: a blank
+            // query refuses with its reason on the page's error-message, never
+            // a silent no-op (`search.md` § Errors & edge cases).
+            if app.errors.refuse(
+                Page::Search,
+                &fauna_client_search::query_possibility(&app.search.query_buffer),
+            ) {
                 return None;
             }
+            app.errors.remove(&Page::Search);
+            let query = app.search.query_buffer.trim().to_string();
             let type_filter = manager.snapshot().type_filter;
             Some(Op::Run {
                 manager,
@@ -244,11 +249,11 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         Action::SetTypeFilter(token) => {
             let manager = app.search.manager.clone()?;
             // Re-fires using the LIVE buffer text (linux's `fire_search` always
-            // reads the entry's current text), not the last-fired query.
+            // reads the entry's current text), not the last-fired query. A
+            // blank buffer goes to the manager too, which holds the chosen
+            // token for the next submit (or re-fires the last query) rather
+            // than dropping it (`search.md` § User actions).
             let query = app.search.query_buffer.trim().to_string();
-            if query.is_empty() {
-                return None;
-            }
             Some(Op::Run {
                 manager,
                 query,
@@ -512,12 +517,15 @@ pub fn elements(app: &App) -> Vec<Element> {
             )
             .labelled(search_page::PLACEHOLDER),
         );
-        out.push(Element::gesture_button(
-            ids::SEARCH_SUBMIT_BUTTON,
-            t::SEARCH,
-            true,
-            Gesture::Search(Action::Submit),
-        ));
+        out.push(
+            Element::gesture_button(
+                ids::SEARCH_SUBMIT_BUTTON,
+                t::SEARCH,
+                true,
+                Gesture::Search(Action::Submit),
+            )
+            .possible(fauna_client_search::query_possibility(&st.query_buffer)),
+        );
         out.push(Element::gesture_button(
             ids::SEARCH_CLEAR_BUTTON,
             search_page::CLEAR,
@@ -863,6 +871,24 @@ mod tests {
             panic!("a filter change must produce a Run op")
         };
         assert_eq!(query, "hello");
+        assert_eq!(type_filter, "post");
+    }
+
+    /// A filter chosen over a BLANK buffer still reaches the manager — which
+    /// holds the token for the next submit — instead of being dropped here.
+    #[test]
+    fn a_filter_chosen_over_a_blank_buffer_reaches_the_manager() {
+        let mut app = crate::app::tests::test_app();
+        app.search.manager = Some(offline_manager());
+        let op = apply_local(&mut app, Action::SetTypeFilter("post".into()))
+            .expect("a blank buffer still carries the token to the manager");
+        let Op::Run {
+            query, type_filter, ..
+        } = op
+        else {
+            panic!("a filter change must produce a Run op")
+        };
+        assert_eq!(query, "");
         assert_eq!(type_filter, "post");
     }
 

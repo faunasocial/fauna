@@ -1325,6 +1325,19 @@ class WindowsBridgeDriver(HttpBridgeDriver):
             "FAUNA_E2E_CUSTODY_HOLD_FILE",
             os.path.join(self._local_appdata, "custody-hold"),
         )
+        # The e2e outbox drain hold (`fauna_account_plane::outbox`'s
+        # `outbox_drain_held`, the compile-gated `FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE`
+        # seam), as linux/tui/apple set it: a path in this launch's scratch dir that
+        # does not exist, so the outbox drains as usual until a test creates the file
+        # (`helpers/outbox_drain.py::hold_outbox_drain`). A file, not the in-process
+        # flag, because on windows the account pump may run in the spawned
+        # `fauna-sync-agent.exe`, which inherits this environment, as well as in the
+        # app, whose MLS drain the same file holds. A caller-supplied override wins.
+        # Read back via `outbox_drain_hold_file()`.
+        env.setdefault(
+            "FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE",
+            os.path.join(self._local_appdata, "outbox-drain-hold"),
+        )
         #: Same contract as `_resolved_credential_dir` above — windows is the one
         #: client whose `launch_config` also has to carry a data dir (its relaunch
         #: is a same-device restart), so an attaching helper needs to read it back.
@@ -1567,6 +1580,13 @@ class WindowsBridgeDriver(HttpBridgeDriver):
         `launch()`. Driven through `helpers/folder_content.py::hold_custody_reread`."""
         env = (self._session_body or {}).get("environment", {})
         return env.get("FAUNA_E2E_CUSTODY_HOLD_FILE")
+
+    def outbox_drain_hold_file(self) -> str | None:
+        """The file whose existence holds this launch's outbox drain
+        (`FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE`, set in `launch()`); None before
+        `launch()`. Driven through `helpers/outbox_drain.py`."""
+        env = (self._session_body or {}).get("environment", {})
+        return env.get("FAUNA_E2E_OUTBOX_DRAIN_HOLD_FILE")
 
     def launch_environment(self) -> dict | None:
         """This driver launches — and relaunches — by POSTing ``_session_body``,

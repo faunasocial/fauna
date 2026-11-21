@@ -18,6 +18,7 @@
 //! The shell (`super`) owns the client, op and fold; this file is paint only.
 
 use fauna_client_web::{SiteLinkDisabledReason, SiteLinkView, SubdomainDisabledReason};
+use fauna_core::possibility::{Possibility, ReadState};
 use fauna_i18n::strings::web_publish as wp;
 use fauna_i18n::strings::web_settings as t;
 use fauna_ui_ids as ids;
@@ -56,6 +57,22 @@ pub(crate) fn site_link(state: &SettingsState) -> SiteLinkView {
 /// [`fauna_client_web::disabled_reason_text`] decision (previously hand-rolled identically here and on linux).
 fn disabled_reason_text(reason: Option<SiteLinkDisabledReason>) -> String {
     fauna_client_web::disabled_reason_text(reason).resolve(fauna_i18n::strings::lookup)
+}
+
+/// Where the page's hydrate stands, for rule 5: no confirmed view yet is
+/// pending, or failed when the page holds an error; a view is resolved.
+pub(super) fn web_read_state(state: &SettingsState) -> ReadState {
+    match (&state.web.view, &state.web.error) {
+        (Some(_), _) => ReadState::Resolved,
+        (None, Some(e)) if !e.is_empty() => ReadState::Failed,
+        (None, _) => ReadState::Pending,
+    }
+}
+
+/// `web-settings-subdomain-toggle`'s answer — the shared
+/// [`fauna_client_web::subdomain_toggle_possibility`] over this page's read.
+pub(super) fn subdomain_toggle_answer(state: &SettingsState) -> Possibility {
+    fauna_client_web::subdomain_toggle_possibility(web_read_state(state), state.web.view.as_ref())
 }
 
 pub(super) fn web_elements(state: &SettingsState) -> Vec<Element> {
@@ -99,11 +116,12 @@ pub(super) fn web_elements(state: &SettingsState) -> Vec<Element> {
         // makes reading it back a round-trip proof rather than an echo of the
         // gesture (`test_web_authoring.py` § docstring).
         .attr("state", if enabled { "on" } else { "off" })
-        // Disabled until the nest-confirmed view is in: `ToggleWebSubdomain`
-        // flips against that view, so before hydrate a click would be dropped
-        // silently. A disabled control is refused loudly by the automation
-        // layer (`apple:3580` found this on macOS; this is the same gate).
-        .enabled(view.is_some()),
+        // The shared answer (`docs/goal/ui/README.md` § Offer only what is
+        // possible): not enabled before the hydrate resolves, absent on a nest
+        // with no serving domain, blocked with the step on no or a reserved
+        // handle. The element seam paints it; `ToggleWebSubdomain` asks it
+        // again before it writes.
+        .possible(subdomain_toggle_answer(state)),
         Element::chrome(t::SUBDOMAIN_TOGGLE_SUBTITLE),
     ];
 
@@ -164,6 +182,7 @@ fn published_posts_elements(state: &SettingsState) -> Vec<Element> {
     let web = &state.web;
     let link = site_link(state);
     let origin = link.origin.as_deref();
+    let copy_answer = fauna_client_web::site_link_copy_possibility(&link);
     let any_gated = web.posts.iter().any(|p| p.gated_tier.is_some());
 
     let mut els = vec![
@@ -227,7 +246,8 @@ fn published_posts_elements(state: &SettingsState) -> Vec<Element> {
                 matches!(&web.copied, Some(CopiedLink::Web { index, .. }) if *index == i),
                 &web.copied,
             )
-            .within(ids::WEB_PUBLISHED_POST_ITEM, i),
+            .within(ids::WEB_PUBLISHED_POST_ITEM, i)
+            .possible(copy_answer.clone()),
         );
         // Gated rows only: an ungated post has no paywalled body to hand out, so
         // the affordance would mint a token for nothing.
@@ -244,7 +264,8 @@ fn published_posts_elements(state: &SettingsState) -> Vec<Element> {
                     matches!(&web.copied, Some(CopiedLink::Paywall { index, .. }) if *index == i),
                     &web.copied,
                 )
-                .within(ids::WEB_PUBLISHED_POST_ITEM, i),
+                .within(ids::WEB_PUBLISHED_POST_ITEM, i)
+                .possible(copy_answer.clone()),
             );
         }
         els.push(
@@ -276,7 +297,9 @@ fn published_posts_elements(state: &SettingsState) -> Vec<Element> {
 }
 
 /// One copy affordance: disabled (with no `value`) when there is no serving
-/// origin, and carrying the exact string it put on the clipboard once it has
+/// origin — the caller also declares the shared
+/// [`fauna_client_web::site_link_copy_possibility`] answer, so the seam and the
+/// walk read the same reason — and carrying the exact string it put on the clipboard once it has
 /// fired.
 ///
 /// The `copied` attr is what lets a test assert the copied **contents** rather
@@ -494,10 +517,57 @@ mod tests {
             .find(|e| e.id == "web-settings-subdomain-toggle")
             .expect("toggle painted");
         assert_eq!(attr(toggle, "state"), Some("off"));
-        // An un-hydrated page has nothing true to flip from, so the toggle is
-        // painted disabled and an early click is refused loudly rather than
-        // dropped (`apple:3580`'s shape, lifted here).
-        assert!(!toggle.enabled, "toggle must be disabled until hydrated");
+        // An un-hydrated page has nothing true to flip from, so the toggle
+        // declares the still-loading answer — the possibility seam paints it
+        // disabled with that reason — and an early click is refused loudly
+        // rather than dropped (`apple:3580`'s shape, lifted here).
+        assert_eq!(
+            toggle.possibility,
+            Some(Possibility::blocked(
+                fauna_core::localized::LocalizedText::key("common.still_loading")
+            )),
+            "toggle must not be live until hydrated"
+        );
+    }
+
+    fn toggle_answer(view: SubdomainView) -> Option<Possibility> {
+        let app = state_with(view);
+        web_elements(&app.settings)
+            .into_iter()
+            .find(|e| e.id == "web-settings-subdomain-toggle")
+            .expect("toggle painted")
+            .possibility
+    }
+
+    /// No serving domain → switching on is absent (the seam drops the toggle);
+    /// no handle → blocked with the step (`web-content-hosting.md`
+    /// § Published-post management → the subdomain toggle).
+    #[test]
+    fn the_toggle_is_absent_without_a_domain_and_blocked_without_a_handle() {
+        assert_eq!(
+            toggle_answer(fauna_client_web::subdomain_view(false, Some("alice"), "")),
+            Some(Possibility::Absent)
+        );
+        assert_eq!(
+            toggle_answer(fauna_client_web::subdomain_view(false, None, "web.test")),
+            Some(Possibility::blocked(
+                fauna_core::localized::LocalizedText::key("web_settings.subdomain_no_handle")
+            ))
+        );
+    }
+
+    /// A press before the hydrate is refused out loud on the page's error.
+    #[test]
+    fn a_toggle_press_before_the_hydrate_is_refused_with_its_reason() {
+        let mut app = crate::app::tests::test_app();
+        app.settings.sub = SubPage::Web;
+        app.settings.nest = Some(nest_for_test());
+        let op = crate::settings::apply_local(&mut app, Action::ToggleWebSubdomain);
+        assert!(op.is_none());
+        assert_eq!(
+            app.settings.web.error.as_deref(),
+            Some(fauna_i18n::strings::common::STILL_LOADING)
+        );
     }
 
     /// The toggle becomes actionable once the nest-confirmed view is in.

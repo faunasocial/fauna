@@ -5,6 +5,8 @@ using System.Linq;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using FaunaApp.Core.Helpers;
+using FaunaApp.Core.Logs;
 using FaunaApp.Core.Services;
 using uniffi.fauna_atproto_settings_machine;
 
@@ -62,6 +64,9 @@ public partial class AtprotoViewModel : ViewModelBase
         public bool Checked { get; init; }
         public bool Enabled { get; init; }
         public string GateMarker { get; init; } = string.Empty;
+        /// <summary>The reason the rung's answer gives while it is blocked
+        /// (<see cref="RungAnswer"/>), resolved; <c>null</c> while it is possible.</summary>
+        public string? Reason { get; init; }
     }
 
     /// <summary>The four rungs, in the catalog's own ladder order. Rebuilt on every
@@ -180,6 +185,53 @@ public partial class AtprotoViewModel : ViewModelBase
     /// in <c>App()</c> before any VM is constructed, so this resolves for real).</summary>
     [ObservableProperty] private string _gateReason = string.Empty;
     [ObservableProperty] private bool _showGateReason;
+
+    // ── What the page may offer now (ui/README.md § Offer only what is possible;
+    //    ui/atproto.md § Errors & edge cases) ─────────────────────────────────────
+    //
+    // Every answer is the shared machine's own (`rung_possibility`,
+    // `authorize_possibility` over UniFFI) — the page never re-derives a gate from
+    // the snapshot's deprecated `hosted_allowed` fields. The one constant below is for
+    // the moments NO machine can answer yet (before it is built and has read the
+    // status once): nothing is offered on a guess. android's `AtprotoPossibilities`
+    // and tui's `rung_possibility` paint the same answer then.
+
+    private static readonly uniffi.fauna_core.Possibility StillLoading =
+        new uniffi.fauna_core.Possibility.Blocked(
+            new uniffi.fauna_core.LocalizedText("common.still_loading", new Dictionary<string, string>()));
+
+    /// <summary>Whether <see cref="LoadAsync"/> has built the machine and run its first
+    /// status read (successful or not — a failed read is the machine's own
+    /// <c>common.load_failed</c> answer). Until then every rung answers
+    /// <see cref="StillLoading"/>.</summary>
+    private bool _machineAnswers;
+
+    /// <summary>The machine could not be built (an unreadable identity key on this
+    /// device): there is nothing on the page that could succeed, so it paints one
+    /// <c>atproto_settings.page_unavailable</c> line in place of every control
+    /// (ui/atproto.md § Errors &amp; edge cases; ui/README.md rule 7).</summary>
+    [ObservableProperty] private bool _unavailable;
+
+    /// <summary>Each distinct reason a blocked rung gives, once, in ladder order — the
+    /// reason within eyeshot rule 2 owes a greyed rung. The hosted gate's own line
+    /// (<see cref="GateReason"/>) is not repeated here.</summary>
+    public ObservableCollection<string> RungReasonLines { get; } = new();
+
+    /// <summary>The answer for the rung issuing <paramref name="level"/>: the machine's
+    /// <c>rung_possibility</c> once it answers (blocked <c>common.still_loading</c> /
+    /// <c>common.load_failed</c> until its status read resolves, the hosted gate's
+    /// reason on entering a gated rung), <see cref="StillLoading"/> before.
+    /// <see cref="SelectLevelAsync"/>'s machine call refuses with the same reason.</summary>
+    internal uniffi.fauna_core.Possibility RungAnswer(string level) =>
+        _machine is not null && _machineAnswers ? _machine.RungPossibility(level) : StillLoading;
+
+    /// <summary><c>atproto-delegation-authorize</c>'s answer: the machine's
+    /// <c>authorize_possibility</c> — blocked with the no-identity reason while this app
+    /// holds no signing identity (known at construction), so the grant is not opened to
+    /// fail at its submit (rule 4); <see cref="StillLoading"/> before the machine exists.
+    /// The machine's <c>authorize_external_apps</c> refuses with the same reason.</summary>
+    internal PossibilityPaint AuthorizeAnswer() =>
+        PossibilityPaint.Of(_machine is not null ? _machine.AuthorizePossibility() : StillLoading);
 
     // ── The transition card (§ Layout & flow item 2) ─────────────────────────
 
@@ -383,9 +435,33 @@ public partial class AtprotoViewModel : ViewModelBase
             // Build-once-per-session, not per-page-visit (AtprotoSettingsMachineHost's
             // doc comment: a fresh machine on every navigation silently resets the
             // S4-C custody check's debounce, the per-visit-rebuild bug android hit).
-            _machine ??= await AtprotoSettingsMachineHost.Instance.GetOrBuildAsync(_rpc, new NoopObserver());
-            await _machine.Refresh();
-            Render();
+            if (_machine is null)
+            {
+                try
+                {
+                    _machine = await AtprotoSettingsMachineHost.Instance.GetOrBuildAsync(_rpc, new NoopObserver());
+                }
+                catch (Exception ex)
+                {
+                    // Nothing on this page can succeed without the machine: the one
+                    // unavailable line replaces every control (rule 7), never a page of
+                    // rungs whose presses would drop on the `_machine is null` guard.
+                    ShellLog.Warn(nameof(AtprotoViewModel), $"machine build failed: {ex.GetType().Name}: {ex.Message}");
+                    Unavailable = true;
+                    return;
+                }
+            }
+            try
+            {
+                await _machine.Refresh();
+            }
+            finally
+            {
+                // Read once, answered or failed: from here the rungs are the machine's
+                // own answer (`common.load_failed` after a failed read).
+                _machineAnswers = true;
+                Render();
+            }
         }
         catch (Exception ex)
         {
@@ -466,7 +542,11 @@ public partial class AtprotoViewModel : ViewModelBase
             // `level.StartsWith("hosted")` sniff over a wire string this VM did
             // not define.
             var gated = opt.@hosted && !snap.@hostedAllowed;
-            var enabled = !gated || isChecked;
+            // The `reason` marker the e2e reads stays the hosted gate's verdict
+            // (`depth_gate_marker`); whether the rung can be pressed is the machine's
+            // answer (rule 6), which also blocks every rung until the status read.
+            var marker = !gated || isChecked ? GateMarkerOk : GateMarkerGated;
+            var answer = PossibilityPaint.Of(RungAnswer(opt.@level));
             DepthRungs.Add(new DepthRungRowVm
             {
                 Level = opt.@level,
@@ -474,13 +554,22 @@ public partial class AtprotoViewModel : ViewModelBase
                 Title = Strings.Resolve(opt.@title),
                 Description = Strings.Resolve(opt.@description),
                 Checked = isChecked,
-                Enabled = enabled,
-                GateMarker = enabled ? GateMarkerOk : GateMarkerGated,
+                Enabled = answer.IsPossible,
+                GateMarker = marker,
+                Reason = answer.Reason,
             });
         }
 
         GateReason = snap.@hostedGateReason is null ? string.Empty : Strings.Resolve(snap.@hostedGateReason);
         ShowGateReason = !snap.@hostedAllowed && GateReason.Length > 0;
+        // A greyed rung owes its reason on the same surface (rule 2): one line per
+        // distinct reason; the hosted gate's line above is not painted twice.
+        RungReasonLines.Clear();
+        foreach (var reason in DepthRungs.Select(r => r.Reason).OfType<string>().Distinct())
+        {
+            if (ShowGateReason && reason == GateReason) continue;
+            RungReasonLines.Add(reason);
+        }
 
         // Transition card — lines verbatim from the machine.
         CardLines.Clear();

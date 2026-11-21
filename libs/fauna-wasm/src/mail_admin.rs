@@ -46,10 +46,11 @@ use fauna_client_mail_settings::{
     BridgeApprovalAction, BridgeApprovalMachine, BridgeConfirm, CaldavPolicyAction,
     CaldavPolicyMachine, CarddavPolicyAction, CarddavPolicyMachine, CredentialKind,
     DmarcReportsAction, DmarcReportsMachine, ForwarderAction, ForwarderMachine, LocalDomainAction,
-    LocalDomainMachine, MailAliasesAction, MailAliasesMachine, MailExportAction, MailExportMachine,
-    MailImportAction, MailImportMachine, MailListMembersAction, MailListMembersMachine,
-    MailListsAction, MailListsMachine, MailPolicyAction, MailPolicyMachine, MailSettingsAction,
-    MailSettingsMachine, MailSpamAction, MailSpamMachine, WebdavPolicyAction, WebdavPolicyMachine,
+    LocalDomainMachine, LocalDomainView, LocalDomainsSnapshot, MailAliasesAction,
+    MailAliasesMachine, MailExportAction, MailExportMachine, MailImportAction, MailImportMachine,
+    MailListMembersAction, MailListMembersMachine, MailListsAction, MailListsMachine,
+    MailPolicyAction, MailPolicyMachine, MailSettingsAction, MailSettingsMachine, MailSpamAction,
+    MailSpamMachine, WebdavPolicyAction, WebdavPolicyMachine,
 };
 use fauna_core::identity::ActorKeypair;
 use fauna_rpc_wasm::WsRpcClient as InnerClient;
@@ -341,6 +342,205 @@ impl WasmDnsManagementMachine {
     }
 }
 
+// ── admin-dns `Possibility` faces (`docs/goal/ui/README.md` § Offer only what
+// is possible; the ruling is `docs/goal/behavior/dns-management.md` § Errors &
+// edge cases) ───────────────────────────────────────────────────────────────
+//
+// The wasm twins of the UniFFI faces in `fauna-ffi`'s `mail_admin`: each
+// forwards one shared answer (`fauna_client_dns::affordances`,
+// `fauna_client_mail_settings::domain_forms`) over the snapshot the page
+// already holds — the machine's own `snapshot()` JSON handed back, `null` until
+// that read resolved — and returns the `Possibility` JSON
+// (`{state: "possible"}` / `{state: "blocked", reason}` / `{state: "absent"}`)
+// the SPA paints with `paintPossibility`.
+
+fn from_js_opt<T: serde::de::DeserializeOwned>(v: JsValue) -> Result<Option<T>, JsValue> {
+    if v.is_null() || v.is_undefined() {
+        return Ok(None);
+    }
+    serde_wasm_bindgen::from_value(v)
+        .map(Some)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// `admin-dns-domain-mode` on `domain`, switching to `managed`.
+#[wasm_bindgen(js_name = dnsSetModePossibility)]
+pub fn dns_set_mode_possibility(
+    dns: JsValue,
+    domain: &str,
+    managed: bool,
+) -> Result<JsValue, JsValue> {
+    let dns: Option<fauna_client_dns::DnsSnapshot> = from_js_opt(dns)?;
+    to_js(&match dns {
+        Some(dns) => dns.set_mode_possibility(domain, managed),
+        None => fauna_core::possibility::Possibility::once_read(false),
+    })
+}
+
+/// `admin-dns-manage-all-toggle`, switching to `managed`, over the DNS read and
+/// the active domain names (`null` = that read has not resolved).
+#[wasm_bindgen(js_name = dnsManageAllPossibility)]
+pub fn dns_manage_all_possibility(
+    dns: JsValue,
+    active_domains: JsValue,
+    managed: bool,
+) -> Result<JsValue, JsValue> {
+    let dns: Option<fauna_client_dns::DnsSnapshot> = from_js_opt(dns)?;
+    let active: Option<Vec<String>> = from_js_opt(active_domains)?;
+    to_js(&fauna_client_dns::affordances::manage_all_possibility(
+        dns.as_ref(),
+        active.as_deref(),
+        managed,
+    ))
+}
+
+/// `admin-dns-add-credential-submit-button`: `values` is what has been typed
+/// into each of the picked provider's DNS fields (blank when untouched).
+#[wasm_bindgen(js_name = dnsCredentialDraftPossibility)]
+pub fn dns_credential_draft_possibility(
+    provider_picked: bool,
+    values: Vec<String>,
+) -> Result<JsValue, JsValue> {
+    let fields: Vec<(&str, &str)> = values.iter().map(|v| ("", v.as_str())).collect();
+    to_js(&fauna_client_dns::affordances::credential_draft_possibility(provider_picked, &fields))
+}
+
+/// `admin-dns-cert-issue-button` on `domain`, over the snapshot's `pending_cert`.
+#[wasm_bindgen(js_name = dnsCertIssuePossibility)]
+pub fn dns_cert_issue_possibility(pending: JsValue, domain: &str) -> Result<JsValue, JsValue> {
+    let pending: Option<fauna_client_dns::PendingCertIssue> = from_js_opt(pending)?;
+    to_js(&fauna_client_dns::affordances::cert_issue_possibility(
+        pending.as_ref(),
+        domain,
+    ))
+}
+
+/// `admin-dns-cert-delegate-button`: `delegate_possibility` over the zones
+/// the held credentials cover — blocked until one does.
+#[wasm_bindgen(js_name = dnsDelegatePossibility)]
+pub fn dns_delegate_possibility(credential_zones: Vec<String>) -> Result<JsValue, JsValue> {
+    to_js(&fauna_client_dns::affordances::delegate_possibility(
+        &credential_zones,
+    ))
+}
+
+/// `admin-dns-add-domain-submit-button`.
+#[wasm_bindgen(js_name = localDomainAddPossibility)]
+pub fn local_domain_add_possibility(domains: JsValue, draft: &str) -> Result<JsValue, JsValue> {
+    let domains: Option<LocalDomainsSnapshot> = from_js_opt(domains)?;
+    to_js(
+        &fauna_client_mail_settings::domain_forms::add_domain_possibility(domains.as_ref(), draft),
+    )
+}
+
+/// `admin-dns-domain-remove-button` on `row` (one `active` entry).
+#[wasm_bindgen(js_name = localDomainRemovePossibility)]
+pub fn local_domain_remove_possibility(row: JsValue) -> Result<JsValue, JsValue> {
+    let row: LocalDomainView = from_js(row)?;
+    to_js(&fauna_client_mail_settings::domain_forms::remove_possibility(&row))
+}
+
+/// `admin-dns-domain-rename-button` (the primary row).
+#[wasm_bindgen(js_name = localDomainRenamePossibility)]
+pub fn local_domain_rename_possibility(domains: JsValue) -> Result<JsValue, JsValue> {
+    let domains: LocalDomainsSnapshot = from_js(domains)?;
+    to_js(&fauna_client_mail_settings::domain_forms::rename_possibility(&domains))
+}
+
+/// `admin-dns-domain-promote-button` (a non-primary row).
+#[wasm_bindgen(js_name = localDomainPromotePossibility)]
+pub fn local_domain_promote_possibility(domains: JsValue) -> Result<JsValue, JsValue> {
+    let domains: LocalDomainsSnapshot = from_js(domains)?;
+    to_js(&fauna_client_mail_settings::domain_forms::promote_possibility(&domains))
+}
+
+/// `admin-dns-rename-submit-button`.
+#[wasm_bindgen(js_name = localDomainRenameDraftPossibility)]
+pub fn local_domain_rename_draft_possibility(
+    domains: JsValue,
+    target: &str,
+    grace_days: &str,
+) -> Result<JsValue, JsValue> {
+    let domains: Option<LocalDomainsSnapshot> = from_js_opt(domains)?;
+    to_js(
+        &fauna_client_mail_settings::domain_forms::rename_draft_possibility(
+            domains.as_ref(),
+            target,
+            grace_days,
+        ),
+    )
+}
+
+/// `admin-dns-rename-extend-button`.
+#[wasm_bindgen(js_name = localDomainExtendDraftPossibility)]
+pub fn local_domain_extend_draft_possibility(days: &str) -> Result<JsValue, JsValue> {
+    to_js(&fauna_client_mail_settings::domain_forms::extend_draft_possibility(days))
+}
+
+// The mail, calendar and aliases forms' draft-validity answers (`admin.md`
+// § Errors & edge cases → *A form's submit is live only for a draft the nest
+// would accept*) — the wasm twins of the UniFFI draft faces. The SPA paints
+// each submit from the answer folded after its read gate and asks again at
+// the press.
+
+/// A mail group's save:
+/// `fauna_client_mail_settings::admin_policy::knobs_draft_possibility` over
+/// the group's `u32` drafts, its `u64` drafts and its one-number-per-line
+/// lists — never saved with the stored value for a draft that does not parse.
+#[wasm_bindgen(js_name = mailKnobsDraftPossibility)]
+pub fn mail_knobs_draft_possibility(
+    counts: Vec<String>,
+    counts_u64: Vec<String>,
+    lists: Vec<String>,
+) -> Result<JsValue, JsValue> {
+    to_js(
+        &fauna_client_mail_settings::admin_policy::knobs_draft_possibility(
+            &counts,
+            &counts_u64,
+            &lists,
+        ),
+    )
+}
+
+/// `admin-mail-microsoft-save-button`:
+/// `fauna_client_mail_settings::admin_policy::microsoft_draft_possibility`.
+#[wasm_bindgen(js_name = mailMicrosoftDraftPossibility)]
+pub fn mail_microsoft_draft_possibility(client_id: &str, tenant: &str) -> Result<JsValue, JsValue> {
+    to_js(&fauna_client_mail_settings::admin_policy::microsoft_draft_possibility(client_id, tenant))
+}
+
+/// `admin-calendar-caldav-port-save-button`:
+/// `CaldavPolicyMachine::port_draft_possibility`.
+#[wasm_bindgen(js_name = caldavPortDraftPossibility)]
+pub fn caldav_port_draft_possibility(draft: &str) -> Result<JsValue, JsValue> {
+    to_js(&CaldavPolicyMachine::port_draft_possibility(draft))
+}
+
+/// The aliases page's forwarder add: `ForwarderMachine::create_draft_possibility`.
+#[wasm_bindgen(js_name = forwarderCreateDraftPossibility)]
+pub fn forwarder_create_draft_possibility(
+    local_domain: &str,
+    pattern: &str,
+    forward_target: &str,
+) -> Result<JsValue, JsValue> {
+    to_js(&ForwarderMachine::create_draft_possibility(
+        local_domain,
+        pattern,
+        forward_target,
+    ))
+}
+
+/// The day count a grace or extend draft names, `undefined` for a blank draft
+/// (the nest's default) — and for an invalid one, which the caller has already
+/// refused through the draft's answer, so it is never silently defaulted.
+#[wasm_bindgen(js_name = localDomainRenameDays)]
+pub fn local_domain_rename_days(draft: &str) -> Option<i32> {
+    fauna_client_mail_settings::domain_forms::parse_rename_days(draft)
+        .ok()
+        .flatten()
+        .map(|d| d as i32)
+}
+
 wasm_admin_machine!(
     /// Web `admin-dns` page — list / add / remove / restore / update the
     /// mail-hosting domains.
@@ -422,6 +622,36 @@ impl WasmBridgeApprovalMachine {
     pub fn disarm(&self) {
         self.inner.disarm();
     }
+
+    /// Whether the open reject / rotate confirm is live
+    /// (`docs/goal/behavior/admin.md` § Errors & edge cases, *Controls wait
+    /// for their read*): `BridgeApprovalMachine::confirm_possibility` —
+    /// blocked `common.in_flight` while an act is on its way, so a second
+    /// press is refused with that reason, never the machine's raw
+    /// invalid-state error. Sync.
+    #[wasm_bindgen(js_name = confirmPossibility)]
+    pub fn confirm_possibility(&self) -> Result<JsValue, JsValue> {
+        to_js(&self.inner.confirm_possibility())
+    }
+
+    /// The confirm press's synchronous half:
+    /// `BridgeApprovalMachine::begin_confirm` marks the armed act in flight
+    /// before the `Confirm` dispatch runs, so the confirm paints in flight in
+    /// the click's own frame. `false` (nothing changed) when the confirm is
+    /// not possible — refuse with [`Self::confirm_possibility`]'s reason.
+    #[wasm_bindgen(js_name = beginConfirm)]
+    pub fn begin_confirm(&self) -> bool {
+        self.inner.begin_confirm()
+    }
+
+    /// Where the pending / approved list read stands —
+    /// `BridgeApprovalMachine::read_state` as the SPA's read word
+    /// (`pending` | `failed` | `resolved`): each section paints loading or
+    /// failed until it resolves, and only then its empty text.
+    #[wasm_bindgen(js_name = readState)]
+    pub fn read_state(&self) -> String {
+        crate::read_word(self.inner.read_state()).to_owned()
+    }
 }
 
 wasm_admin_machine!(
@@ -441,6 +671,21 @@ wasm_admin_machine!(
     build_mail_policy_machine,
 );
 
+#[wasm_bindgen]
+impl WasmMailPolicyMachine {
+    /// Whether the policy page's writes are live — the mail-enable and
+    /// new-user auto-enable toggles, every group's save, the rotate and
+    /// publish confirms (`docs/goal/behavior/admin.md` § Errors & edge cases,
+    /// *Controls wait for their read*): `MailPolicyMachine::write_possibility`
+    /// — still loading before the policy read, failed after a failed one, in
+    /// flight while a change is on its way. Folded BEFORE a group's draft
+    /// answer. Sync.
+    #[wasm_bindgen(js_name = writePossibility)]
+    pub fn write_possibility(&self) -> Result<JsValue, JsValue> {
+        to_js(&self.inner.write_possibility())
+    }
+}
+
 wasm_admin_machine!(
     /// Web flat `admin-calendar` page — the deployment-wide CalDAV-enable toggle
     /// (`admin.md` § 8 Calendar / `caldav-server.md` § Independent enablement), the
@@ -456,6 +701,19 @@ wasm_admin_machine!(
     build_caldav_policy_machine,
 );
 
+#[wasm_bindgen]
+impl WasmCaldavPolicyMachine {
+    /// Whether `admin-calendar-enabled-toggle` and the port save are live: `CaldavPolicyMachine::toggle_possibility` — the
+    /// `get_mail_config` read resolved and no change is on its way
+    /// (`docs/goal/behavior/admin.md` § Errors & edge cases, *Controls wait
+    /// for their read*). The toggle never paints a guessed `false` before it.
+    /// Sync.
+    #[wasm_bindgen(js_name = togglePossibility)]
+    pub fn toggle_possibility(&self) -> Result<JsValue, JsValue> {
+        to_js(&self.inner.toggle_possibility())
+    }
+}
+
 wasm_admin_machine!(
     /// Web flat `admin-contacts` page — the deployment-wide CardDAV-enable toggle
     /// (`admin.md` § Contacts / `carddav-server.md` § Independent enablement), the
@@ -469,6 +727,19 @@ wasm_admin_machine!(
     CarddavPolicyAction,
     build_carddav_policy_machine,
 );
+
+#[wasm_bindgen]
+impl WasmCarddavPolicyMachine {
+    /// Whether the CardDAV-enable toggle is live: `CarddavPolicyMachine::toggle_possibility` — the
+    /// `get_mail_config` read resolved and no change is on its way
+    /// (`docs/goal/behavior/admin.md` § Errors & edge cases, *Controls wait
+    /// for their read*). The toggle never paints a guessed `false` before it.
+    /// Sync.
+    #[wasm_bindgen(js_name = togglePossibility)]
+    pub fn toggle_possibility(&self) -> Result<JsValue, JsValue> {
+        to_js(&self.inner.toggle_possibility())
+    }
+}
 
 wasm_admin_machine!(
     /// Web flat `admin-files` page — the deployment-wide WebDAV-enable toggle
@@ -484,6 +755,19 @@ wasm_admin_machine!(
     build_webdav_policy_machine,
 );
 
+#[wasm_bindgen]
+impl WasmWebdavPolicyMachine {
+    /// Whether the WebDAV-enable toggle is live: `WebdavPolicyMachine::toggle_possibility` — the
+    /// `get_mail_config` read resolved and no change is on its way
+    /// (`docs/goal/behavior/admin.md` § Errors & edge cases, *Controls wait
+    /// for their read*). The toggle never paints a guessed `false` before it.
+    /// Sync.
+    #[wasm_bindgen(js_name = togglePossibility)]
+    pub fn toggle_possibility(&self) -> Result<JsValue, JsValue> {
+        to_js(&self.inner.toggle_possibility())
+    }
+}
+
 wasm_admin_machine!(
     /// Web `admin-aliases` page (forwarder half) — admin **external forwarders**
     /// (`admin.md` § 4 / `mail-aliases.md` § Kind 7, ratified 2026-06-01): map an
@@ -498,6 +782,47 @@ wasm_admin_machine!(
     ForwarderAction,
     build_forwarders_machine,
 );
+
+#[wasm_bindgen]
+impl WasmForwarderMachine {
+    /// Whether the add form's domain picker and text fields are live
+    /// (`admin.md` § 4, *A forwarder needs a hosted domain*):
+    /// `ForwarderMachine::form_possibility` — the read's own answer, then
+    /// blocked naming DNS while the nest hosts no local domain. The page
+    /// offers `admin-aliases-forwarder-add-domains-step` exactly when this is
+    /// blocked with that reason (`admin.aliases_page.no_hosted_domain`), which
+    /// a pending read never gives.
+    #[wasm_bindgen(js_name = formPossibility)]
+    pub fn form_possibility(&self) -> Result<JsValue, JsValue> {
+        to_js(&self.inner.form_possibility())
+    }
+
+    /// Whether `admin-aliases-forwarder-add-submit-button` can create on
+    /// `local_domain` now: `ForwarderMachine::create_possibility`. The create
+    /// asks the same answer, so an empty `local_domain` never reaches the nest.
+    #[wasm_bindgen(js_name = createPossibility)]
+    pub fn create_possibility(&self, local_domain: String) -> Result<JsValue, JsValue> {
+        to_js(&self.inner.create_possibility(local_domain))
+    }
+
+    /// Whether the forwarder add form and its submit are live
+    /// (`docs/goal/behavior/admin.md` § Errors & edge cases, *Controls wait
+    /// for their read*): `ForwarderMachine::add_possibility` — the forwarder
+    /// and local-domain read resolved and no change is on its way. Folded
+    /// before the form and draft answers.
+    #[wasm_bindgen(js_name = addPossibility)]
+    pub fn add_possibility(&self) -> Result<JsValue, JsValue> {
+        to_js(&self.inner.add_possibility())
+    }
+
+    /// Where the forwarder and local-domain read stands —
+    /// `ForwarderMachine::read_state` as the SPA's read word
+    /// (`pending` | `failed` | `resolved`).
+    #[wasm_bindgen(js_name = readState)]
+    pub fn read_state(&self) -> String {
+        crate::read_word(self.inner.read_state()).to_owned()
+    }
+}
 
 wasm_admin_machine!(
     /// Web `admin-mail-reports` page — the DMARC aggregate reports peer mail
@@ -528,6 +853,18 @@ wasm_admin_machine!(
     MailAliasesAction,
     build_mail_aliases_machine,
 );
+
+#[wasm_bindgen]
+impl WasmMailAliasesMachine {
+    /// `MailAliasesSnapshot::create_possibility` over the machine's LIVE
+    /// snapshot — the one answer add, import and the disposable mint paint
+    /// from (`docs/goal/ui/mail-settings.md` § Errors & edge cases, *The
+    /// in-page predicates*), in `Possibility`'s serde form. Sync.
+    #[wasm_bindgen(js_name = createPossibility)]
+    pub fn create_possibility(&self) -> Result<JsValue, JsValue> {
+        to_js(&self.inner.snapshot().create_possibility())
+    }
+}
 
 /// Web user-facing `mail-spam` page (a sub-section of the mail-settings family) —
 /// a person manages **their own** per-account spam classifier: reset the training
@@ -703,6 +1040,26 @@ impl WasmMailExportMachine {
     pub fn set_actor_handle(&self, handle: String) {
         self.inner.set_actor_handle(handle);
     }
+
+    /// `wizard-next-button`'s answer — `MailExportSnapshot::next_possibility`
+    /// over the LIVE snapshot with the Scope step's typed date drafts folded
+    /// in (`mail_export_next_possibility`; `mail-export.md` § Wizard steps), in
+    /// `Possibility`'s serde form. Sync.
+    #[wasm_bindgen(js_name = nextPossibility)]
+    pub fn next_possibility(&self, date_from: &str, date_to: &str) -> Result<JsValue, JsValue> {
+        to_js(&fauna_client_mail_settings::mail_export_next_possibility(
+            self.inner.snapshot(),
+            date_from,
+            date_to,
+        ))
+    }
+
+    /// `mail-export-start-button`'s answer —
+    /// `MailExportSnapshot::start_possibility`. Sync.
+    #[wasm_bindgen(js_name = startPossibility)]
+    pub fn start_possibility(&self) -> Result<JsValue, JsValue> {
+        to_js(&self.inner.snapshot().start_possibility())
+    }
 }
 
 wasm_admin_machine!(
@@ -729,6 +1086,38 @@ wasm_admin_machine!(
     build_mail_import_machine,
 );
 
+#[wasm_bindgen]
+impl WasmMailImportMachine {
+    /// `MailImportSnapshot::outlook_source_possibility` over the machine's
+    /// LIVE snapshot — whether the source picker offers Outlook and its
+    /// sign-in (`mailbox-migration.md`; `docs/goal/ui/mail-settings.md` §
+    /// Errors & edge cases, *The in-page predicates*), in `Possibility`'s
+    /// serde form. Absent on web until the sign-in transport exists. Sync.
+    #[wasm_bindgen(js_name = outlookSourcePossibility)]
+    pub fn outlook_source_possibility(&self) -> Result<JsValue, JsValue> {
+        to_js(&self.inner.snapshot().outlook_source_possibility())
+    }
+
+    /// `wizard-next-button`'s answer — `MailImportSnapshot::next_possibility`
+    /// over the LIVE snapshot with the Scope step's typed since-date draft
+    /// folded in (`mail_import_next_possibility`; `mailbox-migration.md`),
+    /// in `Possibility`'s serde form. Sync.
+    #[wasm_bindgen(js_name = nextPossibility)]
+    pub fn next_possibility(&self, date_from: &str) -> Result<JsValue, JsValue> {
+        to_js(&fauna_client_mail_settings::mail_import_next_possibility(
+            self.inner.snapshot(),
+            date_from,
+        ))
+    }
+
+    /// `mail-import-start-button`'s answer —
+    /// `MailImportSnapshot::start_possibility`. Sync.
+    #[wasm_bindgen(js_name = startPossibility)]
+    pub fn start_possibility(&self) -> Result<JsValue, JsValue> {
+        to_js(&self.inner.snapshot().start_possibility())
+    }
+}
+
 wasm_admin_machine!(
     /// Web user-facing `mail-lists` page (a sub-section of the mail-settings
     /// family) — a person manages **their own** per-account mailing lists (a list
@@ -746,6 +1135,18 @@ wasm_admin_machine!(
     MailListsAction,
     build_mail_lists_machine,
 );
+
+#[wasm_bindgen]
+impl WasmMailListsMachine {
+    /// `MailListsSnapshot::create_possibility` over the machine's LIVE
+    /// snapshot — the one answer the list add paints from and the machine's
+    /// Create asks (`docs/goal/ui/mail-settings.md` § Errors & edge cases,
+    /// *The in-page predicates*), in `Possibility`'s serde form. Sync.
+    #[wasm_bindgen(js_name = createPossibility)]
+    pub fn create_possibility(&self) -> Result<JsValue, JsValue> {
+        to_js(&self.inner.snapshot().create_possibility())
+    }
+}
 
 /// `fauna_client_mail_settings::archive_url_needs_confirm` — whether the
 /// add/edit sheet's Submit must first arm with `mail_lists.archive_off_server_confirm`
@@ -880,7 +1281,7 @@ pub(crate) fn apply_post_claim_serving_enablement(
         .map_err(|_| JsValue::from_str("secret must be 32 bytes"))?;
     let keypair = ActorKeypair::from_secret(arr);
     Ok(future_to_promise(async move {
-        fauna_client_mail_settings::rpc_glue::dispatch_post_claim_serving_enablement(
+        let report = fauna_client_mail_settings::rpc_glue::dispatch_post_claim_serving_enablement(
             client,
             keypair,
             crate::account_runtime::mail_store(),
@@ -889,7 +1290,12 @@ pub(crate) fn apply_post_claim_serving_enablement(
             intents,
         )
         .await;
-        Ok(JsValue::UNDEFINED)
+        // The page's `error-message` text for a step refused for good, else
+        // `undefined` — painted at web's trickle-down (`onboarding.md` § 3b
+        // *The step completes; it is not fired once*).
+        Ok(report
+            .error_message()
+            .map_or(JsValue::UNDEFINED, |m| JsValue::from_str(&m)))
     }))
 }
 
@@ -932,6 +1338,47 @@ impl WasmMailSettingsMachine {
     #[wasm_bindgen(js_name = snapshot)]
     pub fn snapshot(&self) -> Result<JsValue, JsValue> {
         to_js(&self.inner.snapshot())
+    }
+
+    /// `MailSettingsSnapshot::mail_usable` over the machine's LIVE snapshot —
+    /// the one answer every mail sub-page and its settings rail row is gated
+    /// on (`docs/goal/ui/mail-settings.md` § Errors & edge cases, the
+    /// mail-usable gate), in `Possibility`'s serde form (`{state: "possible"}`,
+    /// `{state: "blocked", reason}`, `{state: "absent"}`). Sync.
+    #[wasm_bindgen(js_name = mailUsable)]
+    pub fn mail_usable(&self) -> Result<JsValue, JsValue> {
+        to_js(&self.inner.snapshot().mail_usable())
+    }
+
+    /// `MailSettingsSnapshot::credential_management_possibility` over the
+    /// machine's LIVE snapshot — the one answer the credential section (Add
+    /// password and the list beneath it) paints from
+    /// (`docs/goal/ui/mail-settings.md` § Errors & edge cases, *The in-page
+    /// predicates*), in `Possibility`'s serde form. Sync.
+    #[wasm_bindgen(js_name = credentialManagementPossibility)]
+    pub fn credential_management_possibility(&self) -> Result<JsValue, JsValue> {
+        to_js(&self.inner.snapshot().credential_management_possibility())
+    }
+
+    /// `MailSettingsSnapshot::enable_toggle_possibility` over the machine's
+    /// LIVE snapshot — `mail-settings-enabled-toggle`'s answer: still loading
+    /// before the first hydrate, then blocked by the unavailable notice for a
+    /// turn-on on a box that cannot serve mail (`docs/goal/ui/mail-settings.md`
+    /// § Errors & edge cases, *Controls wait for their reads*). Sync.
+    #[wasm_bindgen(js_name = enableTogglePossibility)]
+    pub fn enable_toggle_possibility(&self) -> Result<JsValue, JsValue> {
+        to_js(&self.inner.snapshot().enable_toggle_possibility())
+    }
+
+    /// `MailSettingsSnapshot::rotate_keys_possibility` over the machine's
+    /// LIVE snapshot — `mail-settings-rotate-keys-button`'s and the rotate
+    /// confirm's answer: blocked with `mail_settings.rotate_pending` while a
+    /// rotation waits for the banner's Resume, *still saving* while this
+    /// app's own rotation runs (`in_flight`) (`docs/goal/ui/mail-settings.md`
+    /// § Errors & edge cases, *The in-page predicates*). Sync.
+    #[wasm_bindgen(js_name = rotateKeysPossibility)]
+    pub fn rotate_keys_possibility(&self, in_flight: bool) -> Result<JsValue, JsValue> {
+        to_js(&self.inner.snapshot().rotate_keys_possibility(in_flight))
     }
 
     /// Initial page load. Resolves `undefined`; read state via `snapshot()`.

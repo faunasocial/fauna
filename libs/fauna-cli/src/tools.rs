@@ -17,6 +17,11 @@ use fauna_client_admin::{AdminClient, RegionCode, UpdateChannel, WebAppOrigin};
 use fauna_client_bridges::MailAdminClient;
 use fauna_client_features::{AuthoringTier, FeaturesClient, GatedFeature, SaveError};
 use fauna_client_feed::FeedClient;
+use fauna_client_mail_settings::admin_policy::parse_knob_u64;
+use fauna_client_mail_settings::caldav_policy::CaldavPolicyMachine;
+use fauna_client_mail_settings::domain_forms::{add_domain_possibility, remove_possibility};
+use fauna_client_mail_settings::forwarders::ForwarderMachine;
+use fauna_client_mail_settings::local_domains::LocalDomainsSnapshot;
 use fauna_client_moderation::ModerationClient;
 use fauna_client_notifications::NotificationsClient;
 use fauna_client_profile::{ProfileClient, ProfileDisplay, decode_profile_display};
@@ -24,6 +29,8 @@ use fauna_client_web::WebClient;
 use fauna_core::content_policy::{ContentPolicyDocument, decode_document};
 use fauna_core::data::PostBody;
 use fauna_core::feature_gate::FeaturePolicy;
+use fauna_core::localized::LocalizedText;
+use fauna_core::possibility::Possibility;
 use fauna_protocol::ByteBuf;
 use fauna_protocol::age::AgeBand;
 use fauna_protocol::bridge_routing::ListForwardersReply;
@@ -53,7 +60,8 @@ use fauna_protocol::{RpcErrorClass, RpcRequester};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::catalog::{self, Resource, Tool, ToolId};
+use crate::catalog::{self, Resource, ResourceId, Tool, ToolId};
+use crate::reach::Reach;
 
 /// Why a shell has no principal session to call through.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +70,12 @@ pub enum SessionUnavailable {
     NotConnected,
     /// A consent is waiting on the human to type `user_code`.
     Pending { user_code: String },
+    /// A consent asking for the admin arms is waiting on the human to type
+    /// `user_code` — whose approval by an account holding no admin authority
+    /// resolves nothing (`authorization-server.md` § Scope grammar → *The
+    /// admin arms*), so its answer is [`SessionUnavailable::Pending`]'s
+    /// followed by [`ADMIN_APPROVAL_WAITS`], which names the way out.
+    PendingAdmin { user_code: String },
     /// The connection failed or was revoked; the text says what happened.
     Failed(String),
     /// The shell holds several accounts and the call named none of them; the
@@ -95,6 +109,23 @@ pub struct ConnectStarted {
 /// device shell → *Credentials*).
 // public-text: cli-answer-strings-public
 pub const UNATTENDED_CUSTODY: &str = "This connection is stored on this computer's disk, protected by file permissions alone rather than by a keychain or secret store; Disconnect on its row in Settings → Connected apps, in any of your Fauna apps, ends it.";
+// public-text-end: cli-answer-strings-public
+
+/// What a `connect` that asked for the admin arms adds to its waiting answer:
+/// an approval by an account holding no admin authority resolves nothing
+/// (`authorization-server.md` § Scope grammar → *The admin arms*), so the
+/// sentence names the way out — connecting without the admin arms
+/// (`apps/cli.md` § A tool that cannot run, rule 3). "A few seconds" covers
+/// the poll interval between an admin's approval and the connection.
+// public-text: cli-answer-strings-public
+pub const ADMIN_APPROVAL_WAITS: &str = "This connection asks for the admin permissions, which only an account that administers its server can approve: if it is still waiting a few seconds after the user approved it, their account does not administer its server — call connect again without admin: true.";
+// public-text-end: cli-answer-strings-public
+
+/// What a `connect` that asked for the admin arms answers once its code
+/// expired unapproved: the same way out as [`ADMIN_APPROVAL_WAITS`], in the
+/// past tense.
+// public-text: cli-answer-strings-public
+pub const ADMIN_CONSENT_EXPIRED: &str = "The code expired before the connection was approved. This connection asked for the admin permissions, which only an account that administers its server can approve: if the user approved it, their account does not administer its server — call connect again without admin: true.";
 // public-text-end: cli-answer-strings-public
 
 /// One operation of the conversations oracle's two classes, as the catalog
@@ -165,6 +196,29 @@ pub trait Host {
     /// the admin arms too ([`crate::catalog::consent_scope`]).
     async fn connect(&self, handle: &str, admin: bool) -> Result<ConnectStarted, ToolError>;
 
+    /// What the held connections' granted scopes reach — what `tools/list`
+    /// lists on a shell whose transport announces changes
+    /// ([`crate::reach`]). A shell that stores no granted scope lists the
+    /// whole catalog.
+    async fn reach(&self) -> Reach {
+        Reach::Whole
+    }
+
+    /// Resolves once [`Host::reach`] may have changed — a connection landed,
+    /// failed, was revoked or added — so the stdio transport can announce
+    /// `notifications/tools/list_changed`. One consumer; a change before it
+    /// waits is not lost. A shell whose reach never changes never resolves.
+    async fn reach_changed(&self) {
+        std::future::pending::<()>().await
+    }
+
+    /// Whether this shell has the conversations oracle's door: one without
+    /// never lists the conversations tools (rule 1) and answers a call to
+    /// one with [`NO_CONVERSATIONS_DOOR`].
+    fn conversations_door(&self) -> bool {
+        false
+    }
+
     /// The nest's public setup status for `account`, read on an anonymous
     /// pre-identity connection: `fauna.setup.status` is no principal arm's
     /// kind (the `ThirdParty` ceiling holds none of the pre-identity kinds),
@@ -195,6 +249,80 @@ pub struct ToolError {
     /// The connection went away under the call
     /// ([`RpcErrorClass::is_connection_lost`]) — what [`call`] redials on.
     connection_lost: bool,
+    /// A precondition the nest refused, with its reason — worded with the
+    /// step that unblocks it once the tool is known ([`ToolError::worded`]).
+    refusal: Option<Refusal>,
+    /// A fault, not a refusal: the transport, or a nest error the model can
+    /// do nothing about — the one class a resource answers with JSON-RPC's
+    /// internal-error code (`apps/cli.md` § A tool that cannot run, rule 3).
+    fault: bool,
+}
+
+/// A nest refusal the model can act on, sorted by its wire code's family and
+/// carrying the reason the nest put in its details — the reason survives into
+/// the sentence (`apps/cli.md` § A tool that cannot run, rule 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Refusal {
+    /// The grant does not reach the kind: a scope this connection lacks.
+    Scope(String),
+    /// An admin-plane kind, and the account holds no admin authority.
+    NoAuthority(String),
+    /// The id or name passed names nothing the nest holds.
+    NotFound(String),
+    /// Any other refusal of the call as made.
+    Refused(String),
+}
+
+/// The principal gate's two reasons (`principal_handlers::dispatch_resolved`),
+/// matched in the refusal's details.
+const SCOPE_REASON: &str = "not covered by the principal's scopes";
+const NO_AUTHORITY_REASON: &str = "holds no admin authority";
+
+/// Code families that are faults, never a precondition the model can meet.
+const FAULT_FAMILIES: &[&str] = &[
+    "internal",
+    "encode_failed",
+    "timeout",
+    "cancelled",
+    "disconnected",
+    "rate_limited",
+    "unknown_kind",
+];
+
+impl Refusal {
+    /// The refusal `r` is, or `None` for a fault — and for a code the shared
+    /// rendering already words exactly (`RpcError::localized`'s exact arms),
+    /// whose sentence stands.
+    fn of(r: &fauna_protocol::RpcError) -> Option<Self> {
+        use fauna_i18n::strings::error;
+        let family = r.code_suffix();
+        if FAULT_FAMILIES.contains(&family) {
+            return None;
+        }
+        let generic = [
+            error::UNEXPECTED,
+            error::AUTHORIZATION,
+            error::protocol::MALFORMED,
+        ];
+        if !generic.contains(&r.localized()) {
+            return None;
+        }
+        let detail = r.detail_or_code();
+        let reason = if detail.trim().is_empty() || detail == r.code {
+            family.replace('_', " ")
+        } else {
+            detail.trim().to_owned()
+        };
+        Some(if reason.contains(SCOPE_REASON) {
+            Self::Scope(reason)
+        } else if reason.contains(NO_AUTHORITY_REASON) {
+            Self::NoAuthority(reason)
+        } else if matches!(family, "not_found" | "tier_not_found") {
+            Self::NotFound(reason)
+        } else {
+            Self::Refused(reason)
+        })
+    }
 }
 
 impl ToolError {
@@ -203,15 +331,69 @@ impl ToolError {
             code: None,
             message: message.into(),
             connection_lost: false,
+            refusal: None,
+            fault: false,
         }
     }
 
     fn from_rpc<E: RpcErrorClass + core::fmt::Display>(e: E) -> Self {
+        let rpc = e.as_rpc_error();
+        let refusal = rpc.and_then(Refusal::of);
         Self {
-            code: e.as_rpc_error().map(|r| r.code.clone()),
+            code: rpc.map(|r| r.code.clone()),
             message: e.to_string(),
             connection_lost: e.is_connection_lost(),
+            fault: rpc.is_none_or(|r| FAULT_FAMILIES.contains(&r.code_suffix())),
+            refusal,
         }
+    }
+
+    /// Whether this is a fault rather than a refusal — what a resource read
+    /// answers with the internal-error code, and nothing else does.
+    pub fn is_fault(&self) -> bool {
+        self.fault
+    }
+
+    /// Whether the nest refused because the id or name passed names nothing.
+    pub fn is_not_found(&self) -> bool {
+        matches!(self.refusal, Some(Refusal::NotFound(_)))
+    }
+
+    /// Word a nest refusal for the tool (or resource) that met it: the
+    /// nest's reason, then the step that unblocks it — a catalog tool, the
+    /// person's own app, or, when nothing on this account can, a plain stop
+    /// (`apps/cli.md` § A tool that cannot run, rule 3). A fault keeps its
+    /// sentence.
+    fn worded(mut self, name: &str, arms: &[&str], step: Option<String>) -> Self {
+        let Some(refusal) = &self.refusal else {
+            return self;
+        };
+        self.message = match refusal {
+            Refusal::Scope(reason) if arms.iter().any(|a| catalog::is_admin_arm(a)) => format!(
+                "This account's connection does not carry the admin permission {name} needs ({reason}). If the user administers their Fauna server, call connect with their handle and admin: true; if they do not, no admin tool can act for this account."
+            ),
+            Refusal::Scope(reason) => format!(
+                "This account's connection does not carry the permission {name} needs ({reason}). Call connect with the user's handle again so they can approve it."
+            ),
+            Refusal::NoAuthority(reason) => format!(
+                "This account does not administer its Fauna server ({reason}), so {name} cannot act for it and connecting again changes nothing: only an admin of that server can do this. Do not offer admin tools for this account."
+            ),
+            Refusal::NotFound(reason) => format!(
+                "The nest found nothing to act on ({reason}). {}",
+                step.unwrap_or_else(|| {
+                    "Check the id or name passed against what a list tool answers.".into()
+                })
+            ),
+            Refusal::Refused(reason) => format!(
+                "The nest refused this call as made ({reason}). Change what the reason names before calling it again; the same call will be refused the same way."
+            ),
+        };
+        self
+    }
+
+    /// [`ToolError::worded`] for a catalog tool.
+    fn for_tool(self, tool: &Tool) -> Self {
+        self.worded(tool.name, tool.arms, refusal_step(tool.id))
     }
 
     /// The text of the MCP error content block.
@@ -220,6 +402,79 @@ impl ToolError {
             Some(code) => format!("{code}: {}", self.message),
             None => self.message.clone(),
         }
+    }
+
+    /// A refusal worded from a shared reason — the same string-table sentence
+    /// the seven apps paint.
+    fn localized(reason: &LocalizedText) -> Self {
+        Self::new(reason.resolve(fauna_i18n::strings::lookup))
+    }
+}
+
+/// The step that makes a not-found precondition true for `id`: the list
+/// tool that answers a valid id or name, and where none can, the place that
+/// can (`apps/cli.md` § A tool that cannot run, rule 3).
+fn refusal_step(id: ToolId) -> Option<String> {
+    use ToolId::*;
+    Some(match id {
+        FeedGet | FeedPosts => "Call feed_list for this account's feeds and pass an id it lists.",
+        PostDelete => {
+            "Call feed_local for the posts on this account's server and pass the id of one this account published with post_create."
+        }
+        AdminUsersGet | AdminUsersUpdate | AdminUsersSuspend | AdminUsersReinstate => {
+            "Call admin_users_list for this server's accounts and pass an id it lists."
+        }
+        AdminInviteCodesDelete => "Call admin_invite_codes_list and pass a code it lists.",
+        AdminInviteRequestsApprove | AdminInviteRequestsDeny => {
+            "Call admin_invite_requests_list and pass a request it lists."
+        }
+        AdminTierUpdate | AdminTierDelete => {
+            "Call admin_tiers_list for this server's quota tiers and pass a name it lists."
+        }
+        AdminMembershipTierSet | AdminMembershipTierClear => {
+            "Call admin_membership_tiers_list for the subscription tiers and admin_tiers_list for the quota tiers, and pass names they list; a quota tier that does not exist yet is made with admin_tier_create first."
+        }
+        AdminReportResolve | AdminReportBlock => {
+            "Call admin_reports_list and pass a report it lists."
+        }
+        AdminDomainRemove | AdminDomainRestore | AdminDomainConfigSet | AdminCatchAllSet
+        | AdminRoleAddressSet | AdminDkimIntervalSet | AdminDnsRecords | AdminDnsVerify => {
+            "Call admin_domains_list for this server's domains and pass one it lists. If it lists none, admin_domain_add says where the first one is added."
+        }
+        AdminDomainRenameStatus => {
+            "Call admin_domain_renames_list and pass a rename it lists."
+        }
+        AdminMailReportsDmarcGet => "Call admin_mail_reports_dmarc and pass a report key it lists.",
+        AdminMailReportsForensicGet => {
+            "Call admin_mail_reports_forensic and pass a report key it lists."
+        }
+        AdminMailReportsTlsGet => "Call admin_mail_reports_tls and pass a report key it lists.",
+        AdminForwardersDelete => "Call admin_forwarders_list and pass a forwarder it lists.",
+        _ => return None,
+    }
+    .to_owned())
+}
+
+/// Ask a shared predicate before the call is sent (`apps/cli.md` § A tool
+/// that cannot run, rule 5): a blocked draft refuses with the predicate's own
+/// reason and nothing reaches the nest.
+fn possible(answer: Possibility) -> Result<(), ToolError> {
+    match answer {
+        Possibility::Possible => Ok(()),
+        Possibility::Blocked { reason } => Err(ToolError::localized(&reason)),
+        // No draft predicate answers absent; were one to, the tool still
+        // refuses rather than sending a call the apps would not offer.
+        Possibility::Absent => Err(ToolError::new("this cannot be done on this server")),
+    }
+}
+
+/// A draft argument as the apps' form holds it: the string typed, or a JSON
+/// number written out — so the predicate judges what the model passed.
+fn draft_arg(args: &Value, name: &str) -> String {
+    match args.get(name) {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        _ => String::new(),
     }
 }
 
@@ -232,6 +487,9 @@ impl From<SessionUnavailable> for ToolError {
             ),
             SessionUnavailable::Pending { user_code } => ToolError::new(format!(
                 "Waiting for the user to approve. They type {user_code} into Connect an app in one of their own Fauna apps, then approve the request."
+            )),
+            SessionUnavailable::PendingAdmin { user_code } => ToolError::new(format!(
+                "Waiting for the user to approve. They type {user_code} into Connect an app in one of their own Fauna apps, then approve the request. {ADMIN_APPROVAL_WAITS}"
             )),
             // public-text-end: cli-answer-strings-public
             SessionUnavailable::Failed(why) => ToolError::new(why),
@@ -409,10 +667,12 @@ where
             admin_data(&admin.tiers_list().await.map_err(ToolError::from_rpc)?)
         }
         ToolId::AdminUsersAdmit => {
+            let actor = draft_arg(args, "actor_id");
+            possible(fauna_client_admin::admit_actor_possibility(&actor))?;
             let (guardian, band) = supervision_args(args)?;
             admin
                 .users_create(
-                    actor_arg(args)?,
+                    fauna_client_admin::parse_admit_actor(&actor).expect("the predicate passed it"),
                     str_arg(args, "tier")?,
                     opt_str(args, "label").unwrap_or_default(),
                     opt_str(args, "handle"),
@@ -530,9 +790,20 @@ where
                     ));
                 }
                 Some(Value::Null) => None,
-                Some(v) => Some(v.as_u64().ok_or_else(|| {
-                    ToolError::new("max_free_users must be a non-negative integer or null")
-                })?),
+                Some(_) => {
+                    let draft = draft_arg(args, "max_free_users");
+                    possible(fauna_client_admin::registration_ceiling_possibility(&draft))?;
+                    // A blank draft is the form's "no limit"; the tool's is null.
+                    Some(
+                        fauna_client_admin::parse_registration_ceiling(&draft)
+                            .map_err(|r| ToolError::localized(&r))?
+                            .ok_or_else(|| {
+                                ToolError::localized(&LocalizedText::key(
+                                    "admin.users_page.max_free_users_invalid",
+                                ))
+                            })?,
+                    )
+                }
             };
             admin
                 .set_registration_mode(mode, max_free_users)
@@ -601,6 +872,18 @@ where
     }
     match id {
         ToolId::AdminTierCreate => {
+            let caps = [
+                "max_inbox_bytes",
+                "max_storage_bytes",
+                "max_devices",
+                "max_blob_size",
+                "max_feeds",
+            ]
+            .map(|cap| draft_arg(args, cap));
+            possible(fauna_client_admin::tier_create_possibility(
+                &draft_arg(args, "name"),
+                caps.each_ref().map(String::as_str),
+            ))?;
             let (name, [inbox, storage, devices, blob, feeds]) = tier_caps(args)?;
             admin!()
                 .tiers_create(AdminTierCreateRequest {
@@ -646,6 +929,10 @@ where
                 .map_err(ToolError::from_rpc)?,
         ),
         ToolId::AdminMembershipTierSet => {
+            possible(fauna_client_admin::membership_save_possibility(&draft_arg(
+                args,
+                "admin_tier",
+            )))?;
             admin!()
                 .membership_tiers_set(AdminMembershipTierSetRequest {
                     tier_name: str_arg(args, "tier_name")?.to_owned(),
@@ -671,7 +958,11 @@ where
                 .map_err(ToolError::from_rpc)?,
         ),
         ToolId::AdminRegionSet => {
-            let region = nullable_str(args, "region")?
+            let region = nullable_str(args, "region")?;
+            if let Some(code) = region {
+                possible(fauna_client_admin::region_possibility(code))?;
+            }
+            let region = region
                 .map(RegionCode::parse)
                 .transpose()
                 .map_err(|e| ToolError::new(format!("region {e}")))?;
@@ -690,8 +981,21 @@ where
         ToolId::AdminWebAppOriginSet => {
             let mode = WebAppOrigin::parse(str_arg(args, "mode")?)
                 .ok_or_else(|| ToolError::new("mode must be bundled or central"))?;
+            // Ask the shared answer first (`web-content-hosting.md` § While the
+            // central origin is not live, the choice is not offered, rule 5):
+            // a central mode the nest says it cannot serve is refused here with
+            // the nest's own reason, and nothing is sent.
+            let admin = admin!();
+            if mode == WebAppOrigin::Central {
+                let status = admin.web_app_origin().await.map_err(ToolError::from_rpc)?;
+                let view = fauna_client_admin::admin_web_app_origin_view(status.as_ref());
+                possible(fauna_client_admin::web_app_origin_set_possibility(
+                    Some(&view),
+                    Some(mode),
+                ))?;
+            }
             data(
-                &admin!()
+                &admin
                     .set_web_app_origin(mode)
                     .await
                     .map_err(ToolError::from_rpc)?,
@@ -725,10 +1029,9 @@ where
                 .map_err(ToolError::from_rpc)?,
         ),
         ToolId::AdminServingPortSet => {
-            let port = u16::try_from(i64_arg(args, "port")?)
-                .ok()
-                .filter(|p| *p != 0)
-                .ok_or_else(|| ToolError::new("port must be 1–65535"))?;
+            let draft = draft_arg(args, "port");
+            possible(fauna_client_admin::serving_port_possibility(&draft))?;
+            let port = fauna_core::format::parse_port(&draft).expect("the predicate passed it");
             admin!()
                 .set_serving_port(port)
                 .await
@@ -878,11 +1181,28 @@ where
             admin_data(&reply)
         }
         ToolId::AdminDomainRemove => {
+            let domain = str_arg(args, "domain")?;
+            let listed: ListLocalDomainsReply = rpc
+                .request(
+                    "fauna.bridges.list_local_domains",
+                    ListLocalDomainsRequest {},
+                )
+                .await
+                .map_err(ToolError::from_rpc)?;
+            let domains = LocalDomainsSnapshot::from_rows(listed.active, Vec::new());
+            // A domain the list does not hold is the nest's own refusal.
+            if let Some(row) = domains
+                .active
+                .iter()
+                .find(|d| d.domain.eq_ignore_ascii_case(domain.trim()))
+            {
+                possible(remove_possibility(row))?;
+            }
             let reply: RemoveLocalDomainReply = rpc
                 .request(
                     "fauna.bridges.remove_local_domain",
                     RemoveLocalDomainRequest {
-                        domain: str_arg(args, "domain")?.to_owned(),
+                        domain: domain.to_owned(),
                     },
                 )
                 .await
@@ -927,7 +1247,7 @@ where
                 .author(AuthoringTier::Admin, feature, policy)
                 .await
                 .map_err(|e| match e {
-                    SaveError::Invalid(reason) => ToolError::new(format!("{reason:?}")),
+                    SaveError::Invalid(reason) => ToolError::localized(&reason),
                     SaveError::Rpc(e) => ToolError::from_rpc(e),
                 })?;
             ok()
@@ -1082,11 +1402,16 @@ where
                 ));
                 // public-text-end: cli-answer-strings-public
             }
+            // Blank, malformed or already active: the form's own refusal — an
+            // add of an active domain would answer success for nothing.
+            let draft = draft_arg(args, "domain");
+            let domains = LocalDomainsSnapshot::from_rows(listed.active, Vec::new());
+            possible(add_domain_possibility(Some(&domains), &draft))?;
             let reply: AddLocalDomainReply = rpc
                 .request(
                     "fauna.bridges.add_local_domain",
                     AddLocalDomainRequest {
-                        domain: str_arg(args, "domain")?.to_owned(),
+                        domain: draft.trim().to_owned(),
                         mta_sts_cert_mode: DEFAULT_CERT_MODE.to_owned(),
                         ..Default::default()
                     },
@@ -1265,7 +1590,15 @@ where
                 "`{name}` is not a field of this policy (admin_mail_settings names them)"
             )));
         }
-        fields.insert(name.clone(), value.clone());
+        // A number typed as text is the page's draft: parsed by the shared
+        // knob parser and refused with its sentence, never sent as a string.
+        let value = match (&fields[name], value) {
+            (Value::Number(n), Value::String(draft)) if n.is_u64() => {
+                Value::from(parse_knob_u64(draft).map_err(|r| ToolError::localized(&r))?)
+            }
+            _ => value.clone(),
+        };
+        fields.insert(name.clone(), value);
     }
     serde_json::from_value(merged).map_err(|e| ToolError::new(format!("values: {e}")))
 }
@@ -1321,6 +1654,11 @@ where
         }
         ToolId::AdminMailPolicySet => {
             let changes = args.get("values").unwrap_or(&Value::Null);
+            if changes.as_object().is_some_and(serde_json::Map::is_empty) {
+                return Err(ToolError::new(
+                    "values names no field to change, so nothing would be saved: pass the fields to change (admin_mail_settings names them)",
+                ));
+            }
             match str_arg(args, "section")? {
                 "alias" => {
                     let current = mail.get_alias_policy().await.map_err(rpc)?;
@@ -1451,6 +1789,11 @@ where
             admin_data(&forwarders_hex(mail.list_forwarders().await.map_err(rpc)?)?)
         }
         ToolId::AdminForwardersCreate => {
+            possible(ForwarderMachine::create_draft_possibility(
+                &draft_arg(args, "local_domain"),
+                &draft_arg(args, "pattern"),
+                &draft_arg(args, "forward_target"),
+            ))?;
             let reply = mail
                 .create_forwarder(
                     str_arg(args, "local_domain")?,
@@ -1476,12 +1819,9 @@ where
             ok()
         }
         ToolId::AdminCalendarPortSet => {
-            let port = args
-                .get("port")
-                .and_then(Value::as_u64)
-                .and_then(|p| u16::try_from(p).ok())
-                .filter(|p| *p != 0)
-                .ok_or_else(|| ToolError::new("port must be between 1 and 65535"))?;
+            let draft = draft_arg(args, "port");
+            possible(CaldavPolicyMachine::port_draft_possibility(&draft))?;
+            let port = fauna_core::format::parse_port(&draft).expect("the predicate passed it");
             mail.set_caldav_port(port).await.map_err(rpc)?;
             ok()
         }
@@ -1538,6 +1878,13 @@ fn forwarders_hex(reply: ListForwardersReply) -> Result<Value, ToolError> {
 /// annotation decides, never `idempotent` (an idempotent write is still a
 /// write the nest may already have applied).
 pub async fn call<H: Host>(host: &H, tool: &Tool, args: &Value) -> Result<Value, ToolError> {
+    call_unworded(host, tool, args)
+        .await
+        .map_err(|e| e.for_tool(tool))
+}
+
+/// [`call`] before a nest refusal is worded for the tool.
+async fn call_unworded<H: Host>(host: &H, tool: &Tool, args: &Value) -> Result<Value, ToolError> {
     if tool.id == ToolId::Connect {
         let admin = args
             .get("admin")
@@ -1855,6 +2202,14 @@ where
         // The custodian answers the profile it stored; the tool answers its
         // display fields through the same decode `nest://profile` reads.
         ToolId::ProfileSet => {
+            if ["display_name", "bio", "links"]
+                .iter()
+                .all(|f| args.get(f).is_none_or(Value::is_null))
+            {
+                return Err(ToolError::new(
+                    "no field to change was passed, so nothing would be saved: pass display_name, bio or links",
+                ));
+            }
             let links = args
                 .get("links")
                 .map(|v| {
@@ -1872,8 +2227,10 @@ where
                 .request(KIND_SET, request)
                 .await
                 .map_err(ToolError::from_rpc)?;
-            let display = decode_profile_display(&reply.body)
-                .map_err(|e| ToolError::new(format!("the stored profile did not decode: {e}")))?;
+            let display = decode_profile_display(&reply.body).map_err(|e| ToolError {
+                fault: true,
+                ..ToolError::new(format!("the stored profile did not decode: {e}"))
+            })?;
             Ok(profile_json(&display))
         }
     }
@@ -1902,7 +2259,13 @@ pub async fn read_resource<H: Host>(
             }?;
             Ok((resource, profile_json(&display)))
         }
-        .await,
+        .await
+        .map_err(|e: ToolError| {
+            let step = (resource.id == ResourceId::Profile).then(|| {
+                "Pass the hex actor id of an account this nest knows, as a notification's sender_id or a post's author gives it.".to_owned()
+            });
+            e.worded(resource.name, resource.arms, step)
+        }),
     )
 }
 
@@ -1914,8 +2277,10 @@ where
         .profile_get(actor.to_owned())
         .await
         .map_err(ToolError::from_rpc)?;
-    decode_profile_display(&reply.body)
-        .map_err(|e| ToolError::new(format!("the stored profile did not decode: {e}")))
+    decode_profile_display(&reply.body).map_err(|e| ToolError {
+        fault: true,
+        ..ToolError::new(format!("the stored profile did not decode: {e}"))
+    })
 }
 
 /// The decoded display fields, as the resource's JSON — the one shared decode

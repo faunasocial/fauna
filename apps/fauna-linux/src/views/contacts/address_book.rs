@@ -13,10 +13,10 @@
 
 use adw::prelude::*;
 use fauna_ui_ids as ids;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use fauna_client_carddav::{AddressbookRow, VCardRow};
+use fauna_client_carddav::{AddressbookRow, AddressbooksReadState, VCardRow};
 
 use crate::client::FaunaClient;
 use crate::i18n::strings::contacts::address_book as ab_strings;
@@ -41,6 +41,25 @@ pub struct AddressBookHandles {
     /// user has left and is dropped ([`update_card_list`]); a re-list keeps this
     /// book open rather than jumping back to the first ([`update_book_list`]).
     pub open_book: Rc<RefCell<Option<String>>>,
+    /// The book read's last answer — *unresolved* until one lands, and while
+    /// custody holds no key yet (the mint in flight). Read by the
+    /// store-change notice, which re-runs only an unresolved read.
+    pub read: Rc<Cell<AddressbooksReadState>>,
+    /// The book picker's empty placeholder: the loading line while the read
+    /// is unresolved, "No address books yet." only for a loaded empty list
+    /// ([`book_placeholder_text`]).
+    pub book_placeholder: gtk::Label,
+}
+
+/// What the book picker says when it lists no book: a read that has not
+/// answered (a missing key included) is loading, never an empty address book
+/// (`ui/contacts.md` § Errors & edge cases); only a loaded read with no book
+/// is "No address books yet.".
+pub fn book_placeholder_text(read: AddressbooksReadState) -> &'static str {
+    match read {
+        AddressbooksReadState::Unresolved => ab_strings::LOADING,
+        AddressbooksReadState::Loaded => ab_strings::NO_ADDRESSBOOKS,
+    }
 }
 
 impl AddressBookHandles {
@@ -69,7 +88,9 @@ pub fn build_address_book_view() -> (gtk::Box, AddressBookHandles) {
     let book_list_box = gtk::ListBox::new();
     book_list_box.set_selection_mode(gtk::SelectionMode::None);
     book_list_box.add_css_class("boxed-list");
-    let book_placeholder = gtk::Label::new(Some(ab_strings::NO_ADDRESSBOOKS));
+    let book_placeholder = gtk::Label::new(Some(book_placeholder_text(
+        AddressbooksReadState::default(),
+    )));
     book_placeholder.add_css_class("dim-label");
     book_placeholder.set_margin_top(8);
     book_placeholder.set_margin_bottom(8);
@@ -143,6 +164,8 @@ pub fn build_address_book_view() -> (gtk::Box, AddressBookHandles) {
         detail_container,
         view: outer.clone(),
         open_book: Rc::new(RefCell::new(None)),
+        read: Rc::new(Cell::new(AddressbooksReadState::default())),
+        book_placeholder,
     };
     (outer, handles)
 }
@@ -155,9 +178,14 @@ pub fn build_address_book_view() -> (gtk::Box, AddressBookHandles) {
 /// `addressbook-item` click fetches that book's cards.
 pub fn update_book_list(
     handles: &AddressBookHandles,
+    read: AddressbooksReadState,
     books: &[AddressbookRow],
     client: &Rc<FaunaClient>,
 ) {
+    handles.read.set(read);
+    handles
+        .book_placeholder
+        .set_text(book_placeholder_text(read));
     let lb = &handles.book_list_box;
     crate::views::layout::clear_list_box_rows(lb);
     for book in books {
@@ -401,4 +429,29 @@ fn set_detail_placeholder(detail: &gtk::Box) {
     placeholder.add_css_class("dim-label");
     placeholder.set_halign(gtk::Align::Start);
     detail.append(&placeholder);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A book read that has not answered (a custody with no key yet: the
+    /// mint in flight) says loading, never "No address books yet." —
+    /// `ui/contacts.md` § Errors & edge cases; only a loaded empty read is
+    /// the empty address book.
+    #[test]
+    fn the_picker_placeholder_is_loading_until_the_read_is_loaded() {
+        assert_eq!(
+            book_placeholder_text(AddressbooksReadState::default()),
+            ab_strings::LOADING
+        );
+        assert_eq!(
+            book_placeholder_text(AddressbooksReadState::Unresolved),
+            ab_strings::LOADING
+        );
+        assert_eq!(
+            book_placeholder_text(AddressbooksReadState::Loaded),
+            ab_strings::NO_ADDRESSBOOKS
+        );
+    }
 }

@@ -25,11 +25,11 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
 import com.fauna.app.R
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Dialog
 
 @Composable
 fun ImageLightbox(model: Any?, onDismiss: () -> Unit, placeholder: String? = null) {

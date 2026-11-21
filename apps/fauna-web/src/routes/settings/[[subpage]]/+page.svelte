@@ -6,18 +6,19 @@
   import { aftermathProgress, configStageSettled } from '#lib/succession-aftermath';
   import {
     accountsList,
-    accountsSwitch,
-    accountsSwitchConfirmed,
     accountsSetRequireConfirm,
     accountsRemove,
     accountDisplayHandle,
     type AccountEntry,
   } from '#lib/accounts';
-  import { resolve } from '$app/paths';
+  import { performAccountSwitch, switchReauthTarget, switchRefusalText, type ReauthTarget } from '#lib/account-switch';
+  import AccountReauthPrompt from '#lib/components/AccountReauthPrompt.svelte';
   import { pushOptedIn, enablePush, disablePush, dropActorPushRow } from '#lib/push';
   import { flushDraftRailsNow } from '#lib/drafts-leave-flush';
+  import { askPossibility, formGate, formRefusal } from '#lib/form-gate';
   import {
     ensureWasm,
+    memberReviewRemovePossibility,
     encodeEmailFilterRuleInputs,
     defaultFilterRuleInputs,
     FILTER_RULE_KINDS,
@@ -107,7 +108,12 @@
   import { RecoveryErrorGuard } from '#lib/recovery-error-guard';
   import { recoveryDeadGenerations, recoveryLetGo, recoveryLetGoConfirmWord } from '#lib/wasm';
   import { buildVersion, keypackagesLow, statusTextRaw, termsUrl } from '#lib/wasm';
-  import { mutedKeywordLevel } from '#lib/wasm';
+  import {
+    mutedKeywordLevel,
+    mutedWordAddPossibility,
+    spamSavePreferencesPossibility,
+    stolenEntryPossibility,
+  } from '#lib/wasm';
   import { letGoAnswer, letGoArmed, letGoRenders, type DeadGenerations } from '#lib/recovery-let-go';
   import { owedKey, withoutOwed, type OwedNestEntry, type OwedNests } from '#lib/recovery-owed-nests';
   import { ownSupersessionHold } from '#lib/own-supersession-hold';
@@ -176,6 +182,8 @@
   import MailSpamSection from '#lib/components/MailSpamSection.svelte';
   import MailExportSection from '#lib/components/MailExportSection.svelte';
   import MailImportSection from '#lib/components/MailImportSection.svelte';
+  import { isMailSubpage, subpageGate } from '#lib/mail-gate';
+  import { mailUsable } from '#lib/mail-usable';
   import ArchiveImportSection from '#lib/components/ArchiveImportSection.svelte';
   import WebSettingsSection from '#lib/components/WebSettingsSection.svelte';
   import SubscriptionsSection from '#lib/components/SubscriptionsSection.svelte';
@@ -209,6 +217,10 @@
   // app), so web must land on the same content for either form.
   let rawSubpage = $derived(page.params.subpage ?? '');
   let current = $derived(rawSubpage === 'status' ? '' : rawSubpage);
+  // The mail-usable gate for the open mail sub-page: the shell's watch keeps
+  // `mailUsable` live (the shared "checking" answer until the machine's first
+  // read — rule 5), so the page never spells a reason of its own.
+  let mailGate = $derived(subpageGate($mailUsable));
 
   // The shared page-heading (settings.md § Sub-page heading conformance) must
   // read the SUB-PAGE's own title, not the bare "Settings" shell title — a
@@ -222,6 +234,14 @@
     : current === 'connected-apps' ? t.connected_apps.title
     : current === 'sessions' ? t.sessions.title
     : current === 'archive-import' ? t.archive_import.title
+    // The six mail sub-pages: their gated face shows only this heading, the
+    // reason and Back, so the heading must name the sub-page.
+    : current === 'mail-aliases' ? t.mail_aliases.title
+    : current === 'mail-spam' ? t.mail_spam.title
+    : current === 'mail-export' ? t.mail_export.title
+    : current === 'mail-import' ? t.mail_import.title
+    : current === 'mail-lists' ? t.mail_lists.title
+    : current === 'mail-list-members' ? t.mail_lists.members_title
     : t.common.settings
   );
 
@@ -288,7 +308,7 @@
   // long-term-store.md § Multi-account evolution → Per-account re-auth). Set
   // while the prompt is up; null otherwise. Web has no native OS re-auth prompt,
   // so it renders the in-app shape the linux slice ratified.
-  let reauthTarget = $state<{ actorId: string; label: string } | null>(null);
+  let reauthTarget = $state<ReauthTarget | null>(null);
 
   /** The Stage-2 gate in front of the switch seam: resolve the re-auth question
    *  BEFORE anything app-owned runs, so `performSwitch`'s mutation-first order
@@ -300,82 +320,31 @@
   async function requestSwitchAccount(actorId: string) {
     if (switchingAccount || actorId.toLowerCase() === servedActor) return;
     accountsError = '';
-    let flagged: AccountEntry | undefined;
+    let target: ReauthTarget | null;
     try {
-      flagged = (await accountsList()).find(
-        (a) => a.actor_id === actorId && a.require_confirm_to_activate,
-      );
+      target = await switchReauthTarget(actorId);
     } catch (e) {
       accountsError = String(e);
       return;
     }
-    if (flagged) {
-      reauthTarget = {
-        actorId,
-        label: accountDisplayLabel(flagged.handle, flagged.actor_id),
-      };
+    if (target) {
+      reauthTarget = target;
       return;
     }
     await performSwitch(actorId, false);
   }
 
+  /** The shared switch (`#lib/account-switch` — the same one `launch_retry`'s
+   *  switcher runs): activation first, so a refusal tears nothing down and
+   *  lands here; on success the document relaunches as the new account. */
   async function performSwitch(actorId: string, confirmed: boolean) {
     if (switchingAccount) return;
     switchingAccount = true;
     accountsError = '';
     try {
-      const outgoing = $identity;
-      // set_active + re-pin this tab, then a full reload re-runs the launch
-      // flow against the now-active identity, read back from the registry (web's teardown+rebuild; the admin shell reveals itself via the
-      // per-actor `am-i-admin` check). No relaunch UI — the browser reloads.
-      // `confirmed` is the Stage-2 re-auth bit: plain set_active REFUSES a
-      // flagged account, so a path that skipped the prompt fails loudly here —
-      // nothing has been torn down yet.
-      if (confirmed) {
-        await accountsSwitchConfirmed(actorId);
-      } else {
-        await accountsSwitch(actorId);
-      }
-      // The leave-gesture push drop (`common.md` § Registration): the
-      // OUTGOING actor's row falls while its authority is still in hand —
-      // awaited (not fire-and-forget) because the hard reload below would
-      // kill an in-flight call; best-effort inside the helper, so an offline
-      // switch still switches. The incoming actor re-arms via the reload's
-      // `rearmPush`. AFTER the activation, never before: a
-      // refused switch leaves the user where they were, and that includes
-      // their notifications (`multiple-accounts` outcome 11).
-      if (outgoing) await dropActorPushRow(outgoing.secretHex);
-      // The leave-flush (`reserved-folders.md` § The leave-flush promise —
-      // switching to another account is a leave door): every drafts rail
-      // saved NOW on the outgoing session, awaited, because the hard reload
-      // below retires that session and `pagehide`'s own fire-and-forget flush
-      // gets no reliable async work after it. After the activation, like the
-      // push drop: a refused switch leaves the composer where it was, still on
-      // its debounce. Each rail is bounded, so an offline switch still switches.
-      await flushDraftRailsNow();
-      // Count the teardown at its INITIATION point — synchronously, in the same
-      // job as the navigation below, never after it (the navigation never
-      // returns). Convention 14's negative-assert observable
-      // (`fauna_e2e_agent::SESSION_GENERATION_KEY`); the write is a
-      // `sessionStorage` bump precisely so it survives the document swap.
-      //
-      // Reached through the installed `window.__fauna_*` hook rather than a
-      // static `#lib/generation-e2e` import, so convention 15 holds in the
-      // strong form the other hooks have: a production build constant-folds
-      // this branch away AND never bundles the module, instead of shipping it
-      // as dead code behind a false flag. A dynamic import here would be wrong
-      // for a different reason — it resolves a microtask later, and the
-      // navigation below does not wait.
-      if (__FAUNA_E2E_AUTOMATION__) {
-        (window as unknown as { __fauna_recordSessionTeardown?: () => void })
-          .__fauna_recordSessionTeardown?.();
-      }
-      // Raw navigation (full document reload) — `base` ('/app') + the route, so
-      // /app/feed. A hard reload re-runs the launch flow against the now-active
-      // identity; a soft `goto` would not rebuild the wasm WS-RPC/MLS session.
-      window.location.assign(resolve('/feed'));
+      await performAccountSwitch(actorId, confirmed, $identity?.secretHex ?? null);
     } catch (e) {
-      accountsError = rejectionText(e, t.settings.switch_refused({ account: actorId }));
+      accountsError = switchRefusalText(e, actorId);
       switchingAccount = false;
     }
   }
@@ -514,6 +483,13 @@
    *  is), so the comparison is against the literal on every app and in every
    *  language. */
   let stolenConfirm = $state('');
+  // `identity-stolen-button` paints from the shared draft answer
+  // (`stolen_entry_possibility`: the kit pasted, then the confirm word) and
+  // `doSucceedIdentity` asks it again — no word comparison of the page's own.
+  function stolenEntryAnswer() {
+    return stolenEntryPossibility(recoveryPhrase, stolenConfirm);
+  }
+  const stolenEntryGate = $derived(formGate(askPossibility(stolenEntryAnswer)));
   /** The let-go of a dead generation (settings.md § Recovery kit, the fifth
    *  act): the account runtime's dead read — the trio's one render gate,
    *  through the shared line (`letGoRenders`) — and its type-to-confirm field.
@@ -1038,8 +1014,9 @@
     const id = $identity;
     if (!id) return;
     const phrase = recoveryPhrase.trim();
-    if (!phrase) {
-      recoveryError = recoveryErrorGuard.write(recoveryError, t.settings.recovery_kit.kit_phrase_required);
+    const refusal = formRefusal(askPossibility(stolenEntryAnswer));
+    if (refusal !== null) {
+      recoveryError = recoveryErrorGuard.write(recoveryError, refusal);
       return;
     }
     recoveryError = recoveryErrorGuard.write(recoveryError, '');
@@ -1442,6 +1419,13 @@
   // A round trip in flight: the add/remove buttons and every level picker wait
   // for the returned record (`ui/settings.md` § Muted words — the level picker).
   let mutedWordsBusy = $state(false);
+  // `muted-word-add-button`'s answer — the shared
+  // `fauna_client_config::muted_word_add_possibility` (a term, and no change in
+  // flight; `ui/settings.md` § Errors & edge cases): painted on the button,
+  // asked again by the press and Enter, refusing with the same reason.
+  const mutedWordAddGate = $derived(
+    formGate(askPossibility(() => mutedWordAddPossibility(newMutedWord, mutedWordsBusy))),
+  );
 
   // Every record this page reads or a write returns replaces the session-held
   // copy (`#lib/muted-words`), so the knock toast's gate and the collapses
@@ -1481,8 +1465,13 @@
   // so a term another device stored since this page loaded survives the click.
   async function addMutedWord() {
     const id = $identity;
+    if (!id) return;
+    const refusal = formRefusal(askPossibility(() => mutedWordAddPossibility(newMutedWord, mutedWordsBusy)));
+    if (refusal !== null) {
+      mutedWordsError = refusal;
+      return;
+    }
     const term = newMutedWord.trim();
-    if (!id || !term) return;
     mutedWordsGesture += 1;
     mutedWordsBusy = true;
     try {
@@ -1542,6 +1531,21 @@
   let memberReviewRows = $state<MemberReviewRowVM[]>([]);
   let memberReviewLoaded = $state(false);
   let memberReviewError = $state('');
+  // Whether this tab's conversations session is up — Remove evicts through
+  // it, so it is not live without one (`succession-propagation.md`
+  // § Propagation). Re-read after every roster read.
+  let memberReviewSessionUp = $state(false);
+  // `member-review-remove-button`'s answer — the shared
+  // `fauna_core::data::member_review_remove_possibility`, painted on both
+  // surfaces' Remove and asked again by `removeMemberReview` (`ui/README.md`
+  // § Offer only what is possible, rules 6–7). Matches tui's `review_rows`.
+  const memberReviewRemovePaint = $derived(
+    formGate(
+      memberReviewLoaded
+        ? askPossibility(() => memberReviewRemovePossibility(memberReviewSessionUp))
+        : null,
+    ),
+  );
 
   /** The ephemeral kit-side pass's render gate — `succession-aftermath.md`
    *  § Propagation, item (ii): render only where a sweep ran THIS session,
@@ -1596,6 +1600,7 @@
       memberReviewReadError = e instanceof Error ? e.message : String(e);
       memberReviewError = memberReviewReadError;
     }
+    memberReviewSessionUp = conversationsManagerIfReady() !== null;
     // No round trip (a synchronous local read on the wasm side) — never
     // allowed to leave `ephemeralReviewActive` stuck true from a stale sign-in
     // if it throws, so this sits outside the `try` above.
@@ -1695,8 +1700,15 @@
    *  afterward. Re-reads the roster regardless: a full eviction drops the
    *  row, a partial one re-renders from the unchanged state. */
   async function removeMemberReview(personHex: string) {
-    const id = $identity;
-    if (!id) return;
+    // The answer the button painted from, asked again over the live session:
+    // no session, no eviction — said on `error-message`, never a silent return.
+    const refusal = formRefusal(
+      askPossibility(() => memberReviewRemovePossibility(conversationsManagerIfReady() !== null)),
+    );
+    if (refusal !== null) {
+      if (refusal) memberReviewError = refusal;
+      return;
+    }
     const row = memberReviewRows.find((r) => r.review.person === personHex);
     const who = row ? resolveLocalized(row.text.who) : t.settings.recovery_kit.review_unknown_person;
     memberReviewGestures += 1;
@@ -1725,6 +1737,7 @@
     } catch {
       return;
     }
+    memberReviewSessionUp = conversationsManagerIfReady() !== null;
     if (before !== memberReviewGestures) return;
     if (memberReviewReadError && memberReviewError === memberReviewReadError) memberReviewError = '';
     memberReviewReadError = '';
@@ -1749,6 +1762,20 @@
   let spamPrefsLoading = $state(false);
   let spamPrefsSaved = $state(false);
   let spamPrefsError = $state('');
+  // What the nest last confirmed (the read's reply or a save's echo) and where
+  // that read stands: `save-spam-prefs` is offered only while a slider differs
+  // from it — the shared `fauna_client_spam::possibility::save_preferences_possibility`
+  // (`ui/settings.md`, the spam-moderation row), painted on the button and asked
+  // again by the press.
+  let spamSaved = $state<{ spam_threshold: number; phishing_threshold: number } | null>(null);
+  let spamRead = $state<'pending' | 'failed' | 'resolved'>('pending');
+  const saveSpamGate = $derived(
+    formGate(
+      askPossibility(() =>
+        spamSavePreferencesPossibility(spamRead, spamSaved, spamThreshold, phishingThreshold),
+      ),
+    ),
+  );
 
   onMount(async () => {
     await ensureWasm();
@@ -1846,7 +1873,12 @@
       const prefs = await getSpamPreferences(id.secretHex);
       spamThreshold = prefs.spam_threshold;
       phishingThreshold = prefs.phishing_threshold;
-    } catch { /* spam prefs not available */ }
+      spamSaved = prefs;
+      spamRead = 'resolved';
+    } catch {
+      /* spam prefs not available */
+      if (spamRead !== 'resolved') spamRead = 'failed';
+    }
     try {
       serverModerationActions = await moderationActions(id.secretHex);
     } catch { /* moderation actions not available */ }
@@ -2148,14 +2180,25 @@
   async function saveSpamPreferences() {
     const id = $identity;
     if (!id) return;
+    const refusal = formRefusal(
+      askPossibility(() =>
+        spamSavePreferencesPossibility(spamRead, spamSaved, spamThreshold, phishingThreshold),
+      ),
+    );
+    if (refusal !== null) {
+      spamPrefsError = refusal;
+      return;
+    }
     spamPrefsLoading = true;
     spamPrefsError = '';
     spamPrefsSaved = false;
     try {
-      await updateSpamPreferences(id.secretHex, {
+      const echo = await updateSpamPreferences(id.secretHex, {
         spam_threshold: spamThreshold,
         phishing_threshold: phishingThreshold,
       });
+      // The nest's echo is the new baseline: nothing to save until the next edit.
+      spamSaved = echo;
       spamPrefsSaved = true;
       setTimeout(() => { spamPrefsSaved = false; }, 3000);
     } catch (e: any) {
@@ -2227,7 +2270,6 @@
 
 <!-- Escape declines the Stage-2 re-auth prompt (cancel/backdrop/Escape are one
      decline path, ratified) — a pure no-op, so an unexpected keypress is safe. -->
-<svelte:window onkeydown={(e) => { if (e.key === 'Escape' && reauthTarget) cancelReauth(); }} />
 
 <h1 data-testid={IDS.PAGE_HEADING}>{pageHeadingText}</h1>
 
@@ -2479,36 +2521,14 @@
       {/each}
     </div>
     {#if reauthTarget}
-      <!-- Stage-2 in-app re-auth confirm (`account-activate-reauth-prompt`) — the
-           shape the linux slice ratified for the no-native-prompt platforms,
-           mirroring the file-version-restore-confirm-modal family. A confirmation,
-           not a credential check; cancel / backdrop / Escape are all the decline
-           path (a pure no-op). -->
-      <div class="modal-backdrop" role="presentation" onclick={cancelReauth}>
-        <div
-          data-testid={IDS.ACCOUNT_ACTIVATE_REAUTH_PROMPT}
-          class="modal"
-          role="dialog"
-          aria-modal="true"
-          onclick={(e) => e.stopPropagation()}
-        >
-          <h2>{t.settings.account_page.reauth_prompt_title}</h2>
-          <p>{t.settings.account_page.reauth_prompt_body({ account: reauthTarget.label })}</p>
-          <div class="modal-actions">
-            <button
-              data-testid={IDS.ACCOUNT_ACTIVATE_REAUTH_CANCEL_BUTTON}
-              class="btn"
-              onclick={cancelReauth}
-            >{t.common.cancel}</button>
-            <button
-              data-testid={IDS.ACCOUNT_ACTIVATE_REAUTH_CONFIRM_BUTTON}
-              class="btn primary"
-              onclick={confirmReauth}
-              disabled={switchingAccount}
-            >{t.settings.account_page.reauth_confirm}</button>
-          </div>
-        </div>
-      </div>
+      <!-- Stage-2 in-app re-auth confirm (`account-activate-reauth-prompt`):
+           the shared component `launch_retry`'s switcher paints too. -->
+      <AccountReauthPrompt
+        label={reauthTarget.label}
+        busy={switchingAccount}
+        onconfirm={confirmReauth}
+        oncancel={cancelReauth}
+      />
     {/if}
     <button class="btn" data-testid={IDS.ACCOUNT_ADD_BUTTON} onclick={addAccount} disabled={switchingAccount}>
       {t.settings.account_page.add_account}
@@ -2640,9 +2660,20 @@
             <button data-testid={IDS.MEMBER_REVIEW_KEEP_BUTTON} class="btn small" onclick={() => keepMemberReview(row.review.person)}>
               {t.settings.recovery_kit.review_keep}
             </button>
-            <button data-testid={IDS.MEMBER_REVIEW_REMOVE_BUTTON} class="btn danger small" onclick={() => removeMemberReview(row.review.person)}>
-              {t.settings.recovery_kit.review_remove}
-            </button>
+            {#if memberReviewRemovePaint.shown}
+              <button
+                data-testid={IDS.MEMBER_REVIEW_REMOVE_BUTTON}
+                class="btn danger small"
+                disabled={memberReviewRemovePaint.disabled}
+                title={memberReviewRemovePaint.reason || undefined}
+                onclick={() => removeMemberReview(row.review.person)}
+              >
+                {t.settings.recovery_kit.review_remove}
+              </button>
+              {#if memberReviewRemovePaint.reason}
+                <span class="muted small">{memberReviewRemovePaint.reason}</span>
+              {/if}
+            {/if}
           </div>
         {/each}
         <button data-testid={IDS.MEMBER_REVIEW_DEFER_BUTTON} class="btn" onclick={deferMemberReviewPass}>
@@ -2868,16 +2899,15 @@
       />
       <!-- The confirm token is a fixed literal, NOT a localized string: only its
            prompt is translated (`stolen_confirm_placeholder`), so the word is
-           the same on every app and in every language. tui pins it as
-           `settings::recovery::STOLEN_CONFIRM_WORD` and the e2e action types it
-           literally (`actions/settings.py::succeed_identity_with_held_kit`);
-           this is the third copy of a spec-fixed token, and the three must
-           agree. -->
+           the same on every app and in every language. It lives once, in
+           `fauna_client_recovery::ceremony::STOLEN_CONFIRM_WORD`, behind the
+           button's draft answer (`stolenEntryPossibility`). -->
       <button
         data-testid={IDS.IDENTITY_STOLEN_BUTTON}
         class="btn danger"
         onclick={doSucceedIdentity}
-        disabled={recoveryBusy || stolenConfirm.trim() !== 'SUCCEED'}
+        disabled={recoveryBusy || stolenEntryGate.disabled}
+        title={stolenEntryGate.reason || undefined}
       >
         {t.settings.recovery_kit.stolen}
       </button>
@@ -3027,9 +3057,20 @@
           <button data-testid={IDS.MEMBER_REVIEW_KEEP_BUTTON} class="btn small" onclick={() => keepMemberReview(row.review.person)}>
             {t.settings.recovery_kit.review_keep}
           </button>
-          <button data-testid={IDS.MEMBER_REVIEW_REMOVE_BUTTON} class="btn danger small" onclick={() => removeMemberReview(row.review.person)}>
-            {t.settings.recovery_kit.review_remove}
-          </button>
+          {#if memberReviewRemovePaint.shown}
+            <button
+              data-testid={IDS.MEMBER_REVIEW_REMOVE_BUTTON}
+              class="btn danger small"
+              disabled={memberReviewRemovePaint.disabled}
+              title={memberReviewRemovePaint.reason || undefined}
+              onclick={() => removeMemberReview(row.review.person)}
+            >
+              {t.settings.recovery_kit.review_remove}
+            </button>
+            {#if memberReviewRemovePaint.reason}
+              <span class="muted small">{memberReviewRemovePaint.reason}</span>
+            {/if}
+          {/if}
         </div>
       {/each}
     {/if}
@@ -3103,7 +3144,8 @@
       data-testid={IDS.SAVE_SPAM_PREFS}
       class="btn primary"
       onclick={saveSpamPreferences}
-      disabled={spamPrefsLoading}
+      disabled={spamPrefsLoading || saveSpamGate.disabled}
+      title={saveSpamGate.reason || undefined}
     >
       {spamPrefsLoading ? t.common.saving : t.status.spam.save}
     </button>
@@ -3330,7 +3372,7 @@
         class="input"
         onkeydown={(e) => { if (e.key === 'Enter') addMutedWord(); }}
       />
-      <button data-testid={IDS.MUTED_WORD_ADD_BUTTON} class="btn primary" onclick={addMutedWord} disabled={!newMutedWord.trim() || mutedWordsBusy}>
+      <button data-testid={IDS.MUTED_WORD_ADD_BUTTON} class="btn primary" onclick={addMutedWord} disabled={mutedWordAddGate.disabled} title={mutedWordAddGate.reason || undefined}>
         {t.muted_words.add}
       </button>
     </div>
@@ -3508,6 +3550,13 @@
        error-message surface via bind:error. -->
   <MailSettingsSection bind:error />
 
+{:else if isMailSubpage(current) && mailGate.gated}
+  <!-- The mail-usable gate (`ui/mail-settings.md` § Errors & edge cases): a
+       mail sub-page opened while mail is not possible shows only its heading
+       (above), the reason and Back (the rail's `settings-nav-back`) — no form or
+       wizard whose submit could not succeed. -->
+  {#if mailGate.text}<p class="muted" data-testid={mailGate.testId}>{resolveLocalized(mailGate.text)}</p>{/if}
+
 {:else if current === 'mail-aliases'}
   <!-- Mail aliases (exact / wildcard / disposable). -->
   <MailAliasesSection bind:error />
@@ -3562,7 +3611,7 @@
   <section class="section" data-testid={IDS.SETTINGS_LOGS}>
     <h2>{t.logs.title}</h2>
     <p class="muted small">{t.logs.description}</p>
-    <LogsView entries={logEntries} showClear onClear={clearLogs} />
+    <LogsView entries={logEntries} showClear onClear={clearLogs} bind:error />
   </section>
 {/if}
 </div>

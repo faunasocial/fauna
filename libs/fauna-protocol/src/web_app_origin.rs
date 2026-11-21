@@ -33,6 +33,18 @@ use crate::Value;
 /// constant), so no second knob or literal names it.
 pub const CENTRAL_APP_ORIGIN: &str = "https://app.fauna.social";
 
+/// Whether [`CENTRAL_APP_ORIGIN`] serves the app today — the one fact that
+/// decides whether any nest redirects to it and whether any surface offers it
+/// (`web-content-hosting.md` § Same-origin security model → *While the central
+/// origin is not live, the choice is not offered*). A build constant, not a
+/// probe and not a knob: no person chooses it, and reachability can only be
+/// tested from where a box stands, never from its users' browsers. `false`
+/// until the commit that records the cutover flips it (`front-door.md`
+/// § Implementation status today). Only the NEST reads it: the pure functions
+/// below take the fact as a parameter, and apps read the nest's projected
+/// `central_live`, never this constant.
+pub const CENTRAL_APP_ORIGIN_LIVE: bool = false;
+
 /// The query parameter the central app reads as a pre-fill of the handle-entry
 /// page's domain part (`onboarding.md` § 2 Handle entry → *Nest hint*).
 pub const NEST_HINT_PARAM: &str = "nest";
@@ -77,6 +89,11 @@ impl WebAppOrigin {
 pub enum WebAppOriginServing {
     /// The bundled SPA, because that is the choice.
     Bundled,
+    /// The bundled SPA although the choice is central: the central origin does
+    /// not serve the app yet ([`CENTRAL_APP_ORIGIN_LIVE`]), and a redirect to
+    /// an address that serves nothing is a dead nest for every browser.
+    /// Decided before the domainless arm.
+    BundledCentralNotLive,
     /// The bundled SPA although the choice is central: a domainless box has
     /// nothing to pre-fill, and a redirect that cannot name the nest would hand
     /// the user to the central origin with no way back here.
@@ -89,11 +106,16 @@ pub enum WebAppOriginServing {
 }
 
 impl WebAppOriginServing {
-    /// Fold the chosen mode with this nest's handle domain — the caller passes
-    /// the domain only when one is SET (never a `localhost` placeholder).
-    pub fn resolve(mode: WebAppOrigin, handle_domain: Option<&str>) -> Self {
+    /// Fold the chosen mode with this nest's handle domain and whether the
+    /// central origin is live — the caller passes the domain only when one is
+    /// SET (never a `localhost` placeholder), and the nest passes
+    /// [`CENTRAL_APP_ORIGIN_LIVE`] (tests pin both values).
+    pub fn resolve(mode: WebAppOrigin, handle_domain: Option<&str>, central_live: bool) -> Self {
         match (mode, handle_domain.filter(|d| !d.is_empty())) {
             (WebAppOrigin::Bundled, _) => WebAppOriginServing::Bundled,
+            (WebAppOrigin::Central, _) if !central_live => {
+                WebAppOriginServing::BundledCentralNotLive
+            }
             (WebAppOrigin::Central, None) => WebAppOriginServing::BundledDomainless,
             (WebAppOrigin::Central, Some(d)) => WebAppOriginServing::Central {
                 nest_domain: d.to_string(),
@@ -186,6 +208,12 @@ pub struct AdminWebAppOriginGetReply {
     /// bundled regardless.
     #[serde(default)]
     pub domainless: bool,
+    /// Whether the central origin serves the app, as this NEST's build knows
+    /// it ([`CENTRAL_APP_ORIGIN_LIVE`]) — the nest is the authority, since it
+    /// performs the redirect; an app never consults a constant of its own.
+    /// Absent (an older nest) reads `false`.
+    #[serde(default)]
+    pub central_live: bool,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema
     /// and forward-compat discipline, rule 4).
@@ -195,14 +223,15 @@ pub struct AdminWebAppOriginGetReply {
 
 impl AdminWebAppOriginGetReply {
     /// The projection of `mode` as served by a nest whose handle domain is
-    /// `handle_domain` — the one builder the nest's reply and its
-    /// `setup.status` fields share.
-    pub fn project(mode: WebAppOrigin, handle_domain: Option<&str>) -> Self {
-        let serving = WebAppOriginServing::resolve(mode, handle_domain);
+    /// `handle_domain` and whose build says `central_live` — the one builder
+    /// the nest's reply and its `setup.status` fields share.
+    pub fn project(mode: WebAppOrigin, handle_domain: Option<&str>, central_live: bool) -> Self {
+        let serving = WebAppOriginServing::resolve(mode, handle_domain, central_live);
         AdminWebAppOriginGetReply {
             mode: mode.as_str().to_string(),
             redirect_target: serving.redirect_for("/app/"),
             domainless: serving == WebAppOriginServing::BundledDomainless,
+            central_live,
             extra: Default::default(),
         }
     }
@@ -276,19 +305,19 @@ mod tests {
     #[test]
     fn a_domainless_box_serves_bundled_whatever_the_choice() {
         assert_eq!(
-            WebAppOriginServing::resolve(WebAppOrigin::Central, None),
+            WebAppOriginServing::resolve(WebAppOrigin::Central, None, true),
             WebAppOriginServing::BundledDomainless
         );
         assert_eq!(
-            WebAppOriginServing::resolve(WebAppOrigin::Central, Some("")),
+            WebAppOriginServing::resolve(WebAppOrigin::Central, Some(""), true),
             WebAppOriginServing::BundledDomainless
         );
         assert_eq!(
-            WebAppOriginServing::resolve(WebAppOrigin::Bundled, Some("example.org")),
+            WebAppOriginServing::resolve(WebAppOrigin::Bundled, Some("example.org"), true),
             WebAppOriginServing::Bundled
         );
         assert_eq!(
-            WebAppOriginServing::resolve(WebAppOrigin::Central, Some("example.org"))
+            WebAppOriginServing::resolve(WebAppOrigin::Central, Some("example.org"), true)
                 .redirect_for("/app/x"),
             Some("https://app.fauna.social/app/x?nest=example.org".to_string())
         );
@@ -300,7 +329,8 @@ mod tests {
 
     #[test]
     fn the_projection_names_mode_target_and_the_domainless_reason() {
-        let p = AdminWebAppOriginGetReply::project(WebAppOrigin::Central, Some("example.org"));
+        let p =
+            AdminWebAppOriginGetReply::project(WebAppOrigin::Central, Some("example.org"), true);
         assert_eq!(p.mode, "central");
         assert_eq!(
             p.redirect_target.as_deref(),
@@ -308,17 +338,70 @@ mod tests {
         );
         assert!(!p.domainless);
 
-        let p = AdminWebAppOriginGetReply::project(WebAppOrigin::Central, None);
+        let p = AdminWebAppOriginGetReply::project(WebAppOrigin::Central, None, true);
         assert_eq!(
             (p.mode.as_str(), p.redirect_target, p.domainless),
             ("central", None, true)
         );
 
-        let p = AdminWebAppOriginGetReply::project(WebAppOrigin::Bundled, Some("example.org"));
+        let p =
+            AdminWebAppOriginGetReply::project(WebAppOrigin::Bundled, Some("example.org"), true);
         assert_eq!(
             (p.mode.as_str(), p.redirect_target, p.domainless),
             ("bundled", None, false)
         );
+    }
+
+    #[test]
+    fn a_central_origin_that_is_not_live_is_never_redirected_to() {
+        // Stored central, not live: bundled, no target — decided before the
+        // domainless arm, so a domainless box reads "not live" too.
+        for domain in [Some("example.org"), None] {
+            let serving = WebAppOriginServing::resolve(WebAppOrigin::Central, domain, false);
+            assert_eq!(serving, WebAppOriginServing::BundledCentralNotLive);
+            assert_eq!(serving.redirect_for("/app/"), None);
+            let p = AdminWebAppOriginGetReply::project(WebAppOrigin::Central, domain, false);
+            assert_eq!(
+                (
+                    p.mode.as_str(),
+                    p.redirect_target,
+                    p.domainless,
+                    p.central_live
+                ),
+                ("central", None, false, false)
+            );
+        }
+        assert_eq!(
+            WebAppOriginServing::resolve(WebAppOrigin::Bundled, Some("example.org"), false),
+            WebAppOriginServing::Bundled
+        );
+        assert!(
+            AdminWebAppOriginGetReply::project(WebAppOrigin::Central, Some("example.org"), true)
+                .central_live
+        );
+    }
+
+    #[test]
+    fn the_shipped_build_says_the_central_origin_is_not_live() {
+        // Flipped only by the cutover commit, which restores the tier_3
+        // flip-to-central journey in the same change.
+        const { assert!(!CENTRAL_APP_ORIGIN_LIVE) };
+    }
+
+    #[test]
+    fn an_older_nests_reply_without_central_live_reads_not_live() {
+        #[derive(Serialize)]
+        struct Older {
+            mode: String,
+            domainless: bool,
+        }
+        let bytes = encode_canonical(&Older {
+            mode: "central".into(),
+            domainless: false,
+        })
+        .expect("encode");
+        let reply: AdminWebAppOriginGetReply = decode_strict(&bytes).expect("decode");
+        assert!(!reply.central_live);
     }
 
     #[test]

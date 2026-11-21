@@ -1,5 +1,18 @@
 //! Progress reporting for sync transfers.
 
+/// Which way a finished transfer moved a file's bytes — carried on
+/// [`ProgressEvent::FileDone`] so a consumer can tell an upload from a
+/// download. The desktop apps' "{filename} uploaded" notice is fed by uploads
+/// alone (`file-sync.md` § Files Appear Automatically); a download settling a
+/// file must never announce it as uploaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferDirection {
+    /// This device's bytes reached the nest.
+    Upload,
+    /// Another device's bytes were written to this device's disk.
+    Download,
+}
+
 /// Events emitted during sync operations for progress tracking.
 #[derive(Debug, Clone)]
 pub enum ProgressEvent {
@@ -11,8 +24,11 @@ pub enum ProgressEvent {
     },
     /// A single chunk was transferred successfully.
     ChunkDone { path: String, bytes: u64 },
-    /// A file completed upload or download.
-    FileDone { path: String },
+    /// A file completed upload or download; `direction` says which.
+    FileDone {
+        path: String,
+        direction: TransferDirection,
+    },
     /// A full sync cycle completed.
     CycleDone {
         files: usize,
@@ -101,6 +117,7 @@ mod tests {
             &ptx,
             ProgressEvent::FileDone {
                 path: "test.txt".into(),
+                direction: TransferDirection::Upload,
             },
         );
         emit(

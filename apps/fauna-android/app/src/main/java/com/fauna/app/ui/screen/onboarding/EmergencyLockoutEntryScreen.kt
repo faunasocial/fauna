@@ -18,16 +18,25 @@ import androidx.lifecycle.viewModelScope
 import androidx.navigation.NavController
 import com.fauna.app.R
 import com.fauna.app.core.OnboardingHost
+import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.formRefusal
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.ffi.formatUnixLocal
-import com.fauna.ffi.sessionsLockoutConfirmWord
 import com.fauna.ffi.onboarding.EmergencyLockoutOutcome
 import com.fauna.ffi.onboarding.OnboardingStep
 import com.fauna.ffi.onboarding.emergencyLockoutOutcomeMessage
+import com.fauna.ffi.onboarding.emergencyLockoutPossibility
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.launch
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
 
 @HiltViewModel
 class EmergencyLockoutEntryVM @Inject constructor(
@@ -106,6 +115,12 @@ fun EmergencyLockoutEntryScreen(
     var secret by remember { mutableStateOf("") }
     var account by remember { mutableStateOf("") }
     var confirm by remember { mutableStateOf("") }
+    // `sessions-lockout-button`'s answer (`ui/README.md` § Offer only what is
+    // possible, rule 4's form case): the shared draft predicate over the three
+    // fields as typed.
+    val lockAnswer = remember(secret, account, confirm) {
+        askForm { emergencyLockoutPossibility(secret, account, confirm) }
+    }
 
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
@@ -183,21 +198,34 @@ fun EmergencyLockoutEntryScreen(
                 modifier = Modifier.testTag(Ids.EMERGENCY_LOCKOUT_BACK_BUTTON),
             ) { Text(stringResource(R.string.common_back)) }
 
-            Button(
-                onClick = {
-                    vm.launchSubmit(secret, account, confirm, context) {
-                        // A lock → identity_choice (the confirmation paints
-                        // there); a refusal stays on this step, speaking.
-                        val step = machine.step()
-                        if (step != OnboardingStep.EMERGENCY_LOCKOUT_ENTRY) {
-                            navController.popBackStack(routeForStep(step), inclusive = false)
+            Column(horizontalAlignment = Alignment.End) {
+                Button(
+                    onClick = {
+                        // The press asks the answer it was painted from again
+                        // (rule 6); a blocked draft's line goes on the wizard's
+                        // `error-message`.
+                        val refusal = formRefusal(context, lockAnswer)
+                        if (refusal != null) {
+                            refusal.reason?.let(machine::setErrorMessage)
+                        } else {
+                            vm.launchSubmit(secret, account, confirm, context) {
+                                // A lock → identity_choice (the confirmation paints
+                                // there); a refusal stays on this step, speaking.
+                                val step = machine.step()
+                                if (step != OnboardingStep.EMERGENCY_LOCKOUT_ENTRY) {
+                                    navController.popBackStack(routeForStep(step), inclusive = false)
+                                }
+                            }
                         }
-                    }
-                },
-                // The shared word gates the button here AND in the machine.
-                enabled = !vm.submitting && confirm == sessionsLockoutConfirmWord(),
-                modifier = Modifier.testTag(Ids.SESSIONS_LOCKOUT_BUTTON),
-            ) { Text(stringResource(R.string.sessions_lockout_button)) }
+                    },
+                    // Painted from the shared draft answer: secret, then
+                    // account, then the confirm word — the same checks, in the
+                    // same order, `submit_emergency_lockout` runs.
+                    enabled = !vm.submitting && lockAnswer.isPossible,
+                    modifier = Modifier.testTag(Ids.SESSIONS_LOCKOUT_BUTTON),
+                ) { Text(stringResource(R.string.sessions_lockout_button)) }
+                DisabledControlReasonText(localized(lockAnswer.blockedReason))
+            }
         }
     }
 }

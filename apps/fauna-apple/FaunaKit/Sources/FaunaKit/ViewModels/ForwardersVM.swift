@@ -32,7 +32,27 @@ public final class ForwardersVM {
     public var actionError: String?
     public private(set) var isLoading = false
 
+    /// The forwarder add form's answer — the shared
+    /// `ForwarderMachine::add_possibility` (admin.md § Errors & edge cases,
+    /// *Controls wait for their read*): blocked until the forwarder and
+    /// local-domain read resolves (the domain choice comes from it), blocked
+    /// after a failed one, blocked while a change is on its way.
+    public private(set) var addAnswer: Possibility = readPossibility(read: .pending)
+    /// The add form's picker and fields — the shared
+    /// `ForwarderMachine::form_possibility` (admin.md § 4, *A forwarder needs a
+    /// hosted domain*): [`addAnswer`], then blocked with the reason naming DNS
+    /// while the nest hosts no local domain.
+    public private(set) var formAnswer: Possibility = readPossibility(read: .pending)
+    /// Where the list read stands — the empty state is painted only once it
+    /// resolved (an unread list is not an empty one).
+    public private(set) var listRead: ReadState = .pending
+    /// Whether the read this page's read-gated controls wait for has resolved
+    /// (``AdminPageReading``): the forwarder list read (`ForwarderMachine::read_state`). An unanswered one is asked again when the
+    /// nest connection comes back.
+    public var readAnswered: Bool { listRead == .resolved }
+
     private var machine: ForwarderMachine?
+    private var buildFailed = false
 
     public init() {}
 
@@ -53,14 +73,21 @@ public final class ForwardersVM {
         } catch {
             // A concurrent build that succeeded owns the page; this one's
             // failure is not the page's.
-            if machine == nil { errorMessage = DisplayError.message(error) }
+            if machine == nil {
+                errorMessage = DisplayError.message(error)
+                buildFailed = true
+                addAnswer = readPossibility(read: .failed)
+                formAnswer = addAnswer
+                listRead = .failed
+            }
             return
         }
         // Re-entrant `configure`: the build that finishes first wins; a later
         // one is dropped, never replaces it (same shape as `LabelerCatalogVM`).
         guard machine == nil else { return }
         machine = built
-        snapshot = built.snapshot()
+        buildFailed = false
+        apply(built)
         await hydrate()
     }
 
@@ -71,14 +98,46 @@ public final class ForwardersVM {
         defer { isLoading = false }
         do { try await machine.hydrate() }
         catch { errorMessage = DisplayError.message(error) }
-        let snap = machine.snapshot()
-        snapshot = snap
-        actionError = snap.error
+        apply(machine)
+    }
+
+    /// Whether the page offers `admin-aliases-forwarder-add-domains-step` — the
+    /// one step that unblocks the form: exactly while the form is blocked for
+    /// want of a hosted domain (a pending or failed read gives another reason,
+    /// and offers no step).
+    public var offersDomainsStep: Bool {
+        if case .blocked(let reason) = formAnswer {
+            return reason.key == Self.noHostedDomain
+        }
+        return false
+    }
+
+    /// The blocked-reason key `ForwarderMachine::form_possibility` gives with
+    /// no hosted local domain (`fauna_client_mail_settings::forwarders::NO_HOSTED_DOMAIN`).
+    static let noHostedDomain = "admin.aliases_page.no_hosted_domain"
+
+    /// The submit's answer for this draft: the shared
+    /// `ForwarderMachine::create_possibility` over the picked domain (the read,
+    /// a change on its way, a hosted domain picked), then the draft's own
+    /// `forwarder_create_draft_possibility` (a non-blank local part and
+    /// destination) — so a page still loading says so first.
+    public func createAnswer(localDomain: String, pattern: String, forwardTarget: String) -> Possibility {
+        machinePossibility(machine, buildFailed: buildFailed) {
+            $0.createPossibility(localDomain: localDomain)
+        }
+        .and(forwarderCreateDraftPossibility(
+            localDomain: localDomain, pattern: pattern, forwardTarget: forwardTarget))
     }
 
     /// Create an external forwarder `<pattern>@<localDomain>` → `forwardTarget`.
     /// The machine re-reads the list (so the new row appears) on success.
     public func create(localDomain: String, pattern: String, forwardTarget: String) async {
+        // The press asks the paint's answer again, so a press racing the read,
+        // a create still on its way or an empty `local_domain` is refused with
+        // its reason, never sent.
+        if refusePress(createAnswer(localDomain: localDomain, pattern: pattern,
+                                    forwardTarget: forwardTarget),
+                       errorMessage: &errorMessage) { return }
         await dispatch(.create(localDomain: localDomain, pattern: pattern, forwardTarget: forwardTarget))
     }
 
@@ -92,9 +151,17 @@ public final class ForwardersVM {
         isLoading = true
         defer { isLoading = false }
         try? await machine.dispatch(action: action)
+        apply(machine)
+    }
+
+    /// Re-read the snapshot and the answers painted from it.
+    private func apply(_ machine: ForwarderMachine) {
         let snap = machine.snapshot()
         snapshot = snap
         actionError = snap.error
+        addAnswer = machine.addPossibility()
+        formAnswer = machine.formPossibility()
+        listRead = machine.readState()
     }
 }
 #endif // !FAUNA_KIDS

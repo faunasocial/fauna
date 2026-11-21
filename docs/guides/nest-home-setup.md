@@ -192,7 +192,7 @@ In the app, turn on **Calendar** and **Contacts** under Admin.
 Then in Apple Calendar and Contacts, Thunderbird, DAVx⁵ or any similar app, add a CalDAV account for your calendars and a CardDAV account, at the same address, for your contacts:
 
 - **Server:** `https://192.168.1.50:8443`
-- **Username and password:** the ones the app shows you
+- **Username and password:** those of a credential. Make one with **Add credential** under Settings → **Mail & Calendar** if you have none yet; its row under Settings → **Connected apps** shows the username, and there the password can be revealed and copied. [Calendar and contacts on your own server](calendar-and-contacts.md) has the details.
 
 Accept the certificate warning the first time, same as above.
 
@@ -211,7 +211,7 @@ Accept the certificate warning the first time, same as above.
   - A disk snapshot of the `fauna-data` storage area on a schedule is still
     worth having as a second line of defence, but it isn't the primary answer
     and you can't restore it from the app.
-- **Consider encrypting the disk.** Your content is already stored encrypted on the nest, apart from your profile, what you publish to everyone, a community room's posts and messages if this nest is its home, and anything you've given the nest permission to read, such as the sign-in of an account you link on another network; and the text of one of your messages, or of a post only some people can open, that someone who can open it attaches to a report. Your nest also sees what any server that delivers your messages must: who you're connected to — your contacts, whom you follow, the groups you're in — and when and how much you send, as well as the sizes and dates of what you store. An encrypted disk keeps all of that from whoever takes the machine.
+- **Consider encrypting the disk.** Your content is already stored encrypted on the nest, apart from your profile, what you publish to everyone, a community room's posts and messages if this nest is its home, and anything you've given the nest permission to read, such as the sign-in of an account you link on another network, or a searchable copy of your mail, calendar or contacts while **Keep my mail searchable on this nest**, **Keep my calendar searchable on this nest** or **Keep my contacts searchable on this nest** is on; and the text of one of your messages, or of a post only some people can open, that someone who can open it attaches to a report. Your nest also sees what any server that delivers your messages must: who you're connected to — your contacts, whom you follow, the groups you're in — and when and how much you send, as well as the sizes and dates of what you store. An encrypted disk keeps all of that from whoever takes the machine.
 - **Keep your recovery kit safe** — the code the app showed you once when you created your identity. It gets your account back if you lose every device ([Your recovery kit](identity-and-devices.md#your-recovery-kit)); if you skipped it, make one under **Settings → Account → Recovery Kit**. The claim itself leaves no recovery secret for you to keep: the claim code is used up the moment you claim, and your Fauna app keeps a copy of the server's own key for you.
 
 The Fauna software updates itself: on the default Stable builds the machine picks up a new version within the hour, and installs it. Keeping the operating system patched is up to you — the `unattended-upgrades` package from Step 3 installs Ubuntu's security updates, but some of them take effect only after a restart, so restart the machine now and then.
@@ -229,9 +229,9 @@ warning that its identity changed.
    handle names that address, and it is where your apps look for your nest.
 2. At Step 5, before you save the setup file, open an installed Fauna app (the web app
    is served by the machine you lost, so it can't open until the new one is
-   running) and choose **Recover a lost box** (it appears on the "Couldn't reach your nest" screen,
-   and on the screen of a newly installed app where you choose **Create New
-   Identity**). Pick this nest, then
+   running) and choose **Recover a lost box** (it appears on the "Couldn't reach your nest" screen once the app finds a server
+   key it keeps for you, and on the screen of a newly installed app where you choose
+   **Create New Identity**). Pick this nest, then
    **Install on my own server**, and copy the line it shows. It starts with
    `FAUNA_DEPLOYMENT_SEED=` and goes on with 64 letters and digits.
 3. In the setup file, add one line at the end of the `environment:` block
@@ -249,12 +249,16 @@ warning that its identity changed.
    without it makes a new key of its own and ignores the line from then on.
    The line is your server's key, so keep the file locked down as Step 5
    says.
-4. Carry on through Step 8. Your browser, when you open the web app at
-   Step 7, and your mail, calendar and contacts apps warn about the new
+4. Carry on through Step 7 and claim the new machine. Your browser, when you
+   open the web app at Step 7, warns about the new machine's certificate
+   once, as it did the first time; accept it.
+5. Straight after the claim, before Step 8, bring your data back from your
+   backup destination, as [Backup with Fauna](cloud-backup.md) describes.
+   If a calendar or contacts app has already added something on the new
+   machine, the restore still copies in what is missing beside it.
+6. Then do Step 8. Your mail, calendar and contacts apps warn about the new
    machine's certificate once, as they did the first time; accept it.
-5. Bring your data back from your backup destination, as
-   [Backup with Fauna](cloud-backup.md) describes.
-6. If this machine was linked to a nest on the internet, link them again,
+7. If this machine was linked to a nest on the internet, link them again,
    as Step 1 of [Link a home nest to an internet nest](nest-relay-setup.md)
    shows: the link was kept on the machine you lost, and until you redo it
    this machine doesn't collect your mail.
@@ -272,7 +276,7 @@ by design.
 ## Next: get your email delivered here
 
 On its own, this nest can't receive email from the internet — nothing outside
-can reach your home network. To fix that, you put a small server on the internet that accepts your mail and keeps it, encrypted, until this machine collects it a few seconds later — set up as the relay guide shows, it keeps no readable copy of the mail you receive:
+can reach your home network. To fix that, you put a small server on the internet that accepts your mail and keeps it, encrypted, until this machine collects it within seconds — set up as the relay guide shows, it keeps no readable copy of the mail you receive:
 
 1. Finish this guide.
 2. [Set up a nest on the internet](nest-internet-setup.md).

@@ -143,7 +143,7 @@ def _admin_client(nest):
 
 
 def _error(app) -> str:
-    return app.driver.get_text("error-message") if app.has_error() else "none"
+    return app.error_for_failure()
 
 
 def _index(app, domain: str) -> int | None:

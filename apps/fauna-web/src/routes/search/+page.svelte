@@ -18,23 +18,34 @@
   import { goto } from '$app/navigation';
   import { identity } from '#lib/store';
   import { getSearchManager, searchSnapshot, refreshSearch, setPendingSearchNav, type PendingSearchNav } from '#lib/search';
-  import { ensureWasm, searchTypeFilterOptions, searchTypeFilterLabel } from '#lib/wasm';
+  import { ensureWasm, searchTypeFilterOptions, searchTypeFilterLabel, searchQueryPossibility } from '#lib/wasm';
+  import { askPossibility, formGate, formRefusal } from '#lib/form-gate';
   import MessageBanner from '#lib/components/MessageBanner.svelte';
   import { t } from '#lib/i18n/strings';
   import { relativeTime } from '#lib/value-format';
   import { resolveLocalized } from '#lib/i18n/localized';
   import { IDS } from '#lib/generated/uiIds';
+  import { endsTextSelection } from '#lib/selection-click';
 
   const TYPE_FILTER_ALL = 'all';
   // Read after `ensureWasm()`: the shell renders this page before the core
   // chunk is up, so a top-level sync read would throw on a cold load.
   let typeFilterTokens = $state<string[]>([]);
+  let wasmUp = $state(false);
   onMount(async () => {
     await ensureWasm();
     typeFilterTokens = searchTypeFilterOptions();
+    wasmUp = true;
   });
 
   let query = $state('');
+  // `search-submit-button` painted from the shared draft-validity answer
+  // (`fauna_client_search::query_possibility`, `search.md` § Errors & edge
+  // cases): disabled with its reason on `title` while the field is blank;
+  // `handleSearch` asks it again before it runs.
+  const submitGate = $derived(
+    formGate(wasmUp ? askPossibility(() => searchQueryPossibility(query)) : null),
+  );
   let barVisible = $state(true);
   let error = $state('');
 
@@ -55,7 +66,11 @@
 
   async function handleSearch(): Promise<void> {
     const id = $identity;
-    if (!id?.secretHex || !query.trim()) return;
+    if (!id?.secretHex) return;
+    // A blank query refuses with the painted reason on `error-message`,
+    // never a return with no feedback (`search.md` § Errors & edge cases).
+    const refusal = formRefusal(askPossibility(() => searchQueryPossibility(query)));
+    if (refusal !== null) { error = refusal; return; }
     try {
       const m = await getSearchManager();
       await m.runQuery(query.trim(), typeFilter);
@@ -68,11 +83,12 @@
 
   /** `search-type-filter` change — re-fires the LIVE query buffer under the
    *  new token immediately (tui's `Action::SetTypeFilter`), not just the last
-   *  committed query. A no-op on an empty buffer, the same guard `handleSearch`
-   *  applies. */
+   *  committed query. A blank buffer goes to the manager too: it holds the
+   *  chosen token for the next submit (or re-fires the last query) rather
+   *  than dropping it (`search.md` § User actions). */
   async function handleTypeFilterChange(token: string): Promise<void> {
     const id = $identity;
-    if (!id?.secretHex || !query.trim()) return;
+    if (!id?.secretHex) return;
     try {
       const m = await getSearchManager();
       await m.runQuery(query.trim(), token);
@@ -218,7 +234,8 @@
       data-testid={IDS.SEARCH_SUBMIT_BUTTON}
       class="btn primary"
       onclick={handleSearch}
-      disabled={snap?.in_flight || !query.trim()}
+      disabled={snap?.in_flight || submitGate.disabled}
+      title={submitGate.reason || undefined}
     >
       {snap?.in_flight ? t.common.searching : t.common.search}
     </button>
@@ -241,7 +258,7 @@
               class="result-card clickable"
               role="button"
               tabindex="0"
-              onclick={() => openResult(nav)}
+              onclick={(e) => { if (!endsTextSelection(e.currentTarget)) openResult(nav); }}
               onkeydown={(e) => { if (e.key === 'Enter') openResult(nav); }}
             >
               {@render resultCardBody(result)}

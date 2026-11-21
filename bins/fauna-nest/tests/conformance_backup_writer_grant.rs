@@ -138,6 +138,7 @@ fn manifest_bytes(chunks: &[([u8; 32], u64)]) -> Vec<u8> {
         stored_hashes: None,
         sealed_hashes: None,
         min_reader: None,
+        pages: None,
     };
     fauna_core::encoding::canonical_encode(&m).unwrap()
 }

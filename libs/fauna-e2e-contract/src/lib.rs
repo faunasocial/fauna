@@ -162,6 +162,117 @@ impl PaintedErrorTally {
     }
 }
 
+/// `fauna_e2e_agent::ROOT_SURFACE_KEY`'s name for the onboarding wizard (any
+/// of its steps).
+pub const ROOT_SURFACE_WIZARD: &str = "wizard";
+/// … for the launch progress view (ui.yaml `onboarding.launch_progress`).
+pub const ROOT_SURFACE_LAUNCH_PROGRESS: &str = "launch_progress";
+/// … for the signed-in app (any of its pages).
+pub const ROOT_SURFACE_APP: &str = "app";
+/// How many entries the journal keeps; older ones are dropped, `seq` keeps
+/// counting. A journey reads one sign-in's handful of changes.
+pub const ROOT_SURFACE_JOURNAL_CAP: usize = 64;
+
+/// The journal behind `fauna_e2e_agent::ROOT_SURFACE_KEY` — one per app, fed
+/// once per painted frame with what the app's root showed: one of the
+/// `ROOT_SURFACE_*` names, another launch surface's ui.yaml page name, or
+/// `None` when the frame painted nothing. An entry is appended only when that
+/// changes.
+#[derive(Debug, Default)]
+pub struct RootSurfaceJournal {
+    next_seq: u64,
+    entries: std::collections::VecDeque<(u64, Option<String>)>,
+    now: Option<Option<String>>,
+}
+
+impl RootSurfaceJournal {
+    /// Record one painted frame.
+    pub fn observe(&mut self, showing: Option<&str>) {
+        let showing = showing.map(str::to_string);
+        if self.now.as_ref() == Some(&showing) {
+            return;
+        }
+        if self.entries.len() == ROOT_SURFACE_JOURNAL_CAP {
+            self.entries.pop_front();
+        }
+        self.entries.push_back((self.next_seq, showing.clone()));
+        self.next_seq += 1;
+        self.now = Some(showing);
+    }
+
+    /// The `fauna_e2e_agent::ROOT_SURFACE_KEY` value:
+    /// `{"journal": [{"seq": N, "showing": "…"|null}], "now": "…"|null}`.
+    pub fn json(&self) -> Value {
+        json!({
+            "journal": self
+                .entries
+                .iter()
+                .map(|(seq, showing)| json!({ "seq": seq, "showing": showing }))
+                .collect::<Vec<_>>(),
+            "now": self.now.clone().flatten(),
+        })
+    }
+}
+
+/// How many entries [`ToplevelWindowJournal`] keeps; older ones are dropped,
+/// `seq` keeps counting. The window set moves a handful of times per journey.
+pub const TOPLEVEL_WINDOWS_JOURNAL_CAP: usize = 512;
+
+/// The journal behind `fauna_e2e_agent::TOPLEVEL_WINDOWS_KEY` — one per app
+/// whose shell owns top-level windows, fed with the set of visible windows
+/// each time it may have changed: `(id, name)` pairs, `id` a process-local
+/// serial naming one window object for its whole life, `name` the window's
+/// own name (a widget name, a scene identifier). An entry is appended only
+/// when the set (or a visible window's name) changes; the caller's order is
+/// normalized by `id`.
+#[derive(Debug, Default)]
+pub struct ToplevelWindowJournal {
+    next_seq: u64,
+    entries: std::collections::VecDeque<(u64, Vec<(u64, String)>)>,
+    now: Vec<(u64, String)>,
+}
+
+impl ToplevelWindowJournal {
+    /// Record the visible windows now.
+    pub fn observe(&mut self, visible: &[(u64, &str)]) {
+        let mut set: Vec<(u64, String)> = visible
+            .iter()
+            .map(|(id, name)| (*id, (*name).to_string()))
+            .collect();
+        set.sort_by_key(|(id, _)| *id);
+        if self.entries.back().map(|(_, last)| last) == Some(&set) {
+            return;
+        }
+        if self.entries.len() == TOPLEVEL_WINDOWS_JOURNAL_CAP {
+            self.entries.pop_front();
+        }
+        self.entries.push_back((self.next_seq, set.clone()));
+        self.next_seq += 1;
+        self.now = set;
+    }
+
+    /// The `fauna_e2e_agent::TOPLEVEL_WINDOWS_KEY` value:
+    /// `{"journal": [{"seq": N, "visible": [{"id": K, "name": "…"}]}],
+    /// "now": [{"id": K, "name": "…"}]}`.
+    pub fn json(&self) -> Value {
+        fn set_json(set: &[(u64, String)]) -> Value {
+            Value::Array(
+                set.iter()
+                    .map(|(id, name)| json!({ "id": id, "name": name }))
+                    .collect(),
+            )
+        }
+        json!({
+            "journal": self
+                .entries
+                .iter()
+                .map(|(seq, set)| json!({ "seq": seq, "visible": set_json(set) }))
+                .collect::<Vec<_>>(),
+            "now": set_json(&self.now),
+        })
+    }
+}
+
 /// Build `fauna_e2e_agent::LAUNCH_TOKEN_KEY`'s value:
 /// `{"expires_in_secs": <i64>|null, "own_session_ids": [..]}`.
 /// `expires_at_secs` is the held bearer's deadline on the client clock (or
@@ -401,6 +512,79 @@ mod tests {
                 "{bad} must be refused"
             );
         }
+    }
+
+    /// The root-surface journal appends a CHANGE only, numbers entries from 0,
+    /// and records a frame that painted nothing as `null` — the one entry the
+    /// in-place witness forbids between the wizard and the app.
+    #[test]
+    fn the_root_surface_journal_records_each_change() {
+        let mut journal = RootSurfaceJournal::default();
+        assert_eq!(journal.json(), json!({ "journal": [], "now": null }));
+        journal.observe(Some(ROOT_SURFACE_WIZARD));
+        journal.observe(Some(ROOT_SURFACE_WIZARD));
+        journal.observe(None);
+        journal.observe(Some(ROOT_SURFACE_LAUNCH_PROGRESS));
+        journal.observe(Some(ROOT_SURFACE_APP));
+        assert_eq!(
+            journal.json(),
+            json!({
+                "journal": [
+                    { "seq": 0, "showing": "wizard" },
+                    { "seq": 1, "showing": null },
+                    { "seq": 2, "showing": "launch_progress" },
+                    { "seq": 3, "showing": "app" },
+                ],
+                "now": "app",
+            })
+        );
+    }
+
+    /// The journal is bounded: past its cap the OLDEST entries go, `seq` keeps
+    /// counting, so a reader anchored on a `seq` still finds what followed it.
+    #[test]
+    fn the_root_surface_journal_drops_the_oldest_past_its_cap() {
+        let mut journal = RootSurfaceJournal::default();
+        for i in 0..(ROOT_SURFACE_JOURNAL_CAP + 3) {
+            journal.observe(Some(if i % 2 == 0 {
+                ROOT_SURFACE_APP
+            } else {
+                ROOT_SURFACE_WIZARD
+            }));
+        }
+        let value = journal.json();
+        let entries = value["journal"].as_array().unwrap();
+        assert_eq!(entries.len(), ROOT_SURFACE_JOURNAL_CAP);
+        assert_eq!(entries[0]["seq"], 3);
+    }
+
+    /// The window journal appends a CHANGE of the visible set only, whatever
+    /// order the caller lists it in, and an empty set is an entry — the gap
+    /// the in-place witness forbids (a window closed before the next opened).
+    #[test]
+    fn the_toplevel_window_journal_records_each_change() {
+        let mut journal = ToplevelWindowJournal::default();
+        assert_eq!(journal.json(), json!({ "journal": [], "now": [] }));
+        journal.observe(&[(1, "main")]);
+        journal.observe(&[(1, "main")]);
+        journal.observe(&[(2, "sheet"), (1, "main")]);
+        journal.observe(&[(1, "main"), (2, "sheet")]);
+        journal.observe(&[]);
+        journal.observe(&[(3, "main")]);
+        assert_eq!(
+            journal.json(),
+            json!({
+                "journal": [
+                    { "seq": 0, "visible": [{ "id": 1, "name": "main" }] },
+                    { "seq": 1, "visible": [
+                        { "id": 1, "name": "main" }, { "id": 2, "name": "sheet" },
+                    ] },
+                    { "seq": 2, "visible": [] },
+                    { "seq": 3, "visible": [{ "id": 3, "name": "main" }] },
+                ],
+                "now": [{ "id": 3, "name": "main" }],
+            })
+        );
     }
 
     /// The tally counts APPEARANCES: a standing error once, a re-raised one

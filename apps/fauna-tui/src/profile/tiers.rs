@@ -96,6 +96,12 @@ pub struct AuthorState {
     /// out at read time (`TierItem::unlocks_post` — `monetization.md`: the
     /// unlock affordance renders on the post, not in the management list).
     pub tiers: Vec<TierItem>,
+    /// Where the §1 tier read stands — `Pending` until the tab's first read
+    /// answers, `Failed` when it failed before ever answering. The controls
+    /// that need a tier paint from `own_tiers_possibility` over it
+    /// ([`claim_mint_possibility`], [`provider_add_possibility`]), so an
+    /// unanswered read never reads as "you have no tier".
+    pub tiers_read: fauna_core::possibility::ReadState,
     /// §2 — pending subscribe/unsubscribe requests.
     pub requests: Vec<PendingRequest>,
     /// §3 — the confirmed roster of [`Self::roster_tier`].
@@ -139,6 +145,31 @@ impl AuthorState {
     pub fn reset(&mut self) {
         *self = AuthorState::default();
     }
+}
+
+/// `subscription-claim-mint-button`'s answer: a claim code entitles one of
+/// the author's tiers, so with none (or before the tier read answers) there is
+/// nothing to mint (`profile.md` § Errors & edge cases, *A tier before what
+/// sells it*).
+#[cfg(feature = "payments")]
+pub fn claim_mint_possibility(a: &AuthorState) -> fauna_core::possibility::Possibility {
+    fauna_client_subscriptions::own_tiers::own_tiers_possibility(
+        a.tiers_read,
+        a.tiers.len(),
+        fauna_client_subscriptions::own_tiers::OwnTierUse::ClaimCode,
+    )
+}
+
+/// `subscription-provider-add-button`'s answer: a provider sells one of the
+/// author's tiers, and its form's tier map is empty with none — the gate is
+/// at the entry, so the form never opens with nothing to save.
+#[cfg(feature = "payments")]
+pub fn provider_add_possibility(a: &AuthorState) -> fauna_core::possibility::Possibility {
+    fauna_client_subscriptions::own_tiers::own_tiers_possibility(
+        a.tiers_read,
+        a.tiers.len(),
+        fauna_client_subscriptions::own_tiers::OwnTierUse::PaymentProvider,
+    )
 }
 
 // ── The five reads ───────────────────────────────────────────────────────────
@@ -571,12 +602,17 @@ pub fn elements(
             f.auto_approve,
             Gesture::Profile(Action::ToggleAutoApprove),
         ));
-        out.push(Element::gesture_button(
-            ids::SUBSCRIPTION_TIER_FORM_SAVE,
-            s::SAVE,
-            true,
-            Gesture::Profile(Action::SaveTierForm),
-        ));
+        out.push(
+            Element::gesture_button(
+                ids::SUBSCRIPTION_TIER_FORM_SAVE,
+                s::SAVE,
+                true,
+                Gesture::Profile(Action::SaveTierForm),
+            )
+            .possible(fauna_client_subscriptions::forms::tier_form_possibility(
+                &f.name,
+            )),
+        );
         out.push(Element::gesture_button(
             ids::SUBSCRIPTION_TIER_FORM_CANCEL,
             s::CANCEL,
@@ -687,12 +723,15 @@ pub fn elements(
     {
         // ── §4 Payment providers ─────────────────────────────────────────────
         out.push(Element::label(ids::SUBSCRIPTION_PROVIDER_SECTION, " "));
-        out.push(Element::gesture_button(
-            ids::SUBSCRIPTION_PROVIDER_ADD_BUTTON,
-            s::ADD_PROVIDER,
-            true,
-            Gesture::Profile(Action::OpenProviderForm),
-        ));
+        out.push(
+            Element::gesture_button(
+                ids::SUBSCRIPTION_PROVIDER_ADD_BUTTON,
+                s::ADD_PROVIDER,
+                true,
+                Gesture::Profile(Action::OpenProviderForm),
+            )
+            .possible(provider_add_possibility(a)),
+        );
         out.push(Element::label(ids::SUBSCRIPTION_PROVIDER_LIST, " "));
         for (i, p) in a.providers.iter().enumerate() {
             out.push(
@@ -816,12 +855,15 @@ pub fn elements(
             )
             .labelled(s::TIER_SELECT_LABEL),
         );
-        out.push(Element::gesture_button(
-            ids::SUBSCRIPTION_CLAIM_MINT_BUTTON,
-            s::MINT_CLAIM,
-            true,
-            Gesture::Profile(Action::MintClaim),
-        ));
+        out.push(
+            Element::gesture_button(
+                ids::SUBSCRIPTION_CLAIM_MINT_BUTTON,
+                s::MINT_CLAIM,
+                true,
+                Gesture::Profile(Action::MintClaim),
+            )
+            .possible(claim_mint_possibility(a)),
+        );
         out.push(Element::label(ids::SUBSCRIPTION_CLAIM_LIST, " "));
         for (i, c) in a.claims.iter().enumerate() {
             out.push(

@@ -74,11 +74,11 @@ Stamped 2026-11-07 at b844c771f6.
     - `tests/e2e-unified/tests/platform/docker/test_host_reboot_coordinator.py::test_coordinator_reboots_idle_or_at_the_ceiling`
 20. [app] When the nest has stopped hearing from its region's authority, the region section warns that the last rules received still apply — `docs/goal/behavior/admin.md` § N. Nest
     - `tests/e2e-unified/tests/test_admin_nest.py::test_region_section_warns_when_the_authority_has_gone_quiet`
-21. [app] The admin chooses whether the nest's own address opens the app the nest ships or hands visitors to the central app, and sees the address they will be sent to — `docs/goal/behavior/admin.md` § N. Nest
-    - `tests/e2e-unified/tests/test_admin_web_app_origin.py::test_admin_flips_app_to_the_central_origin_and_back`
-22. [nest] When the admin chooses the central app, the nest's own app address sends visitors there with the nest filled in, choosing the bundled app stops that at once, a nest with no domain keeps serving its own app, and only an admin can change the choice — `docs/goal/behavior/web-content-hosting.md` § Same-origin security model
-    - `tests/e2e-unified/tests/api/test_web_app_origin.py::test_the_admin_choice_flips_app_to_the_central_origin_and_back`
-    - `tests/e2e-unified/tests/api/test_web_app_origin.py::test_a_domainless_box_serves_bundled_under_central`
+21. [app] While the central app address does not serve the app, the admin's Nest page offers no choice of sending visitors there, and the nest's own address keeps opening the app the nest ships — `docs/goal/behavior/web-content-hosting.md` § Same-origin security model
+    - `tests/e2e-unified/tests/test_admin_web_app_origin.py::test_admin_nest_offers_no_web_app_origin_while_central_is_not_live`
+22. [nest] While the central app address does not serve the app, the nest refuses to send visitors there and its own app address keeps serving its own app, with or without a domain, and only an admin can change the choice — `docs/goal/behavior/web-content-hosting.md` § Same-origin security model
+    - `tests/e2e-unified/tests/api/test_web_app_origin.py::test_central_is_refused_while_the_central_origin_is_not_live`
+    - `tests/e2e-unified/tests/api/test_web_app_origin.py::test_a_domainless_box_refuses_central_too`
     - `tests/e2e-unified/tests/api/test_web_app_origin.py::test_a_non_admin_cannot_set_the_choice`
 23. [app] The admin takes down a single conversation message under a legal order from the same console, and it stops being delivered from then on — `docs/goal/behavior/moderation.md` § Legal takedown
     - `tests/e2e-unified/tests/test_legal_takedown_notice.py::test_a_message_taken_down_from_a_report_shows_the_notice_to_a_member_who_reads_it_later`
@@ -139,17 +139,19 @@ Stamped 2026-11-07 at b844c771f6.
    - `tests/e2e-unified/tests/api/test_takedown_serve_doors.py::test_no_door_serves_a_withheld_posts_attachment`
 44. [app] The admin blocks a reported conversation message: the other members see a notice in its place, and its author keeps the message with the notice beside it — `docs/goal/behavior/takedown-and-block.md` § Admin block of a reported item
    - `tests/e2e-unified/tests/test_moderation_appeal_conversation.py::test_the_author_appeals_a_conversation_block_from_the_queue`
+45. [app] Until the Nest page has read the nest's settings, its pairing switch, serving port and network-mode controls and their saves are disabled and say they are still loading, or failed to load; pressing one says the same and changes nothing on the nest — `docs/goal/behavior/admin.md` § Errors & edge cases
+    - `tests/e2e-unified/tests/test_admin_controls_wait_for_their_read.py::test_the_nest_pages_controls_wait_for_the_nests_settings`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+4d41bfdd.dirty standalone |
+| web | ⚠ partial | 0.1.5-dev+4d41bfdd.dirty standalone |
 | linux | ⚠ partial | 0.1.5-dev+4d41bfdd.dirty standalone |
-| windows | ✅ full | 0.1.5-dev+4d41bfdd.dirty standalone |
-| macos | ⚠ partial | 0.1.5-dev+409ac563 standalone |
-| ios | ⚠ partial | 0.1.5-dev+407a19e1 standalone |
+| windows | ⚠ partial | 0.1.5-dev+4d41bfdd.dirty standalone |
+| macos | ⚠ partial | 0.1.5-dev+4d41bfdd.dirty standalone |
+| ios | ⚠ partial | 0.1.5-dev+4d41bfdd.dirty standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+4d41bfdd.dirty standalone |
 | android-kids | — absent | |
@@ -188,9 +190,9 @@ Stamped 2026-11-07 at b844c771f6.
 | 19 | nest | `tests/e2e-unified/tests/platform/docker/test_host_reboot_coordinator.py::test_unattended_upgrades_on_with_its_own_reboot_off` | nest (linux): passed |
 | 19 | nest | `tests/e2e-unified/tests/platform/docker/test_host_reboot_coordinator.py::test_coordinator_reboots_idle_or_at_the_ceiling` | nest (linux): passed |
 | 20 | app | `tests/e2e-unified/tests/test_admin_nest.py::test_region_section_warns_when_the_authority_has_gone_quiet` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 21 | app | `tests/e2e-unified/tests/test_admin_web_app_origin.py::test_admin_flips_app_to_the_central_origin_and_back` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 22 | nest | `tests/e2e-unified/tests/api/test_web_app_origin.py::test_the_admin_choice_flips_app_to_the_central_origin_and_back` | nest (linux): passed, nest (macos): passed |
-| 22 | nest | `tests/e2e-unified/tests/api/test_web_app_origin.py::test_a_domainless_box_serves_bundled_under_central` | nest (linux): passed, nest (macos): passed |
+| 21 | app | `tests/e2e-unified/tests/test_admin_web_app_origin.py::test_admin_nest_offers_no_web_app_origin_while_central_is_not_live` | windows (windows): passed, tui (macos): passed |
+| 22 | nest | `tests/e2e-unified/tests/api/test_web_app_origin.py::test_central_is_refused_while_the_central_origin_is_not_live` | nest (linux): passed |
+| 22 | nest | `tests/e2e-unified/tests/api/test_web_app_origin.py::test_a_domainless_box_refuses_central_too` | nest (linux): passed |
 | 22 | nest | `tests/e2e-unified/tests/api/test_web_app_origin.py::test_a_non_admin_cannot_set_the_choice` | nest (linux): passed, nest (macos): passed |
 | 23 | app | `tests/e2e-unified/tests/test_legal_takedown_notice.py::test_a_message_taken_down_from_a_report_shows_the_notice_to_a_member_who_reads_it_later` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 24 | nest | `tests/e2e-unified/tests/api/test_admin_roster.py::test_the_identity_rotation_is_refused_while_an_admin_removal_is_pending` | nest (linux): passed, nest (macos): passed |
@@ -228,5 +230,6 @@ Stamped 2026-11-07 at b844c771f6.
 | 41 | nest | `tests/e2e-unified/tests/api/test_update_channel.py::test_an_unapplied_newer_head_is_said_overdue_once` | nest (linux): passed, nest (macos): passed |
 | 42 | nest | `tests/e2e-unified/tests/api/test_takedown_serve_doors.py::test_a_taken_down_post_leaves_the_website_export_search_and_peers_and_a_restore_reopens_the_page` | nest (linux): passed, nest (macos): passed |
 | 43 | nest | `tests/e2e-unified/tests/api/test_takedown_serve_doors.py::test_no_door_serves_a_withheld_posts_attachment` | nest (linux): passed, nest (macos): passed |
-| 44 | app | `tests/e2e-unified/tests/test_moderation_appeal_conversation.py::test_the_author_appeals_a_conversation_block_from_the_queue` | web (linux): passed, windows (windows): passed, tui (linux): passed, tui (macos): passed |
+| 44 | app | `tests/e2e-unified/tests/test_moderation_appeal_conversation.py::test_the_author_appeals_a_conversation_block_from_the_queue` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 45 | app | `tests/e2e-unified/tests/test_admin_controls_wait_for_their_read.py::test_the_nest_pages_controls_wait_for_the_nests_settings` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

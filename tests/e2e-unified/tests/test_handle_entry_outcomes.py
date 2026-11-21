@@ -29,8 +29,6 @@ def test_format_invalid_disables_continue(app, driver_kind):
         "outcome": "FormatInvalid",
         "message": {"key": "onboarding.handle_check.outcome.format_invalid", "args": {}},
         "continue_enabled": False,
-        "control_checkbox_visible": False,
-        "control_checkbox_checked": False,
     })
     assert app.is_visible("handle-message-area"), (
         "FormatInvalid Complete state should render the message area: "
@@ -52,8 +50,6 @@ def test_tld_invalid_disables_continue(app):
         "outcome": "TldInvalid",
         "message": {"key": "onboarding.handle_check.outcome.tld_invalid", "args": {"tld": "xyz"}},
         "continue_enabled": False,
-        "control_checkbox_visible": False,
-        "control_checkbox_checked": False,
     })
     assert not app.is_enabled("handle-entry-continue-button"), (
         "TldInvalid should disable Continue: "
@@ -70,8 +66,6 @@ def test_domain_available_unpriced_enables_continue(app):
             "args": {"domain": "example.com"},
         },
         "continue_enabled": True,
-        "control_checkbox_visible": False,
-        "control_checkbox_checked": False,
     })
     assert app.is_enabled("handle-entry-continue-button"), (
         "DomainAvailable (unpriced) should enable Continue: "
@@ -79,7 +73,10 @@ def test_domain_available_unpriced_enables_continue(app):
     )
 
 
-def test_registered_no_nest_shows_checkbox(app):
+def test_registered_no_nest_enables_continue_with_no_checkbox(app):
+    # The domain points at an address where no nest answers: Continue goes on
+    # to set up a nest there at once — the "I control this domain" checkbox is
+    # retired (onboarding.md § 2).
     set_handle_check_snapshot(app, {
         "phase": "Complete",
         "outcome": "RegisteredNoNest",
@@ -87,9 +84,7 @@ def test_registered_no_nest_shows_checkbox(app):
             "key": "onboarding.handle_check.outcome.registered_no_nest",
             "args": {"domain": "example.com"},
         },
-        "continue_enabled": False,
-        "control_checkbox_visible": True,
-        "control_checkbox_checked": False,
+        "continue_enabled": True,
     })
     # The fully qualified key the machine emits renders as its sentence, never
     # the raw key (the machine side is pinned by fauna-onboarding-machine's
@@ -99,17 +94,8 @@ def test_registered_no_nest_shows_checkbox(app):
         f"RegisteredNoNest should read {expected!r}: "
         f"{app.driver.diagnose('handle-message-area')} error={app.error_text()!r}"
     )
-    assert app.is_visible("handle-control-checkbox"), (
-        "RegisteredNoNest should show the control checkbox: "
-        f"{app.driver.diagnose('handle-control-checkbox')} error={app.error_text()!r}"
-    )
-    assert not app.is_enabled("handle-entry-continue-button"), (
-        "RegisteredNoNest should disable Continue until the checkbox is checked: "
-        f"{app.driver.diagnose('handle-entry-continue-button')} error={app.error_text()!r}"
-    )
-    app.click("handle-control-checkbox")
     assert app.is_enabled("handle-entry-continue-button"), (
-        "checking the control checkbox should enable Continue: "
+        "RegisteredNoNest should enable Continue with no checkbox to tick: "
         f"{app.driver.diagnose('handle-entry-continue-button')} error={app.error_text()!r}"
     )
 
@@ -127,8 +113,6 @@ def test_already_on_nest_handle_matches_enables_continue(app):
             "args": {"handle": "alice@example.com"},
         },
         "continue_enabled": True,
-        "control_checkbox_visible": False,
-        "control_checkbox_checked": False,
     })
     assert app.is_enabled("handle-entry-continue-button"), (
         "AlreadyOnNest (handle matches) should enable Continue: "
@@ -148,8 +132,6 @@ def test_already_on_nest_handle_differs_shows_old_handle(app):
             "args": {"domain": "example.com", "old_handle": "bob@example.com"},
         },
         "continue_enabled": True,
-        "control_checkbox_visible": False,
-        "control_checkbox_checked": False,
     })
     text = app.get_text("handle-message-area")
     assert "bob@example.com" in text
@@ -165,8 +147,6 @@ def test_nest_user_unregistered_routes_to_invite(app):
             "args": {"domain": "example.com"},
         },
         "continue_enabled": True,
-        "control_checkbox_visible": False,
-        "control_checkbox_checked": False,
     })
     assert app.is_enabled("handle-entry-continue-button"), (
         "NestRunningUserUnregistered should enable Continue: "
@@ -196,8 +176,6 @@ def test_probe_error_transient_shows_retry(app):
         }},
         "message": {"key": "onboarding.handle_check.error.no_network", "args": {}},
         "continue_enabled": False,
-        "control_checkbox_visible": False,
-        "control_checkbox_checked": False,
     })
     assert not app.is_enabled("handle-entry-continue-button"), (
         "ProbeError (transient) should disable Continue: "

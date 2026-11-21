@@ -76,6 +76,7 @@ public struct AdminUsersHubView: View {
                 Divider()
                 AdminPendingActionsSection(
                     pendingActions: vm.pendingActions,
+                    approvePossibility: { vm.approvePossibility($0) },
                     onApprove: { id in Task { await vm.approvePendingAction(id: id) } },
                     onCancel: { id in Task { await vm.cancelPendingAction(id: id) } }
                 )
@@ -190,7 +191,7 @@ public struct AdminUsersHubView: View {
                 ageBandMenu(
                     id: Ids.inviteRequestRowAgeBandSelect,
                     current: { requestAgeBandDraft(req) },
-                    enabled: { !(requestGuardian[req.id] ?? "").isEmpty }
+                    guardianSelected: { !(requestGuardian[req.id] ?? "").isEmpty }
                 ) { requestAgeBand[req.id] = $0 }
             }
 
@@ -293,6 +294,10 @@ public struct AdminUsersHubView: View {
                     confirmSaveRegistration()
                 }
                 .faunaGate("fauna.admin.set_registration_mode")
+                // Live only for a ceiling the nest would accept (admin.md
+                // § Errors & edge cases); `AdminVM.saveRegistration` asks again.
+                .faunaPossible(vm.registrationCeilingAnswer(maxFreeUsersInput))
+                FaunaPossibilityReason(vm.registrationCeilingAnswer(maxFreeUsersInput))
             }
         }
     }
@@ -391,7 +396,7 @@ public struct AdminUsersHubView: View {
 
                 ageBandMenu(id: Ids.adminUsersAdmitAgeBandSelect,
                             current: { admitAgeBand },
-                            enabled: { !admitGuardian.isEmpty }) { admitAgeBand = $0 }
+                            guardianSelected: { !admitGuardian.isEmpty }) { admitAgeBand = $0 }
 
                 Button(L.admin.usersPage.admitButton) {
                     admitUser()
@@ -403,7 +408,12 @@ public struct AdminUsersHubView: View {
                     admitUser()
                 }
                 .faunaGate("fauna.admin.users.create")
+                // Never live beside an empty tier select (admin.md § 2, *What a
+                // row offers*) nor for a malformed account key (§ Errors & edge
+                // cases); `AdminVM.admitUser` asks again.
+                .faunaPossible(vm.admitAnswer(admitActorInput))
             }
+            FaunaPossibilityReason(vm.admitAnswer(admitActorInput))
         }
     }
 
@@ -448,7 +458,8 @@ public struct AdminUsersHubView: View {
                     Text(L.admin.usersPage.mintedCode(code: code))
                         .font(.caption.monospaced())
                         .textSelection(.enabled)
-                    CopyButton(Ids.adminUsersInviteCodeCopyBtn, text: code)
+                    CopyButton(Ids.adminUsersInviteCodeCopyBtn, text: code,
+                               onOutcome: { vm.recordMintedCodeCopy($0) })
                 }
             }
 
@@ -460,11 +471,14 @@ public struct AdminUsersHubView: View {
                 .automationActivate(Ids.createInviteCodeBtn) {
                     openCreateInvite()
                 }
+                // A code is minted at a tier: no tier, no invite (admin.md § 2).
+                .faunaPossible(vm.tierPickAnswer)
 
                 if vm.showCreateInvite {
                     inviteCreateForm
                 }
             }
+            FaunaPossibilityReason(vm.tierPickAnswer)
 
             // Existing codes.
             if vm.inviteCodes.isEmpty {
@@ -548,7 +562,7 @@ public struct AdminUsersHubView: View {
             HStack(spacing: 8) {
                 ageBandMenu(id: Ids.adminUsersInviteAgeBandSelect,
                             current: { mintAgeBand },
-                            enabled: { !mintGuardian.isEmpty }) { mintAgeBand = $0 }
+                            guardianSelected: { !mintGuardian.isEmpty }) { mintAgeBand = $0 }
 
                 Spacer(minLength: 0)
             }
@@ -568,9 +582,10 @@ public struct AdminUsersHubView: View {
                 .automationActivate(Ids.createInviteConfirmBtn) {
                     confirmCreateInvite()
                 }
-                // Revealing the form is local (`create-invite-code-btn` stays live);
-                // minting the code is the nest-arbitrated call.
+                // Revealing the form is local; minting the code is the
+                // nest-arbitrated call.
                 .faunaGate("fauna.admin.invite_codes.create")
+                .faunaPossible(vm.tierPickAnswer)
 
                 Button(L.common.cancel) {
                     vm.showCreateInvite = false
@@ -598,6 +613,7 @@ public struct AdminUsersHubView: View {
 
     /// Open-create-invite action — shared by the `Button` and `automationActivate`.
     private func openCreateInvite() {
+        if refusePress(vm.tierPickAnswer, errorMessage: &vm.actionError) { return }
         if mintTier.isEmpty { mintTier = vm.tierNames.first ?? defaultInviteTier() }
         vm.showCreateInvite = true
     }
@@ -656,45 +672,47 @@ public struct AdminUsersHubView: View {
         // state crossed with the admin-role guard. Do NOT re-derive it from
         // `eviction`/`isAdmin` here — that dropped the `!is_admin` guard (Evict
         // rendered on admin rows the nest always refuses with `fauna.admin.conflict`)
-        // and never offered Suspend at all (priority #2/#4).
-        let controls = adminUserRowControls(user: user)
-        HStack(spacing: 12) {
-            automationText(Ids.userActorId, shortHex(user.actorId))
-                .font(.caption.monospaced())
+        // and never offered Suspend at all (priority #2/#4). Each control reads
+        // its shared `Possibility` (`vm.rowPossibility`); the take-over offer
+        // keys on the viewer, which the VM holds.
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 12) {
+                automationText(Ids.userActorId, shortHex(user.actorId))
+                    .font(.caption.monospaced())
 
-            tierMenu(
-                id: "admin-users-tier-select",
-                // Read the tier LIVE from the vm list by the row's stable actorId,
-                // so the registry read reflects the post-update refetch (the row
-                // view persists, so a captured `user.tier` would stay stale).
-                current: { vm.users.first { $0.actorId == user.actorId }?.tier ?? user.tier }
-            ) { newTier in
-                Task { await vm.setUserTier(user, tier: newTier) }
-            }
-            // This picker COMMITS on pick (the tier is the quota, so the write is
-            // `users.update`) — unlike the mint form's `admin-settings-tier-select`,
-            // which only edits a local buffer and therefore stays live offline.
-            .faunaGate("fauna.admin.users.update")
+                tierMenu(
+                    id: "admin-users-tier-select",
+                    // Read the tier LIVE from the vm list by the row's stable actorId,
+                    // so the registry read reflects the post-update refetch (the row
+                    // view persists, so a captured `user.tier` would stay stale).
+                    current: { vm.users.first { $0.actorId == user.actorId }?.tier ?? user.tier }
+                ) { newTier in
+                    Task { await vm.setUserTier(user, tier: newTier) }
+                }
+                // This picker COMMITS on pick (the tier is the quota, so the write is
+                // `users.update`) — unlike the mint form's `admin-settings-tier-select`,
+                // which only edits a local buffer and therefore stays live offline.
+                .faunaGate("fauna.admin.users.update")
 
-            automationText(Ids.adminUsersMailServingStatus,
-                           // Read the serving flag LIVE from the vm list by stable
-                           // actorId (post-refetch), then resolve the enabled→label
-                           // choice through shared Rust (`mail_serving_status_label`)
-                           // so no client hard-codes the serving_here/disabled keys
-                           // (value-formatting.md; priority #2 — the deviceStatusLabel
-                           // pattern).
-                           renderLocalizedText(mailServingStatusLabel(
-                               enabled: vm.users.first { $0.actorId == user.actorId }?.mailServingEnabled
-                                   ?? user.mailServingEnabled)))
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                automationText(Ids.adminUsersMailServingStatus,
+                               // Read the serving flag LIVE from the vm list by stable
+                               // actorId (post-refetch), then resolve the enabled→label
+                               // choice through shared Rust (`mail_serving_status_label`)
+                               // so no client hard-codes the serving_here/disabled keys
+                               // (value-formatting.md; priority #2 — the deviceStatusLabel
+                               // pattern).
+                               renderLocalizedText(mailServingStatusLabel(
+                                   enabled: vm.users.first { $0.actorId == user.actorId }?.mailServingEnabled
+                                       ?? user.mailServingEnabled)))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
-            Spacer()
+                Spacer()
 
-            // Suspend + Evict are independent (a non-admin Active row offers both;
-            // a `warning` row offers Suspend + Restore), so these are three separate
-            // `if`s off the shared booleans, not a mutually-exclusive branch.
-            if controls.suspend {
+                // Suspend + Evict are independent (a non-admin Active row offers both;
+                // a `warning` row offers Suspend + Restore): each control is painted
+                // from its own shared answer (`vm.rowPossibility`), absent where the
+                // row does not offer it.
                 Button(L.admin.usersPage.suspend, role: .destructive) {
                     Task { await vm.suspendUser(user) }
                 }
@@ -705,8 +723,7 @@ public struct AdminUsersHubView: View {
                     Task { await vm.suspendUser(user) }
                 }
                 .faunaGate("fauna.admin.users.suspend")
-            }
-            if controls.evict {
+                .faunaPossible(vm.rowPossibility(user, .suspend))
                 Button(L.admin.usersPage.evict, role: .destructive) {
                     Task { await vm.evictUser(user) }
                 }
@@ -717,8 +734,7 @@ public struct AdminUsersHubView: View {
                     Task { await vm.evictUser(user) }
                 }
                 .faunaGate("fauna.admin.users.evict")
-            }
-            if controls.restore {
+                .faunaPossible(vm.rowPossibility(user, .evict))
                 Button(L.admin.usersPage.cancelEviction) {
                     Task { await vm.cancelEviction(user) }
                 }
@@ -729,12 +745,11 @@ public struct AdminUsersHubView: View {
                     Task { await vm.cancelEviction(user) }
                 }
                 .faunaGate("fauna.admin.users.cancel_eviction")
-            }
-            // The roster surface's grant/revoke instrument (admin.md § Admin
-            // continuity and succession) — mutually exclusive per row like the
-            // cut-off trio: a plain row offers Make Admin, an is_admin row
-            // offers Remove Admin.
-            if controls.makeAdmin {
+                .faunaPossible(vm.rowPossibility(user, .restore))
+                // The roster surface's grant/revoke instrument (admin.md § Admin
+                // continuity and succession) — mutually exclusive per row like the
+                // cut-off trio: a plain row offers Make Admin, an is_admin row
+                // offers Remove Admin.
                 Button(L.admin.usersPage.makeAdmin) {
                     Task { await vm.makeAdmin(user) }
                 }
@@ -745,8 +760,7 @@ public struct AdminUsersHubView: View {
                     Task { await vm.makeAdmin(user) }
                 }
                 .faunaGate("fauna.admin.admins.add")
-            }
-            if controls.removeAdmin {
+                .faunaPossible(vm.rowPossibility(user, .makeAdmin))
                 Button(L.admin.usersPage.removeAdmin, role: .destructive) {
                     Task { await vm.removeAdmin(user) }
                 }
@@ -757,32 +771,105 @@ public struct AdminUsersHubView: View {
                     Task { await vm.removeAdmin(user) }
                 }
                 .faunaGate("fauna.admin.admins.remove")
+                .faunaPossible(vm.removeAdminPossibility(user))
             }
+            takeOverLine(user, offer: vm.rowPossibility(user, .takeOver))
         }
         .padding(.vertical, 4)
     }
 
-    // A control at its bound is disabled, not clickable-and-guarded (admin.md § 2
-    // Section 5; e2e convention 11) — the same pure offset rules the VM turns pages by.
-    private var canPrevPage: Bool {
-        prevPageOffset(offset: Int64(vm.offset), pageSize: Int64(vm.pageSize)) != nil
+    /// The supervised row's take-over line (`family-safety.md` § App surface →
+    /// *Admin take-over*): `admin-users-supervised-by` naming the guardian (the
+    /// shared label), the Take over button when the shared offer says so, and
+    /// the armed confirm triple in its place while armed — one row at a time,
+    /// held by actor id on the VM (linux `build_take_over_line`). Nothing on an
+    /// unsupervised row.
+    @ViewBuilder
+    private func takeOverLine(_ user: FfiAdminUser, offer: Possibility) -> some View {
+        if let guardian = adminUserGuardianLabel(user: user) {
+            let armed = vm.isTakeOverArmed(user)
+            HStack(spacing: 8) {
+                automationText(Ids.adminUsersSupervisedBy,
+                               L.admin.usersPage.supervisedBy(guardian: guardian))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                if !armed {
+                    Button(L.admin.usersPage.takeOver) {
+                        vm.armTakeOver(user)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .accessibilityIdentifier(Ids.adminUsersTakeOverButton)
+                    .automationActivate(Ids.adminUsersTakeOverButton) {
+                        vm.armTakeOver(user)
+                    }
+                    .faunaPossible(offer)
+                }
+            }
+            if armed {
+                HStack(spacing: 8) {
+                    automationText(Ids.adminUsersTakeOverConfirmSummary,
+                                   L.admin.usersPage.takeOverConfirmSummary(
+                                       ward: adminPickerOption(user: user), guardian: guardian))
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Spacer()
+
+                    Button(L.admin.usersPage.takeOverConfirm, role: .destructive) {
+                        Task { await vm.confirmTakeOver() }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .accessibilityIdentifier(Ids.adminUsersTakeOverConfirmButton)
+                    .automationActivate(Ids.adminUsersTakeOverConfirmButton) {
+                        Task { await vm.confirmTakeOver() }
+                    }
+                    .faunaGate("fauna.family.transfer")
+
+                    Button(L.admin.usersPage.takeOverCancel) {
+                        vm.cancelTakeOver()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .accessibilityIdentifier(Ids.adminUsersTakeOverCancelButton)
+                    .automationActivate(Ids.adminUsersTakeOverCancelButton) {
+                        vm.cancelTakeOver()
+                    }
+                }
+            }
+        }
     }
 
-    private var canNextPage: Bool {
-        nextPageOffset(offset: Int64(vm.offset), total: Int64(vm.totalUsers), pageSize: Int64(vm.pageSize)) != nil
-    }
-
+    // A control at its bound is blocked with its reason, not clickable-and-guarded
+    // (admin.md § 2, *What a row offers*; e2e convention 11) — the shared
+    // `users_page_step_possibility`, which the VM's page turns ask again.
     private var paginationControls: some View {
+        let prevAnswer = vm.pageStepAnswer(forward: false)
+        let nextAnswer = vm.pageStepAnswer(forward: true)
+        // One visible reason line under the pager, the prev bound's first (as
+        // android paints it).
+        let shownReason = prevAnswer.isPossible ? nextAnswer : prevAnswer
+        return VStack(alignment: .leading, spacing: 4) {
+            pagerRow(prevAnswer: prevAnswer, nextAnswer: nextAnswer)
+            FaunaPossibilityReason(shownReason)
+        }
+    }
+
+    private func pagerRow(prevAnswer: Possibility, nextAnswer: Possibility) -> some View {
         HStack(spacing: 12) {
             Button(L.admin.usersPage.prevPage) {
                 Task { await vm.prevPage() }
             }
             .controlSize(.small)
-            .disabled(!canPrevPage)
             .accessibilityIdentifier(Ids.adminUsersPrevPage)
-            .automationActivate(Ids.adminUsersPrevPage, isEnabled: { canPrevPage }) {
+            .automationActivate(Ids.adminUsersPrevPage) {
                 Task { await vm.prevPage() }
             }
+            .faunaPossible(prevAnswer)
 
             Text(L.admin.usersPage.total(count: String(vm.totalUsers)))
                 .font(.caption2)
@@ -792,11 +879,11 @@ public struct AdminUsersHubView: View {
                 Task { await vm.nextPage() }
             }
             .controlSize(.small)
-            .disabled(!canNextPage)
             .accessibilityIdentifier(Ids.adminUsersNextPage)
-            .automationActivate(Ids.adminUsersNextPage, isEnabled: { canNextPage }) {
+            .automationActivate(Ids.adminUsersNextPage) {
                 Task { await vm.nextPage() }
             }
+            .faunaPossible(nextAnswer)
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(Ids.adminUsersPagination)
@@ -871,29 +958,37 @@ public struct AdminUsersHubView: View {
     /// (`invite-request-row-age-band-select`) — the shared `ageBandOptions()`
     /// catalog by VALUE (*not set* + the four bands in the ratified order), so
     /// no app spells the vocabulary or its order; the driver's `select(id,
-    /// value)` speaks the value. **Enabled only while a guardian is selected**:
-    /// the nest refuses a band without a guardian designation and the picker
-    /// gates the same way (a disabled picker still reads its value).
+    /// value)` speaks the value. **Blocked until a guardian is selected**, with
+    /// its reason: the shared `adminAgeBandPossibility` answer (`admin.md` § 2,
+    /// *What a row offers*), painted through `.faunaPossible` and asked again
+    /// before a pick lands (a disabled picker still reads its value).
     private func ageBandMenu(id: String, current: @escaping () -> String,
-                             enabled: @escaping () -> Bool,
+                             guardianSelected: @escaping () -> Bool,
                              onPick: @escaping (String) -> Void) -> some View {
-        Picker(L.family.ageBand.label, selection: Binding(
-            get: { current() },
-            set: { onPick($0) }
-        )) {
-            ForEach(ageBandOptions(), id: \.value) { option in
-                Text(renderLocalizedText(option.label)).tag(option.value)
-            }
+        let answer = adminAgeBandPossibility(guardianSelected: guardianSelected())
+        let pick: (String) -> Void = { picked in
+            guard adminAgeBandPossibility(guardianSelected: guardianSelected()).isPossible else { return }
+            onPick(picked)
         }
-        .pickerStyle(.menu)
-        .disabled(!enabled())
-        .accessibilityIdentifier(id)
-        .automationSelect(
-            id,
-            value: { current() },
-            options: { ageBandOptions().map { $0.value } },
-            isEnabled: enabled
-        ) { picked in onPick(picked) }
+        return HStack(spacing: 6) {
+            Picker(L.family.ageBand.label, selection: Binding(
+                get: { current() },
+                set: { pick($0) }
+            )) {
+                ForEach(ageBandOptions(), id: \.value) { option in
+                    Text(renderLocalizedText(option.label)).tag(option.value)
+                }
+            }
+            .pickerStyle(.menu)
+            .accessibilityIdentifier(id)
+            .automationSelect(
+                id,
+                value: { current() },
+                options: { ageBandOptions().map { $0.value } }
+            ) { picked in pick(picked) }
+            .faunaPossible(answer)
+            FaunaPossibilityReason(answer)
+        }
     }
 
     /// The minted band's label for an `invite-code-item` row, `nil` for an

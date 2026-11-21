@@ -60,7 +60,6 @@ fn assert_kids_terminal(snap: &HandleCheckSnapshot) {
     );
     assert_eq!(snap.phase, HandleCheckPhase::Complete);
     assert!(!snap.continue_enabled, "Continue must be off");
-    assert!(!snap.control_checkbox_visible, "no set-up checkbox");
     assert!(
         snap.message.args.contains_key("domain"),
         "the line names the domain"
@@ -150,16 +149,13 @@ async fn kids_local_no_nest_says_no_joinable_nest() {
 /// never routes to DNS set-up or the claim page.
 #[tokio::test]
 async fn kids_continue_never_routes_to_setup_or_claim() {
-    for (outcome, checked) in [
-        (
-            HandleCheckOutcome::DomainAvailable {
-                buyable_via_provider: true,
-                price: None,
-            },
-            false,
-        ),
-        (HandleCheckOutcome::RegisteredNoNest, true),
-        (HandleCheckOutcome::UnregisteredUnclaimedNest, false),
+    for outcome in [
+        HandleCheckOutcome::DomainAvailable {
+            buyable_via_provider: true,
+            price: None,
+        },
+        HandleCheckOutcome::RegisteredNoNest,
+        HandleCheckOutcome::UnregisteredUnclaimedNest,
     ] {
         let m = machine(Arc::new(FakeNestApi::new()), true);
         m.set_step_for_test(OnboardingStep::HandleEntry);
@@ -167,7 +163,6 @@ async fn kids_continue_never_routes_to_setup_or_claim() {
         snap.phase = HandleCheckPhase::Complete;
         snap.outcome = outcome.clone();
         snap.continue_enabled = true;
-        snap.control_checkbox_checked = checked;
         m.set_handle_check_snapshot_for_test(snap);
         assert_eq!(
             m.submit_handle_check_continue().await,

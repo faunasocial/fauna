@@ -131,6 +131,11 @@ class FakeCloud:
         # allowlisted, the way the live endpoint does.
         self.namecheap = NamecheapHandlers(httpserver, "/namecheap")
         self.hetzner_dns = HetznerDnsHandlers(httpserver, "/hetzner-dns")
+        # Porkbun as a REGISTRAR, reached at `porkbun.base_url()` through the
+        # registrar's `api-base` credential (the registrar seam takes no
+        # `provider_base_urls` override): registration, its quote, and the
+        # nameserver door a domain bought here is pointed with.
+        self.porkbun = PorkbunHandlers(httpserver, "/porkbun")
         self.nest = NestHandlers(httpserver, "/nest")
         # The bundled-provider reference server (fake_bundled.py) — reached by
         # the base URL the test TYPES into the wizard, not by an override.
@@ -205,6 +210,7 @@ class FakeCloud:
         self.cloudflare.install_defaults()
         self.namecheap.install_defaults()
         self.hetzner_dns.install_defaults()
+        self.porkbun.install_defaults()
         self.nest.install_defaults()
         self.bundled.install_defaults()
         self.doh.install_defaults()
@@ -933,6 +939,13 @@ class HetznerDnsHandlers:
         # How many further `remove_records` calls answer 500 — the retire
         # run's failed-DNS branch. `-1` fails every one.
         self.fail_removals = 0
+        # The `{"name", "mode"}` body of every zone create that succeeded, in
+        # order — the witness for the zone door (registry.md § Delegation
+        # doors): a bought domain whose DNS runs here gets its zone this way.
+        self.created_zones: list[dict] = []
+        # How many further zone creates are refused (HTTP 422, the Cloud API's
+        # error envelope, terminal for the run). `-1` refuses every one.
+        self.refuse_zone_creates = 0
 
     def seed_record(self, name: str, record_type: str, value: str, zone_id: int = 42) -> None:
         """Put one record value in the zone, under its zone-relative ``name``
@@ -969,6 +982,73 @@ class HetznerDnsHandlers:
             headers=list(_CORS.items()),
         )
 
+    # The set the Cloud API assigns a new zone (`authoritative_nameservers.
+    # assigned`) — what the domain must then be delegated to.
+    ASSIGNED_NAMESERVERS = [
+        "hydrogen.ns.zone-door.test",
+        "oxygen.ns.zone-door.test",
+        "helium.ns.zone-door.test",
+    ]
+    # The refusal text a journey reads back off the Domain step's error.
+    ZONE_CREATE_REFUSAL = "zone creation refused by the fake cloud"
+
+    def zone_named(self, name: str) -> dict | None:
+        """The zone ``verify()`` would report under ``name``, if any."""
+        return next((z for z in self.zones if z["name"] == name), None)
+
+    def created_rrsets(self, zone_id: int) -> list[dict]:
+        """The body of every RRset create (``POST /zones/{id}/rrsets``) the run
+        sent into zone ``zone_id``, in order — what was published there."""
+        pattern = re.compile(rf"{re.escape(self._prefix)}/zones/{zone_id}/rrsets")
+        return [
+            json.loads(request.get_data() or b"{}")
+            for request, _response in self._h.log
+            if request.method == "POST" and pattern.fullmatch(request.path)
+        ]
+
+    def _create_zone(self, request):
+        # POST /zones {"name", "mode": "primary"} — `create_zone()`.
+        if self.refuse_zone_creates != 0:
+            if self.refuse_zone_creates > 0:
+                self.refuse_zone_creates -= 1
+            return _Resp(
+                json.dumps({"error": {
+                    "code": "invalid_input", "message": self.ZONE_CREATE_REFUSAL,
+                }}),
+                status=422,
+                content_type="application/json",
+                headers=list(_CORS.items()),
+            )
+        body = request.get_json(force=True, silent=True) or {}
+        name = body.get("name", "")
+        if self.zone_named(name) is not None:
+            return _Resp(
+                json.dumps({"error": {
+                    "code": "uniqueness_error", "message": f"zone {name} already exists",
+                }}),
+                status=409,
+                content_type="application/json",
+                headers=list(_CORS.items()),
+            )
+        zone = {
+            "id": max([1000, *(int(z["id"]) for z in self.zones)]) + 1,
+            "name": name,
+            "mode": body.get("mode", "primary"),
+            "authoritative_nameservers": {
+                "assigned": list(self.ASSIGNED_NAMESERVERS),
+                "delegated": [],
+                "delegation_status": "unregistered",
+            },
+        }
+        self.zones.append(zone)
+        self.created_zones.append(body)
+        return _Resp(
+            json.dumps({"zone": zone, "action": {"id": 1, "status": "success"}}),
+            status=201,
+            content_type="application/json",
+            headers=list(_CORS.items()),
+        )
+
     def _rrset_read(self, request):
         # .../zones/{zone}/rrsets?name=…&type=…
         zone = request.path.split("/")[-2]
@@ -990,6 +1070,24 @@ class HetznerDnsHandlers:
         return _Resp(
             json.dumps({"rrsets": rrsets}),
             status=200,
+            content_type="application/json",
+            headers=list(_CORS.items()),
+        )
+
+    def _rrset_create(self, request):
+        # POST .../zones/{zone}/rrsets {"name", "type", "ttl", "records"}.
+        zone = request.path.split("/")[-2]
+        body = request.get_json(force=True, silent=True) or {}
+        held = self.rrsets.setdefault(
+            (zone, body.get("name", ""), body.get("type", "")), []
+        )
+        for rec in body.get("records", []):
+            value = rec.get("value", "")
+            if value not in held:
+                held.append(value)
+        return _Resp(
+            json.dumps({"rrset": {"id": "rec-htz"}}),
+            status=201,
             content_type="application/json",
             headers=list(_CORS.items()),
         )
@@ -1021,6 +1119,10 @@ class HetznerDnsHandlers:
                 held = self.rrsets.get((zone, name, record_type), [])
                 if value in held:
                     held.remove(value)
+            else:
+                held = self.rrsets.setdefault((zone, name, record_type), [])
+                if value not in held:
+                    held.append(value)
         return _Resp(
             json.dumps({"action": {"id": 1, "status": "success"}}),
             status=200,
@@ -1038,6 +1140,11 @@ class HetznerDnsHandlers:
         self._h.expect_request(f"{p}/zones", method="GET").respond_with_handler(
             self._zones
         )
+        # POST /zones — create_zone(), the zone door: the new zone carries its
+        # assigned nameservers and joins what verify() lists.
+        self._h.expect_request(f"{p}/zones", method="POST").respond_with_handler(
+            self._create_zone
+        )
         # GET /zones/{zone}/rrsets — find_records() and create_record()'s
         # existence probe, answered from the seeded store (empty by default,
         # so provisioning's create always creates).
@@ -1046,12 +1153,12 @@ class HetznerDnsHandlers:
             method="GET",
         ).respond_with_handler(self._rrset_read)
         # POST /zones/{zone}/rrsets — create_record() when the RRset is absent.
+        # The created values join the store, so `records()` reads the zone a
+        # run leaves behind (the converge's witness reads the final zone).
         self._h.expect_request(
             re.compile(rf"^{re.escape(p)}/zones/[^/]+/rrsets$"),
             method="POST",
-        ).respond_with_json(
-            {"rrset": {"id": "rec-htz"}}, status=201, headers=_CORS
-        )
+        ).respond_with_handler(self._rrset_create)
         # POST /zones/{zone}/rrsets/{name}/{type}/actions/{add,remove}_records
         # — create_record()'s add-to-existing-RRset path and delete_record().
         # Value-aware: every removed value is recorded, so a test can assert
@@ -1066,6 +1173,111 @@ class HetznerDnsHandlers:
             ),
             method="POST",
         ).respond_with_handler(self._rrset_action)
+
+
+class PorkbunHandlers:
+    """Stub for Porkbun as a **registrar**
+    (``libs/fauna-provisioning/src/registrar/porkbun.rs``): every call is a
+    ``POST <base>/<path>`` with the key pair in the JSON body, answered
+    ``{"status": "SUCCESS", …}`` or ``{"status": "ERROR", "message": …}``.
+
+    Serves ``ping`` (verify), ``pricing/get``, ``domain/checkDomain/{d}``,
+    ``domain/create/{d}`` and ``domain/updateNs/{d}`` (the nameserver door,
+    registry.md § Delegation doors). It holds what it sold: a create of a
+    domain it already sold is refused, so a run that registers twice fails
+    loudly, and ``updateNs`` refuses a domain this account does not hold. A
+    create whose ``cost`` is not the quoted price is refused too, as the live
+    endpoint does — the agreed price is the one charged."""
+
+    REGISTRATION = "11.82"
+    RENEWAL = "12.97"
+
+    def __init__(self, httpserver: HTTPServer, prefix: str) -> None:
+        self._h = httpserver
+        self._prefix = prefix
+        # `{"domain", "cost"}` per successful create, in order.
+        self.registered: list[dict] = []
+        # `(domain, [nameservers])` per successful updateNs, in order.
+        self.nameserver_updates: list[tuple[str, list[str]]] = []
+        # Every path called (relative to the prefix), in order.
+        self.calls: list[str] = []
+
+    def base_url(self) -> str:
+        return self._h.url_for("").rstrip("/") + self._prefix
+
+    @property
+    def registration_cents(self) -> int:
+        return round(float(self.REGISTRATION) * 100)
+
+    @property
+    def renewal_cents(self) -> int:
+        return round(float(self.RENEWAL) * 100)
+
+    def nameservers_of(self, domain: str) -> list[str] | None:
+        """The nameservers the last ``updateNs`` set on ``domain``, if any."""
+        for d, ns in reversed(self.nameserver_updates):
+            if d == domain:
+                return ns
+        return None
+
+    def install_defaults(self) -> None:
+        self._h.expect_request(
+            re.compile(rf"^{re.escape(self._prefix)}/.+$"), method="POST"
+        ).respond_with_handler(self._call)
+
+    @staticmethod
+    def _json(body: dict, status: int = 200) -> _Resp:
+        return _Resp(
+            json.dumps(body), status=status, content_type="application/json",
+            headers=list(_CORS.items()),
+        )
+
+    def _error(self, message: str) -> _Resp:
+        return self._json({"status": "ERROR", "message": message}, status=400)
+
+    def _held(self, domain: str) -> bool:
+        return any(r["domain"] == domain for r in self.registered)
+
+    def _call(self, request) -> _Resp:
+        path = request.path[len(self._prefix) + 1:]
+        self.calls.append(path)
+        body = request.get_json(force=True, silent=True) or {}
+        if path == "pricing/get":
+            tld = {"registration": self.REGISTRATION, "renewal": self.RENEWAL,
+                   "transfer": self.REGISTRATION}
+            return self._json({"status": "SUCCESS", "pricing": {"test": tld, "com": tld}})
+        if not body.get("apikey") or not body.get("secretapikey"):
+            return self._error("Invalid API key. (002)")
+        if path == "ping":
+            return self._json({"status": "SUCCESS", "yourIp": "203.0.113.7"})
+        group, _, rest = path.partition("/")
+        command, _, domain = rest.partition("/")
+        if group != "domain" or not domain:
+            return self._error(f"{path} is not served by the fake")
+        if command == "checkDomain":
+            return self._json({"status": "SUCCESS", "response": {
+                "avail": "no" if self._held(domain) else "yes",
+                "type": "registration",
+                "price": self.REGISTRATION,
+                "regularPrice": self.RENEWAL,
+            }})
+        if command == "create":
+            if self._held(domain):
+                return self._error(f"{domain} is not available for registration.")
+            if body.get("cost") != self.registration_cents:
+                return self._error(
+                    f"cost {body.get('cost')!r} does not match the price "
+                    f"{self.registration_cents}"
+                )
+            self.registered.append({"domain": domain, "cost": body["cost"]})
+            return self._json({"status": "SUCCESS", "domain": domain,
+                               "cost": body["cost"], "orderId": len(self.registered)})
+        if command == "updateNs":
+            if not self._held(domain):
+                return self._error(f"{domain} is not in this account.")
+            self.nameserver_updates.append((domain, list(body.get("ns", []))))
+            return self._json({"status": "SUCCESS"})
+        return self._error(f"{path} is not served by the fake")
 
 
 class NestHandlers:

@@ -254,6 +254,9 @@ pub(crate) enum Cmd {
     WriteMailState {
         state: Box<fauna_core::mail_rows::MailStateRow>,
         now: fauna_core::data::Timestamp,
+        /// The machinery's write (the connect-time key mint) rather than a
+        /// surface's gesture — [`Self::is_background_write`].
+        background: bool,
         reply: oneshot::Sender<Result<bool>>,
     },
     /// The rotation sentinel's clear door
@@ -373,6 +376,13 @@ pub(crate) enum Cmd {
     /// gesture.
     WriteRefusedChanges {
         write: crate::refused_change_rows::RefusedChangeWrite,
+        reply: oneshot::Sender<Result<bool>>,
+    },
+    /// The pairing mark's write door
+    /// ([`AccountStoreHandle::put_pairing_mark`]) — a gesture's own write.
+    PutPairingMark {
+        nest_id: [u8; 32],
+        digest: [u8; 32],
         reply: oneshot::Sender<Result<bool>>,
     },
     /// The blessed-nests write door
@@ -747,6 +757,7 @@ impl Cmd {
             | Cmd::MergePeerAnchors { .. }
             | Cmd::WriteRefusedChanges { .. }
             | Cmd::SetNestBlessed { .. }
+            | Cmd::PutPairingMark { .. }
             | Cmd::PutCustodiesHeld { .. }
             | Cmd::PutShareEndpoints { .. }
             | Cmd::TombstoneShareEndpoints { .. }
@@ -800,6 +811,11 @@ impl Cmd {
             // the drive pass's marks; a mint, accept or revoke from a page is
             // that page's gesture.
             Cmd::MergeCustody { background, .. } => *background,
+            // The connect-time key mint (`MailSettingsMachine::
+            // ensure_account_key`), which a calendar or card read left
+            // unresolved for want of the key waits on; an enable, a rotation
+            // or a settings write from a page is that page's gesture.
+            Cmd::WriteMailState { background, .. } => *background,
             _ => false,
         }
     }
@@ -851,6 +867,7 @@ impl Cmd {
             Cmd::MergePeerAnchors { .. } => Some(mp::KIND_PEER_ANCHORS),
             Cmd::WriteRefusedChanges { .. } => Some(mp::KIND_REFUSED_SCHEDULING_CHANGES),
             Cmd::SetNestBlessed { .. } => Some(mp::KIND_BLESSED_NESTS),
+            Cmd::PutPairingMark { .. } => Some(mp::KIND_PAIRING_MARK),
             Cmd::MergeFolderKeys { .. } | Cmd::SettleFolderRemoval { .. } => {
                 Some(mp::KIND_FOLDER_KEYS)
             }
@@ -908,6 +925,7 @@ impl Cmd {
             Cmd::MergePeerAnchors { reply, .. } => drop(reply.send(Err(err))),
             Cmd::WriteRefusedChanges { reply, .. } => drop(reply.send(Err(err))),
             Cmd::SetNestBlessed { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::PutPairingMark { reply, .. } => drop(reply.send(Err(err))),
             Cmd::MergeFolderKeys { reply, .. } => drop(reply.send(Err(err))),
             Cmd::SettleFolderRemoval { reply, .. } => drop(reply.send(Err(err))),
             other => {
@@ -2236,11 +2254,31 @@ impl AccountStoreHandle {
         &self,
         state: fauna_core::mail_rows::MailStateRow,
     ) -> Result<bool> {
+        self.write_mail_state_as(state, false).await
+    }
+
+    /// [`Self::write_mail_state`] for the runtime's own machinery — the
+    /// connect-time key mint — whose write is a background write and so a
+    /// store-change notice source ([`Cmd::is_background_write`]): a page whose
+    /// read waited on the key re-runs when it lands.
+    pub async fn write_mail_state_background(
+        &self,
+        state: fauna_core::mail_rows::MailStateRow,
+    ) -> Result<bool> {
+        self.write_mail_state_as(state, true).await
+    }
+
+    async fn write_mail_state_as(
+        &self,
+        state: fauna_core::mail_rows::MailStateRow,
+        background: bool,
+    ) -> Result<bool> {
         let (reply, rx) = oneshot::channel();
         self.cmd
             .send(Cmd::WriteMailState {
                 state: Box::new(state),
                 now: fauna_core::data::Timestamp::now(),
+                background,
                 reply,
             })
             .await
@@ -2529,6 +2567,45 @@ impl AccountStoreHandle {
         Ok(crate::blessed_nest_rows::blessed_nests_of(&entries)?
             .iter()
             .any(|b| b.blessed))
+    }
+
+    /// The pairing mark this store holds for `nest_id`
+    /// (`fauna.state.pairing-mark`) — the digest of the last listing a writer
+    /// recorded for that nest, or `None`. A local read; `pairing_mark_rows`
+    /// owns the mechanics. Nothing reads it for what a page lists.
+    pub async fn pairing_mark(&self, nest_id: [u8; 32]) -> Result<Option<[u8; 32]>> {
+        let key = fauna_client_core::linked_nests::pairing_mark_key(&nest_id);
+        let entry = self
+            .states_of_kind(fauna_protocol::merge_policy::KIND_PAIRING_MARK)
+            .await?
+            .into_iter()
+            .find(|e| e.key == key && !e.tombstone);
+        match entry {
+            None => Ok(None),
+            Some(e) => <[u8; 32]>::try_from(e.value.as_slice())
+                .map(Some)
+                .map_err(|_| anyhow::anyhow!("the pairing mark at {key:?} is not 32 bytes")),
+        }
+    }
+
+    /// Put `digest` as `nest_id`'s pairing mark (`fauna.state.pairing-mark`)
+    /// — the Nests page's link, both-ends link or unlink, after the gesture's
+    /// own re-list (`account-runtime.md` § Multi-instance concurrency → *the
+    /// pairing mark*, part 2). A gesture's own write: it moves no generation
+    /// here; other replicas see it through the pump's walk. Whether anything
+    /// was written (`false` when the row already holds `digest`); the writer
+    /// door's refusal while no generation tip resolves surfaces as `Err`.
+    pub async fn put_pairing_mark(&self, nest_id: [u8; 32], digest: [u8; 32]) -> Result<bool> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd
+            .send(Cmd::PutPairingMark {
+                nest_id,
+                digest,
+                reply,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
+        rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
     }
 
     /// Record the user's blessing verdict for `nest_id` at `now`
@@ -4554,6 +4631,15 @@ impl fauna_client_config::MailStore for AccountStoreHandle {
             .map_err(|e| fauna_client_config::StoreError::Save(format!("{e:#}")))
     }
 
+    async fn write_state_background(
+        &self,
+        state: fauna_core::mail_rows::MailStateRow,
+    ) -> Result<bool, fauna_client_config::StoreError> {
+        self.write_mail_state_background(state)
+            .await
+            .map_err(|e| fauna_client_config::StoreError::Save(format!("{e:#}")))
+    }
+
     async fn clear_rotation(
         &self,
         new_msek: fauna_core::secret::SecretArray32,
@@ -4995,7 +5081,9 @@ where
         }
         // The mail custody: per-row read-join-puts on this one store thread —
         // `mail_rows` owns the mechanics.
-        Cmd::WriteMailState { state, now, reply } => {
+        Cmd::WriteMailState {
+            state, now, reply, ..
+        } => {
             let r = crate::mail_rows::write_mail_state(local.store, local.fleet_plane, &state, now)
                 .await;
             return wrote(r, |written| *written, local.publish_due, reply);
@@ -5285,6 +5373,23 @@ where
                 local.publish_due,
                 reply,
             );
+        }
+        // The pairing mark: a compare-then-LWW-put on this one store thread —
+        // `pairing_mark_rows` owns the mechanics.
+        Cmd::PutPairingMark {
+            nest_id,
+            digest,
+            reply,
+        } => {
+            let r = crate::pairing_mark_rows::put_pairing_mark(
+                local.store,
+                local.fleet_plane,
+                me,
+                &nest_id,
+                digest,
+            )
+            .await;
+            return wrote(r, |written| *written, local.publish_due, reply);
         }
         // The blessed nests: a read-stamp-put on this one store thread —
         // `blessed_nest_rows` owns the mechanics.

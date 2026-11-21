@@ -2043,6 +2043,7 @@ pub(crate) fn spawn_unsent_refresh(app: &App) {
     let conversations = app.conversations.real_session.as_ref().map(|s| s.manager());
     let want_list = app.page == crate::pages::Page::Settings
         && app.settings.sub == crate::settings::SubPage::Account;
+    let resync_of = app.settings.unsent_gen;
     let tx = app.tx.clone();
     tokio::spawn(async move {
         use fauna_core::offline_intent::OfflineIntentQueue;
@@ -2057,7 +2058,7 @@ pub(crate) fn spawn_unsent_refresh(app: &App) {
         if want_list {
             let read = outbox.unsent_changes().await;
             let _ = tx.send(crate::app::UiMessage::Data(
-                crate::app::DataMessage::UnsentChangesRead(read),
+                crate::app::DataMessage::UnsentChangesRead { read, resync_of },
             ));
         }
     });
@@ -2313,42 +2314,15 @@ pub fn persist_awaiting_dns(
         })
 }
 
-/// Adopt a freshly-onboarded identity: persist the trio through the shared
-/// registry, then bring the session up.
+/// A freshly-onboarded identity's persistence — `onboarding.md` § Wizard exit
+/// handling's `LoggedIn` row, "save `(nest_url, handle)` to the long-term
+/// identity store": the signed-in identity, then any predecessor seeds a
+/// phrase-only restore recovered. Returns the account's actor id.
 ///
-/// This is `onboarding.md` § Wizard exit handling's `LoggedIn` row — "save
-/// `(nest_url, handle)` to the long-term identity store … navigate to the
-/// authenticated UI". Persist *before* connecting so a crash between the two
-/// leaves a relaunchable account rather than a lost secret.
-#[allow(clippy::too_many_arguments)] // each arg is a distinct onboarding fact; a wrapper struct would just move the list
-pub fn adopt(
-    app: &mut App,
-    tx: &UnboundedSender<UiMessage>,
-    nest_url: &str,
-    dial_url: &str,
-    secret_hex: &str,
-    handle: String,
-    // The reach hint, captured off the machine before the wizard is torn down
-    // (`onboarding.md` § Reach hint). `Some` only when this session provisioned
-    // the box it is signing in to; `None` on every other path, and then the
-    // account simply waits for DNS exactly as before.
-    reach_ipv4: Option<&str>,
-    // The predecessor seeds a phrase-only restore recovered; empty on every
-    // other path. Persisted before the session is built — see
-    // [`persist_logged_in_identity`].
-    restored_predecessors: &[fauna_onboarding_machine::nest_api::RestoredPredecessorSeed],
-) -> Result<(), String> {
-    persist_logged_in_identity(app, secret_hex, nest_url, reach_ipv4, restored_predecessors)?;
-    // `nest_url` is the identity truth (persisted above); `dial_url` is the
-    // socket to open. They are the same string in every production build —
-    // they differ only under the e2e `provider_base_urls["nest"]` override,
-    // which is what lets a domain-shaped claim reach a local nest
-    // (`OnboardingMachine::resolved_nest_dial_url`).
-    establish(app, tx, dial_url, secret_hex, handle)
-}
-
-/// [`adopt`]'s persistence half: the signed-in identity, then any predecessor
-/// seeds a phrase-only restore recovered — both BEFORE [`establish`] runs.
+/// Runs BEFORE the launch the finished wizard then starts
+/// (`wizard::handle_wizard_done`), so a crash between the two leaves a
+/// relaunchable account rather than a lost secret, and BEFORE [`establish`],
+/// which that launch's `Online` reaches.
 ///
 /// **The order is the point.** `establish` resolves the predecessor chain ONCE,
 /// into the Media machine's read custody and the drafts rails
@@ -2363,9 +2337,13 @@ pub(crate) fn persist_logged_in_identity(
     app: &App,
     secret_hex: &str,
     nest_url: &str,
+    // The reach hint, captured off the machine before the wizard is torn down
+    // (`onboarding.md` § Reach hint). `Some` only when this session provisioned
+    // the box it is signing in to; `None` on every other path, and then the
+    // account simply waits for DNS exactly as before.
     reach_ipv4: Option<&str>,
     restored_predecessors: &[fauna_onboarding_machine::nest_api::RestoredPredecessorSeed],
-) -> Result<(), String> {
+) -> Result<String, String> {
     let registry = registry(app);
     // The shared `LoggedIn` moment (add the account with its home nest, activate
     // it, spend the pending-invite and awaiting-DNS slots, record the reach
@@ -2373,15 +2351,16 @@ pub(crate) fn persist_logged_in_identity(
     // copy until the hint gave it a fourth thing to remember; the awaiting-DNS
     // clear followed on 2026-09-21, once its moment was ruled to be exactly this
     // terminal (`onboarding.md` § Long-term store contract).
-    fauna_client_accounts::persist_logged_in(&registry, secret_hex, nest_url, None, reach_ipv4)
-        .map_err(|e| {
-            add_refusal_line(
-                &e,
-                fauna_i18n::strings::onboarding::session_error::persist_account,
-            )
-        })?;
+    let actor_id =
+        fauna_client_accounts::persist_logged_in(&registry, secret_hex, nest_url, None, reach_ipv4)
+            .map_err(|e| {
+                add_refusal_line(
+                    &e,
+                    fauna_i18n::strings::onboarding::session_error::persist_account,
+                )
+            })?;
     persist_restored_predecessors(app, restored_predecessors);
-    Ok(())
+    Ok(actor_id)
 }
 
 /// The line an account add refused by the registry paints: the shared
@@ -2405,7 +2384,7 @@ fn add_refusal_line(err: &fauna_client_accounts::AccountError, wrap: fn(&str) ->
 /// already belongs to it on the nest — so a crash between the two would leave an
 /// account nobody holds the key to, the client-only-resident key material the
 /// no-user-data-loss invariant names by name. That is the same "persist before
-/// connecting" ordering [`adopt`] takes, for a sharper version of the same
+/// connecting" ordering [`persist_logged_in_identity`] keeps, for a sharper version of the same
 /// reason.
 ///
 /// The **old** account row is deliberately kept, exactly as the launch-side
@@ -2535,9 +2514,9 @@ fn park_succession_ceremony(
 /// (tear the live session down + re-launch over the now-active new account).
 ///
 /// This is the tui analog of linux's "add_account + trigger_switch_account"
-/// (`long-term-store.md` § Multi-account evolution): unlike [`adopt`] (the
-/// no-session onboarding path, which `establish`es a session directly over the
-/// current surface), append must DROP the old session first — exactly what
+/// (`long-term-store.md` § Multi-account evolution): unlike [`persist_logged_in_identity`] (the
+/// no-session onboarding persistence, after which the first launch runs over
+/// an empty app), append must DROP the old session first — exactly what
 /// `switch_account` does. `add_account` is idempotent, so importing an identity
 /// already in the registry just re-activates it. All three wizard terminals are
 /// handled: `LoggedIn` lands the new account `Online`; the two pending terminals
@@ -2608,7 +2587,7 @@ fn persist_appended(
     use fauna_onboarding_machine::WizardOutcome;
     match outcome {
         WizardOutcome::LoggedIn { nest_url, .. } => {
-            // The same shared terminal [`adopt`] runs — add with the home nest,
+            // The same shared terminal [`persist_logged_in_identity`] runs — add with the home nest,
             // activate, spend the pending-invite and awaiting-DNS slots — so the
             // append path cannot drift from the no-session one (this was an
             // inline copy of the helper's first three lines until 2026-09-21).
@@ -2813,7 +2792,7 @@ pub fn account_switcher_rows(app: &App) -> Vec<AccountSwitcherRow> {
 
 /// The pure half of [`account_switcher_rows`]: `serving` is the account this
 /// instance serves, passed in so a test need not seed the process-global holder.
-fn switcher_rows_serving(
+pub(crate) fn switcher_rows_serving(
     registry: &fauna_client_accounts::AccountRegistry,
     serving: Option<&str>,
 ) -> Vec<AccountSwitcherRow> {

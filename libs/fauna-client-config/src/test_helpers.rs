@@ -442,6 +442,9 @@ struct FakeMailInner {
     publishes: usize,
     refuse_walk: usize,
     walks: usize,
+    /// State writes that came through the machinery's door
+    /// ([`MailStore::write_state_background`]) and changed the row.
+    background_state_writes: usize,
     /// Every read answers `Load(reason)` while set.
     refuse_reads: Option<String>,
 }
@@ -614,6 +617,13 @@ impl FakeMailStore {
     /// How many walks this store took.
     pub fn walks(&self) -> usize {
         self.inner.lock().unwrap().walks
+    }
+
+    /// How many state writes came through the machinery's background door
+    /// and changed the row — the store-change notice sources a real runtime
+    /// would raise.
+    pub fn background_state_writes(&self) -> usize {
+        self.inner.lock().unwrap().background_state_writes
     }
 
     /// Refuse the next `n` publishes the way an offline nest does.
@@ -888,6 +898,14 @@ impl MailStore for FakeMailStore {
         inner.rows.state = Some(joined);
         inner.landed();
         Ok(true)
+    }
+
+    async fn write_state_background(&self, state: MailStateRow) -> Result<bool, StoreError> {
+        let wrote = self.write_state(state).await?;
+        if wrote {
+            self.inner.lock().unwrap().background_state_writes += 1;
+        }
+        Ok(wrote)
     }
 
     async fn clear_rotation(&self, new_msek: SecretArray32) -> Result<bool, StoreError> {

@@ -69,17 +69,20 @@ Stamped 2026-11-07 at b844c771f6.
    - `tests/e2e-unified/tests/test_notifications_muted.py::test_a_muted_word_collapses_the_notification_rows_that_carry_it`
 15. [app] A knock from a stranger shows one notice in your language, and a flood of them replaces that notice rather than piling up — `docs/goal/behavior/notifications.md` § Localized body (ratified 2026-09-20)
    - `tests/e2e-unified/tests/test_notifications_knock_toast.py::test_a_flood_of_knocks_raises_one_localized_notice`
+16. [app] Mark all read and Clear all are disabled and say they are still loading, or failed to load, until the page's first read has answered, and Clear all says there is nothing to clear while the page holds no notification — `docs/goal/behavior/notifications.md` § Errors & edge cases
+    - `tests/e2e-unified/tests/test_fresh_account_offer_only_possible.py::test_clear_all_says_there_is_nothing_to_clear_on_an_empty_page`
+    - `tests/e2e-unified/tests/test_read_pending_offer_only_possible.py::test_mark_all_read_and_clear_all_say_still_loading_until_the_first_read_answers`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+88622a93 standalone |
-| linux | ⚠ partial | 0.1.5-dev+5a9a5fa8 standalone |
-| windows | ✅ full | 0.1.5-dev+acde58f9 standalone |
-| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ⚠ partial | 0.1.5-dev+c9e7fe5d standalone |
+| web | ⚠ partial | 0.1.5-dev+acde58f9 standalone |
+| linux | ⚠ partial | 0.1.5-dev+acde58f9 standalone |
+| windows | ⚠ partial | 0.1.5-dev+acde58f9 standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.5-dev+acde58f9 standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+acde58f9 standalone |
 | android-kids |  no run recorded | |
@@ -122,7 +125,9 @@ Stamped 2026-11-07 at b844c771f6.
 | 11 | app | `tests/e2e-unified/tests/test_notifications_localized_body.py::test_a_row_paints_its_localized_body_and_an_unknown_key_paints_the_summary` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_notifications_dismiss_and_clear.py::test_dismiss_deletes_one_row_and_clear_all_deletes_the_rest` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_notifications_dismiss_and_clear.py::test_dismissing_a_knock_takes_its_doorbell_row_with_it` | macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_contacts_accept_opens_conversation.py::test_accepting_a_contact_request_lets_you_start_the_conversation` | windows (windows): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 14 | app | `tests/e2e-unified/tests/test_notifications_muted.py::test_a_muted_word_collapses_the_notification_rows_that_carry_it` | web (linux): passed, windows (windows): passed, tui (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_contacts_accept_opens_conversation.py::test_accepting_a_contact_request_lets_you_start_the_conversation` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 14 | app | `tests/e2e-unified/tests/test_notifications_muted.py::test_a_muted_word_collapses_the_notification_rows_that_carry_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 15 | app | `tests/e2e-unified/tests/test_notifications_knock_toast.py::test_a_flood_of_knocks_raises_one_localized_notice` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 16 | app | `tests/e2e-unified/tests/test_fresh_account_offer_only_possible.py::test_clear_all_says_there_is_nothing_to_clear_on_an_empty_page` — requires `blocked-reason-read` (test harness) (not built: windows) | macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 16 | app | `tests/e2e-unified/tests/test_read_pending_offer_only_possible.py::test_mark_all_read_and_clear_all_say_still_loading_until_the_first_read_answers` — requires `blocked-reason-read` (test harness) (not built: windows) | tui (linux): passed |
 <!-- features-render:end -->

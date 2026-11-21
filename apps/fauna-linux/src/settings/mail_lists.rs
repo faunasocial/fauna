@@ -39,6 +39,7 @@ use fauna_client_mail_settings::{
 use crate::async_helper::spawn_with_snapshot;
 use crate::i18n::strings::mail_lists as S;
 use crate::testid::set_test_id;
+use fauna_core::possibility::Possibility;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FormMode {
@@ -93,6 +94,13 @@ struct ListsCtx {
 pub fn build_mail_lists_page(
     on_navigate_to_members: Rc<dyn Fn(String, String)>,
 ) -> (adw::PreferencesPage, Rc<dyn Fn()>) {
+    let (page, widgets) = build_page_parts();
+    let refresh = wire_machine(widgets, on_navigate_to_members);
+    (page, refresh)
+}
+
+/// The page and its widget handles, unwired (the tests paint them directly).
+fn build_page_parts() -> (adw::PreferencesPage, ListsWidgets) {
     let page = adw::PreferencesPage::builder()
         .title(S::TITLE)
         .icon_name("mail-send-symbolic")
@@ -231,9 +239,18 @@ pub fn build_mail_lists_page(
         submit_button,
         cancel_button,
     };
-    let refresh = wire_machine(widgets, on_navigate_to_members);
+    // Not known before the first snapshot (rule 5): the add waits.
+    paint_create(&widgets, Possibility::once_read(false));
 
-    (page, refresh)
+    (page, widgets)
+}
+
+/// Paint the add affordance from the shared `MailListsSnapshot::create_possibility`
+/// answer (`ui/README.md` § Offer only what is possible, rule 6), through the
+/// seam: blocked → inert with the reason on its tooltip (the page's own line
+/// also says why while the user owns no domain); possible → live.
+fn paint_create(w: &ListsWidgets, create: Possibility) {
+    crate::possible::paint(&w.add_button, None, create);
 }
 
 fn wire_machine(
@@ -242,9 +259,14 @@ fn wire_machine(
 ) -> Rc<dyn Fn()> {
     let client = match crate::settings::get_client() {
         Some(c) => c,
-        // No client (unit test / pre-auth): the page stays at its placeholder,
-        // so becoming visible later has nothing to refresh.
-        None => return Rc::new(|| {}),
+        // No client (unit test / pre-auth): no machine, so the add — the
+        // page's only machine gesture before a list exists — is blocked with
+        // the unbuilt reason (rule 7: never silent). Becoming visible later
+        // has nothing to refresh.
+        None => {
+            paint_create(&widgets, fauna_client_mail_settings::mail_usable_unbuilt());
+            return Rc::new(|| {});
+        }
     };
     let machine = Arc::new(crate::mail_glue::build_mail_lists_machine(&client));
 
@@ -284,6 +306,18 @@ fn wire_machine(
             .clone()
             .connect_changed(move |_| sync_archive_arm(&ctx));
     }
+    // The submit repaints from its answer as the draft changes.
+    for entry in [&ctx.w.local_part_input, &ctx.w.per_send_input] {
+        let ctx = Rc::clone(&ctx);
+        entry.connect_changed(move |_| paint_submit(&ctx));
+    }
+    {
+        let ctx = Rc::clone(&ctx);
+        ctx.w
+            .domain_picker
+            .clone()
+            .connect_selected_notify(move |_| paint_submit(&ctx));
+    }
     {
         let ctx = Rc::clone(&ctx);
         ctx.w.cancel_button.clone().connect_clicked(move |_| {
@@ -300,6 +334,33 @@ fn wire_machine(
     // alias is added elsewhere (or on a fresh actor with none yet at the ONE
     // hydrate this ctx got at settings-shell build time) unless re-read here.
     Rc::new(move || hydrate_and_render(&ctx))
+}
+
+/// The domain the sheet's picker selects (empty with none to pick).
+fn selected_domain(ctx: &ListsCtx) -> String {
+    ctx.domains
+        .borrow()
+        .get(ctx.w.domain_picker.selected() as usize)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// `mail-lists-add-sheet-submit-button`'s answer, the shared
+/// `list_submit_possibility` over what is typed (`mail-settings.md` § Errors &
+/// edge cases, *The in-page predicates*; tui's `submit_answer`).
+fn submit_answer(ctx: &ListsCtx) -> Possibility {
+    let w = &ctx.w;
+    fauna_client_mail_settings::list_submit_possibility(
+        ctx.form_mode.get() == FormMode::Edit,
+        w.local_part_input.text().to_string(),
+        selected_domain(ctx),
+        w.per_send_input.text().to_string(),
+    )
+}
+
+/// Paint the sheet's submit from its answer, the reason on its tooltip.
+fn paint_submit(ctx: &ListsCtx) {
+    crate::possible::paint(&ctx.w.submit_button, None, submit_answer(ctx));
 }
 
 /// The archive URL a submit must confirm first, or `None` when it saves on the
@@ -347,6 +408,7 @@ fn open_add_sheet(ctx: &Rc<ListsCtx>) {
     w.list_archive_input.set_text("");
     w.per_send_input.set_text("");
     w.error_label.set_visible(false);
+    paint_submit(ctx);
     w.sheet_group.set_visible(true);
 }
 
@@ -375,10 +437,18 @@ fn open_edit_sheet(ctx: &Rc<ListsCtx>, view: &ListView) {
             .unwrap_or_default(),
     );
     w.error_label.set_visible(false);
+    paint_submit(ctx);
     w.sheet_group.set_visible(true);
 }
 
 fn submit_sheet(ctx: &Rc<ListsCtx>) {
+    // The answer the submit painted from, asked again; a refusal says why on
+    // `error-message` instead of returning silently (rules 4, 6 and 7).
+    let answer = submit_answer(ctx);
+    if let Some(reason) = crate::possible::reason_text(&answer) {
+        super::render_error_label(&ctx.w.error_label, Some(&reason));
+        return;
+    }
     // An archive link off the user's own server asks once before saving: the
     // first press saves nothing and relabels the button, a second press on the
     // same link dispatches.
@@ -391,11 +461,7 @@ fn submit_sheet(ctx: &Rc<ListsCtx>) {
     }
     disarm_archive(ctx);
     let w = &ctx.w;
-    let domains = ctx.domains.borrow();
-    let local_domain = domains
-        .get(w.domain_picker.selected() as usize)
-        .cloned()
-        .unwrap_or_default();
+    let local_domain = selected_domain(ctx);
     let draft = ListDraft {
         friendly_name: w.name_input.text().trim().to_string(),
         local_part: w.local_part_input.text().trim().to_string(),
@@ -463,14 +529,16 @@ fn render(ctx: &Rc<ListsCtx>, snap: &MailListsSnapshot) {
 
     super::render_error_label(&w.error_label, snap.error.as_deref());
 
-    // Domain picker options + the add-control gating (need an owned domain).
+    // Domain picker options, and the add painted from the shared create
+    // answer (a list is created on one of the user's own domains).
     *ctx.domains.borrow_mut() = snap.local_domains.clone();
     let domain_refs: Vec<&str> = snap.local_domains.iter().map(|s| s.as_str()).collect();
     w.domain_picker
         .set_model(Some(&gtk::StringList::new(&domain_refs)));
-    let has_domain = !snap.local_domains.is_empty();
-    w.add_button.set_sensitive(has_domain);
-    if !has_domain && snap.error.is_none() {
+    let create = snap.create_possibility();
+    let possible = create.is_possible();
+    paint_create(w, create);
+    if !possible && snap.error.is_none() {
         super::render_error_label(&w.error_label, Some(S::NO_DOMAIN));
     }
 
@@ -585,6 +653,42 @@ fn build_list_row(ctx: &Rc<ListsCtx>, view: &ListView) -> adw::ActionRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The add paints from the shared create answer: waiting before the first
+    /// snapshot (rule 5), blocked with the domain reason while the user owns
+    /// none, live once one is derived, blocked with the unbuilt reason with no
+    /// machine (rule 7). Red-verify by making `paint_create` a no-op.
+    #[test]
+    fn the_add_paints_from_the_shared_create_answer() {
+        crate::testid::run_on_gtk_thread(|| {
+            let _ = adw::init();
+            let (_page, w) = build_page_parts();
+            let tip = |w: &ListsWidgets| w.add_button.tooltip_text().map(|t| t.to_string());
+            let reason =
+                |a: &Possibility| a.reason().map(|r| r.resolve(crate::i18n::strings::lookup));
+
+            let waiting = Possibility::once_read(false);
+            assert!(w.add_button.is_visible() && !w.add_button.is_sensitive());
+            assert_eq!(tip(&w), reason(&waiting));
+
+            paint_create(
+                &w,
+                Possibility::blocked(fauna_core::localized::LocalizedText::key(
+                    "mail_lists.no_domain",
+                )),
+            );
+            assert!(!w.add_button.is_sensitive());
+            assert_eq!(tip(&w).as_deref(), Some(S::NO_DOMAIN));
+
+            paint_create(&w, Possibility::Possible);
+            assert!(w.add_button.is_sensitive());
+
+            let unbuilt = fauna_client_mail_settings::mail_usable_unbuilt();
+            paint_create(&w, unbuilt.clone());
+            assert!(!w.add_button.is_sensitive());
+            assert_eq!(tip(&w), reason(&unbuilt));
+        });
+    }
 
     use crate::testid::widget_names;
 

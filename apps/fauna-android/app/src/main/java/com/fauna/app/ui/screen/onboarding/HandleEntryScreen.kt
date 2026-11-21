@@ -1,10 +1,12 @@
 package com.fauna.app.ui.screen.onboarding
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -16,6 +18,12 @@ import com.fauna.app.BuildConfig
 import com.fauna.app.R
 import com.fauna.app.core.OnboardingHost
 import com.fauna.app.core.RegionPlaneHost
+import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.formRefusal
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.localized
 import com.fauna.ffi.onboarding.HandleCheckOutcome
 import com.fauna.ffi.onboarding.HandleCheckPhase
 import com.fauna.ffi.onboarding.OnboardingStep
@@ -23,6 +31,9 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
 
 /**
  * Thin Compose surface over OnboardingHost.machine. Renders
@@ -41,10 +52,6 @@ class HandleEntryVM @Inject constructor(
         onStep(host.machine.submitHandleCheckContinue())
     }
 
-    fun setControl(checked: Boolean) {
-        host.machine.setControlCheckbox(checked)
-    }
-
     fun setHandleInput(h: String) {
         host.machine.setCurrentHandle(h)
     }
@@ -60,8 +67,17 @@ fun HandleEntryScreen(
     val tick by vm.host.tick.collectAsState()
     val snap = remember(tick) { vm.host.machine.handleCheckSnapshot() }
     val isLoading = remember(tick) { vm.host.machine.isLoading() }
+    // Continue's answer is the machine's (`ui/README.md` § Offer only what is possible, rule 6);
+    // its reason is the check's message the page already shows.
+    val continueAnswer = remember(tick) { vm.host.machine.handleContinuePossibility() }
 
+    val context = LocalContext.current
     var input by remember { mutableStateOf(vm.host.machine.currentHandle()) }
+    // `handle-check-button`'s answer (`ui/README.md` § Offer only what is
+    // possible, rule 4's form case): a handle typed and no check in flight.
+    val checkAnswer = remember(tick, input) {
+        askForm { vm.host.machine.handleCheckPossibility(input) }
+    }
 
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),
@@ -73,11 +89,13 @@ fun HandleEntryScreen(
             style = MaterialTheme.typography.headlineSmall,
         )
         Spacer(Modifier.height(8.dp))
-        Text(
-            stringResource(R.string.onboarding_handle_examples_help),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        SelectionContainer {
+            Text(
+                stringResource(R.string.onboarding_handle_examples_help),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         Spacer(Modifier.height(16.dp))
 
         Row(
@@ -97,8 +115,17 @@ fun HandleEntryScreen(
                 placeholder = { Text("alice@example.com") },
             )
             Button(
-                onClick = { vm.startCheck(input) },
-                enabled = input.isNotBlank() && !isLoading,
+                onClick = {
+                    // The press asks the answer it was painted from again
+                    // (rule 6); a blocked draft's line goes on `error-message`.
+                    val refusal = formRefusal(context, checkAnswer)
+                    if (refusal != null) {
+                        refusal.reason?.let(vm.host.machine::setErrorMessage)
+                    } else {
+                        vm.startCheck(input)
+                    }
+                },
+                enabled = checkAnswer.isPossible,
                 modifier = Modifier.testTag(Ids.HANDLE_CHECK_BUTTON),
             ) {
                 if (isLoading) {
@@ -112,6 +139,21 @@ fun HandleEntryScreen(
             }
         }
 
+        DisabledControlReasonText(
+            localized(checkAnswer.blockedReason),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        remember(tick) { vm.host.machine.errorMessage() }?.ifEmpty { null }?.let {
+            SelectionContainer {
+                Text(
+                    it,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.fillMaxWidth().testTag(Ids.ERROR_MESSAGE),
+                )
+            }
+        }
+
         Spacer(Modifier.height(16.dp))
 
         // Auto-sizing message panel — driven by snapshot.message (LocalizedText)
@@ -120,28 +162,16 @@ fun HandleEntryScreen(
         val messageLine = localizedOnboardingText(snap.message)
         val display = phaseLine ?: messageLine
         if (!display.isNullOrEmpty()) {
-            Text(
-                display,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag(Ids.HANDLE_MESSAGE_AREA),
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            Spacer(Modifier.height(8.dp))
-        }
-
-        if (snap.controlCheckboxVisible) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Checkbox(
-                    checked = snap.controlCheckboxChecked,
-                    onCheckedChange = { vm.setControl(it) },
-                    modifier = Modifier.testTag(Ids.HANDLE_CONTROL_CHECKBOX),
+            SelectionContainer {
+                Text(
+                    display,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag(Ids.HANDLE_MESSAGE_AREA),
+                    style = MaterialTheme.typography.bodyMedium,
                 )
-                Text(stringResource(R.string.onboarding_handle_control_checkbox))
             }
+            Spacer(Modifier.height(8.dp))
         }
 
         Spacer(Modifier.weight(1f))
@@ -175,7 +205,7 @@ fun HandleEntryScreen(
                         }
                     }
                 },
-                enabled = snap.continueEnabled && !isLoading,
+                enabled = continueAnswer.isPossible && !isLoading,
                 modifier = Modifier.testTag(Ids.HANDLE_ENTRY_CONTINUE_BUTTON),
             ) { Text(stringResource(R.string.common_continue)) }
         }
@@ -205,6 +235,9 @@ internal fun routeForStep(step: OnboardingStep): String = when (step) {
     OnboardingStep.INVITE_REQUEST -> "onboarding/invite-request"
     // Nest setup (DNS, VPS, provisioning) is not registered on the kids build, which
     // only joins a guardian's nest by invite: the step keeps the person on handle entry.
+    // The choose-providers page (onboarding-provisioning.md § 3d): reached
+    // because OnboardingHost declares setRendersProviderChoice (not on kids).
+    OnboardingStep.PROVIDER_CHOICE -> if (BuildConfig.KIDS) "onboarding/handle-entry" else "onboarding/provider-choice"
     OnboardingStep.DNS_CONFIG -> if (BuildConfig.KIDS) "onboarding/handle-entry" else "onboarding/dns-config"
     OnboardingStep.VPS_CONFIG -> if (BuildConfig.KIDS) "onboarding/handle-entry" else "onboarding/vps-config"
     OnboardingStep.NEST_PROVISIONING ->

@@ -3790,6 +3790,27 @@ pub fn review_row_text(review: &MemberReview, handle: Option<&str>) -> MemberRev
     }
 }
 
+/// `member-review-remove-button`'s answer (`docs/goal/ui/README.md` § Offer
+/// only what is possible, rules 5 and 7; the ruling is
+/// `docs/goal/behavior/succession-propagation.md` § Propagation): Remove evicts
+/// through the conversations session, and only that eviction earns a verdict,
+/// so the press is not possible until the session is up — never a bare
+/// `Removed` write, and never a press that returns with nothing shown. The row
+/// itself still renders without the session (an item nobody can name is an
+/// item nobody can close); Keep, a ledger write alone, is not gated by it.
+pub fn member_review_remove_possibility(
+    conversations_ready: bool,
+) -> crate::possibility::Possibility {
+    use crate::possibility::Possibility;
+    if conversations_ready {
+        Possibility::Possible
+    } else {
+        Possibility::blocked(LocalizedText::key(
+            "settings.recovery_kit.review_remove_not_ready",
+        ))
+    }
+}
+
 /// Render [`MemberReviewRowText::reasons`] into one line, in raise order — a
 /// join and deliberately nothing more. *Which* reasons appear — including
 /// that a reason this build cannot name is still rendered rather than
@@ -8992,6 +9013,18 @@ mod account_record_tests {
         assert!(!is_under_review_hex(&roster, &clean.to_hex()));
         // An undecodable hex string (never a real contact's id) must not panic.
         assert!(!is_under_review_hex(&roster, "not-hex"));
+    }
+
+    /// Remove waits for the conversations session that performs the eviction.
+    #[test]
+    fn member_review_remove_waits_for_the_conversations_session() {
+        assert!(member_review_remove_possibility(true).is_possible());
+        assert_eq!(
+            member_review_remove_possibility(false)
+                .reason()
+                .map(|r| r.key.as_str()),
+            Some("settings.recovery_kit.review_remove_not_ready")
+        );
     }
 
     /// A person the app can no longer name still gets a named row — the rule

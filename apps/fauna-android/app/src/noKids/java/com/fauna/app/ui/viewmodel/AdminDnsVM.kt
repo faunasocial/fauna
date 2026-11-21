@@ -16,6 +16,7 @@ import uniffi.fauna_client_dns.DelegationView
 import uniffi.fauna_client_dns.DnsAction
 import uniffi.fauna_client_dns.DnsCredentialField
 import uniffi.fauna_client_dns.DnsManagementMachine
+import uniffi.fauna_client_dns.DnsSnapshot
 import uniffi.fauna_client_dns.DnsStatus
 import uniffi.fauna_client_dns.DomainView
 import uniffi.fauna_client_dns.PendingCertIssue
@@ -24,6 +25,7 @@ import uniffi.fauna_client_mail_settings.LocalDomainAction
 import uniffi.fauna_client_mail_settings.LocalDomainMachine
 import uniffi.fauna_client_mail_settings.LocalDomainStatus
 import uniffi.fauna_client_mail_settings.LocalDomainView
+import uniffi.fauna_client_mail_settings.LocalDomainsSnapshot
 import uniffi.fauna_client_mail_settings.PrimaryDomainRenameView
 import uniffi.fauna_client_mail_settings.RoleAddressKind
 import uniffi.fauna_client_mail_settings.localDomainActionMovesRecordMatrix
@@ -106,6 +108,23 @@ class AdminDnsVM @Inject constructor(
     val error = MutableStateFlow<String?>(null)
     val working = MutableStateFlow(false)
 
+    /** The two whole snapshots the page's `Possibility` answers read
+     *  (`dns-management.md` § Errors & edge cases — the shared
+     *  `fauna_client_dns::affordances` / `fauna_client_mail_settings::domain_forms`
+     *  faces). `null` until that machine's first `Refresh` has answered: a read
+     *  that has not resolved is never possible (`docs/goal/ui/README.md` § Offer
+     *  only what is possible, rule 5), and "No domains yet" is never painted
+     *  before the domains read resolved. */
+    val dnsSnapshot = MutableStateFlow<DnsSnapshot?>(null)
+    val localDomainsSnapshot = MutableStateFlow<LocalDomainsSnapshot?>(null)
+    private var dnsRead = false
+    private var ldRead = false
+
+    /** The reason the page's last refused action was refused — the same answer
+     *  its control was painted from (rule 6's second half); folded into
+     *  [error] first, cleared by the next dispatch. */
+    private var refusal: String? = null
+
     /** The last cert-issue bound-id refusal (see [resolveTargetNestId]); folded into [error]. */
     private var resolveRefusal: String? = null
 
@@ -123,7 +142,9 @@ class AdminDnsVM @Inject constructor(
             repeat(HYDRATE_ATTEMPTS) {
                 try {
                     ldMachine?.dispatch(LocalDomainAction.Refresh)
+                    ldRead = ldMachine != null
                     dnsMachine?.dispatch(DnsAction.Refresh)
+                    dnsRead = dnsMachine != null
                     dnsMachine?.dispatch(DnsAction.VerifyRecords(domain = null))
                     dnsMachine?.dispatch(DnsAction.RefreshCertStatus)
                     actors.value = actorOptions(api.adminUsersListAll())
@@ -142,7 +163,9 @@ class AdminDnsVM @Inject constructor(
         viewModelScope.launch {
             withWorking {
                 ldMachine?.dispatch(LocalDomainAction.Refresh)
+                ldRead = ldMachine != null
                 dnsMachine?.dispatch(DnsAction.Refresh)
+                dnsRead = dnsMachine != null
                 dnsMachine?.dispatch(DnsAction.VerifyRecords(domain = null))
                 dnsMachine?.dispatch(DnsAction.RefreshCertStatus)
             }
@@ -158,11 +181,21 @@ class AdminDnsVM @Inject constructor(
         publish()
     }
 
-    fun addDomain(domain: String) = dispatchLd(
+    /** Refuse a page action with [reason] on `error-message` — the reason of
+     *  the shared answer its control was painted from; nothing is dispatched. */
+    fun refuse(reason: String?) {
+        refusal = reason
+        publish()
+    }
+
+    /** Add a domain; [onSaved] runs only once the nest added it, so the form
+     *  closes then and a failed save keeps what was typed. */
+    fun addDomain(domain: String, onSaved: () -> Unit) = dispatchLd(
         LocalDomainAction.AddDomain(
             domain = domain,
             mtaStsCertMode = DEFAULT_CERT_MODE,
         ),
+        onSaved,
     )
 
     /** The row's Remove: open the shared confirm. Synchronous — it reaches no nest. */
@@ -191,12 +224,14 @@ class AdminDnsVM @Inject constructor(
     // (apps/fauna-web/src/routes/admin/dns/+page.svelte, the rename block).
 
     /** Start a rename, promoting `newPrimaryDomainId` (a picked non-primary
-     *  domain's 16-byte id); `graceDays` null → nest default (7). */
-    fun startPrimaryRename(newPrimaryDomainId: ByteArray, graceDays: Long?) = dispatchLd(
+     *  domain's 16-byte id); `graceDays` null → nest default (7). [onSaved]
+     *  runs only once the nest started it (the sheet closes then). */
+    fun startPrimaryRename(newPrimaryDomainId: ByteArray, graceDays: Long?, onSaved: () -> Unit) = dispatchLd(
         LocalDomainAction.StartPrimaryRename(
             newPrimaryDomainId = newPrimaryDomainId,
             graceDays = graceDays,
         ),
+        onSaved,
     )
 
     /** Finalize the in-flight rename; `force` completes early from `grace`. */
@@ -272,8 +307,17 @@ class AdminDnsVM @Inject constructor(
         }
     }
 
-    fun putCredential(providerId: String, fields: List<DnsCredentialField>, label: String) =
-        dispatchDns(DnsAction.PutCredentials(providerId = providerId, fields = fields, label = label))
+    /** Verify and seal a provider credential; [onSaved] runs only once it is
+     *  stored, so the write-only form keeps what was typed after a rejection. */
+    fun putCredential(
+        providerId: String,
+        fields: List<DnsCredentialField>,
+        label: String,
+        onSaved: () -> Unit,
+    ) = dispatchDns(
+        DnsAction.PutCredentials(providerId = providerId, fields = fields, label = label),
+        onSaved,
+    )
 
     fun clearCredential(index: UInt) = dispatchDns(DnsAction.ClearCredentials(index = index))
 
@@ -360,18 +404,33 @@ class AdminDnsVM @Inject constructor(
     /** A local-domain action, then — when it moved the record matrix — the
      *  shared `recheck_matrix` before the one publish, so an added domain
      *  appears with its records and their status (mail-multidomain.md § Wizard
-     *  steps, step 8). A thrown dispatch skips the re-check. */
-    private fun dispatchLd(action: LocalDomainAction) {
+     *  steps, step 8). A thrown dispatch skips the re-check. [onSaved] runs
+     *  only when the action itself succeeded — a form's save closes the form
+     *  there and nowhere else. */
+    private fun dispatchLd(action: LocalDomainAction, onSaved: (() -> Unit)? = null) {
         viewModelScope.launch {
+            var saved = false
             withWorking {
-                ldMachine?.dispatch(action)
+                val machine = ldMachine ?: return@withWorking
+                machine.dispatch(action)
+                ldRead = true
+                saved = true
                 if (localDomainActionMovesRecordMatrix(action)) dnsMachine?.recheckMatrix()
             }
+            if (saved) onSaved?.invoke()
         }
     }
 
-    private fun dispatchDns(action: DnsAction) {
-        viewModelScope.launch { withWorking { dnsMachine?.dispatch(action) } }
+    private fun dispatchDns(action: DnsAction, onSaved: (() -> Unit)? = null) {
+        viewModelScope.launch {
+            var saved = false
+            withWorking {
+                val machine = dnsMachine ?: return@withWorking
+                machine.dispatch(action)
+                saved = true
+            }
+            if (saved) onSaved?.invoke()
+        }
     }
 
     /** Run a machine interaction with the working flag set, then re-publish the
@@ -379,6 +438,7 @@ class AdminDnsVM @Inject constructor(
      *  a hard FFI failure leaves the prior snapshots in place. */
     private suspend inline fun withWorking(block: () -> Unit) {
         working.value = true
+        refusal = null
         try {
             block()
         } catch (_: Exception) {
@@ -398,6 +458,7 @@ class AdminDnsVM @Inject constructor(
             renameAvailable.value = snap.renameAvailable
             addingFirstDomain.value = snap.addingFirstDomain
             removeConfirmDomain.value = snap.removeConfirmDomain
+            if (ldRead) localDomainsSnapshot.value = snap
         }
         dnsMachine?.let {
             val snap = it.snapshot()
@@ -408,8 +469,10 @@ class AdminDnsVM @Inject constructor(
             delegations.value = snap.delegations
             pendingCert.value = snap.pendingCert
             manageAll.value = it.allDomainsManaged(snap.domains.map { d -> d.domain })
+            if (dnsRead) dnsSnapshot.value = snap
         }
         error.value = listOfNotNull(
+            refusal,
             resolveRefusal,
             ldMachine?.snapshot()?.error,
             dnsMachine?.snapshot()?.error,

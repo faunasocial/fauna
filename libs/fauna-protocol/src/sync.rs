@@ -776,10 +776,21 @@ pub struct SyncChangeRecordRequest {
     pub extra: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct SyncChangeRecordReply {
     /// The monotonic sequence number assigned to this change.
     pub seq: i64,
+    /// The seq of the newest row of the SAME set below `seq`, read in the
+    /// transaction that assigned `seq`; 0 when the set holds none below it.
+    /// The nest's one counter spans every set it holds, so a writer cannot
+    /// read "no foreign row of my set lies between" off the numbers — this is
+    /// what lets its next edit stamp reach across its own acknowledged run
+    /// (`docs/goal/behavior/conflicts.md` § the causal watermark, *An edit
+    /// stamp reaches across the writer's own acknowledged run*). Absent from
+    /// a path that cannot answer it (a backup destination, a relay whose home
+    /// nest did not say); an absent value advances nothing. Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_set_seq: Option<i64>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }

@@ -16,8 +16,17 @@ private final class ScriptedProvidersAPI: APIClient {
     init() { super.init(nodeUrl: URL(string: "https://nest.invalid/")!) }
 
     override func paymentProviderKinds() -> [String] { ["stripe", "lemonsqueezy"] }
-    override func listSubscriptionTiers() async throws -> [FfiTierItem] { [] }
+    // One own tier: the provider form opens only when there is a tier to sell
+    // (`profile.md` § Errors & edge cases, *A tier before what sells it*).
+    override func listSubscriptionTiers() async throws -> [FfiTierItem] {
+        [FfiTierItem(name: "gold", rank: 1, description: nil, priceHint: nil,
+                     askingPriceSats: nil, paymentUrl: nil, autoApprove: false,
+                     createdAt: 0, unlocksPost: nil, hidden: false)]
+    }
     override func listSubscriptionRequests() async throws -> [FfiPendingRequest] { [] }
+    // With a tier selected the hydrate reads its roster: scripted, so it never
+    // dials the stub's unreachable nest.
+    override func listSubscribers(tierName: String) async throws -> [FfiSubscriberEntry] { [] }
     override func listPaymentProviders() async throws -> [FfiProviderItem] { providers }
     override func listPaymentClaims() async throws -> [FfiClaimItem] { [] }
     override func setPaymentProvider(kind: String, webhookSecret: String, tier: String,

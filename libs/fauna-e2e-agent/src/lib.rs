@@ -179,7 +179,11 @@ pub type ScopeStep = (String, usize);
 ///   a glib *timeout* source and timeouts outrank idles — acking from the drain
 ///   alone would jump ahead of idle work queued first.
 /// - **web** yields a double macrotask turn, because awaiting a promise orders
-///   only against microtasks.
+///   only against microtasks — after first waiting, turn by turn and bounded,
+///   for no SvelteKit navigation and no WS-RPC call to be in flight: a nav
+///   tab's lazily loaded route and an awaited RPC both outlive any fixed
+///   number of turns, so each is ordered by its own completion observable
+///   (`apps/fauna-web/src/lib/barrier-e2e.ts`).
 /// - **apple** (macOS + iOS, one shared FaunaKit handler) round-trips
 ///   `DispatchQueue.main` — the serial queue its probe batch and its own command
 ///   dispatch both ride, so a block enqueued by the barrier runs strictly after
@@ -1026,6 +1030,13 @@ pub use fauna_e2e_contract::custody_ceremony_ingest_json;
 /// wait for `passes_completed` to pass the baseline. `pending` is the in-flight
 /// countdown behind `photo-backup-sync-progress`; it is 0 whenever no pass is in
 /// flight, so it is a progress readout and never a pass barrier.
+///
+/// `requests_coalesced` counts every request the single-flight gate refused
+/// because a pass was already in flight (each folded into one trailing pass) —
+/// monotonic, so a coalescing witness reads it rising with `passes_started`
+/// unchanged as the positive statement "the second request reached the gate
+/// mid-pass" before it releases the parked pass. android and apple (iOS and
+/// macOS) both publish it.
 pub const PHOTO_BACKUP_KEY: &str = "photo_backup";
 
 /// Photo backup's **scheduled-pass poke** — convention 14's `run_now` for the one
@@ -1184,7 +1195,8 @@ pub const DEVICES_REFRESHES_KEY: &str = "devices_refreshes";
 
 /// State key: the post-claim **serving-enablement** step's runs —
 /// `{"started": N, "completed": M, "runs": [{"actor_id", "decided": {"email",
-/// "caldav", "carddav", "webdav"}, "completed"}]}`
+/// "caldav", "carddav", "webdav"}, "completed", "outcome", "refused": [{"step",
+/// "message"}]}]}`
 /// (`fauna_client_mail_settings::serving_enablement::serving_enablement_json`,
 /// the one shared derivation; the recording is `apply_serving_enablement`, the
 /// one shared firing of `onboarding.md` § 3b's four machine-derived intents).
@@ -1198,9 +1210,13 @@ pub const DEVICES_REFRESHES_KEY: &str = "devices_refreshes";
 ///
 /// **Contract.** One record per `LoggedIn` handoff this process ran, appended
 /// at the step's first statement with the handoff's actor and the intents it
-/// decided; `completed` flips once every step its plan holds has been answered
-/// — **the decide-nothing run included** — and by a drop guard, so every
-/// started run lands. **Find YOUR run by the actor you onboarded and wait for
+/// decided; `completed` flips once every step its plan holds has succeeded or
+/// been refused for good — **the decide-nothing run included**; a step refused
+/// for a passing reason is tried again and never counts (`onboarding.md` § 3b
+/// *The step completes; it is not fired once*). `outcome` says which:
+/// `running` (a step still being tried), `succeeded`, `refused` (`refused`
+/// lists the steps and the nest's sentences) or `abandoned` (the session ended
+/// first — never `completed`). **Find YOUR run by the actor you onboarded and wait for
 /// its `completed`, then read the toggles once**: nothing this glue does for
 /// that actor can land after that. Keyed on the actor rather than a count
 /// against a baseline because the onboarding flows relaunch the app before the
@@ -1409,6 +1425,29 @@ pub const CONNECTION_KEY: &str = "connection";
 /// FFI build the same shape) over its held bearer.
 pub const LAUNCH_TOKEN_KEY: &str = "launch_token";
 
+/// The state key carrying the **journal of the app's visible top-level
+/// windows** — `{"journal": [{"seq": N, "visible": [{"id": K, "name": "…"}]}],
+/// "now": [{"id": K, "name": "…"}]}`, one entry appended each time the set of
+/// visible windows (or a visible window's widget name) changes, `id` a
+/// process-local serial that names one window object for its whole life.
+///
+/// **What it is for.** `onboarding.md` § Wizard exit handling → *The wizard
+/// becomes the app in place*: at `LoggedIn` the surface on screen stays and
+/// its content changes, and an append-mode switch never leaves the person with
+/// no window. Neither is visible in any element tree — a close and a reopen
+/// lands the same widgets in a new window — so the witness reads this journal
+/// across the exit: the visible set never empties after its first entry, and
+/// the window that showed the wizard is the one that shows the app. Recorded
+/// from the windows' own `visible`/`name` notifications, never sampled, so a
+/// sub-frame gap is an entry too (convention 14). Published by the apps whose
+/// shell has more than one top-level window (linux, macOS); an app that does not
+/// publish it is refused by the consumer (convention 11). The journal itself
+/// is the shared [`ToplevelWindowJournal`]; macOS and linux, whose shells own
+/// their windows, publish it beside [`ROOT_SURFACE_KEY`].
+pub const TOPLEVEL_WINDOWS_KEY: &str = "toplevel_windows";
+
+pub use fauna_e2e_contract::ToplevelWindowJournal;
+
 /// The agent command forcing the held session bearer's refresh NOW, through
 /// the production refresh path, awaited so the ack lands after the outcome —
 /// the wrong-clock refresh witness's ceremony leg (case M). The bearer is the
@@ -1553,6 +1592,29 @@ pub const PAINTED_TEXT_AREA_KEY: &str = "painted_text_area";
 
 pub use fauna_e2e_contract::{LaidOutText, MIN_READABLE_LAYOUT_UNIT, PaintedTextArea};
 
+/// State key: the **journal of what the app's root surface showed**, one entry
+/// per change across its painted frames — `{"journal": [{"seq": N, "showing":
+/// "wizard"|"launch_progress"|"app"|<another launch surface's ui.yaml
+/// page>|null}], "now": …}`, built by [`RootSurfaceJournal::json`]
+/// (`fauna-e2e-contract`); `null` is a frame that painted nothing.
+///
+/// **What it is for.** `onboarding.md` § Wizard exit handling → *The wizard
+/// becomes the app in place*: from the wizard's `LoggedIn` exit to the
+/// signed-in page the one surface (a terminal, a tab, an activity, a window)
+/// shows the launch progress view or the app, never nothing — the same for an
+/// append-mode switch. A read of the element tree samples; a blank frame
+/// shorter than a poll would pass. This journal is fed by the app's paint path
+/// itself, once per painted frame (convention 14), so such a frame is an entry.
+/// Every app but windows publishes this. linux, whose shell has several windows, reads it
+/// off the newest visible window that names its root, and publishes
+/// [`TOPLEVEL_WINDOWS_KEY`] beside it. An app that publishes neither is refused
+/// by the consumer (convention 11).
+pub const ROOT_SURFACE_KEY: &str = "root_surface";
+
+pub use fauna_e2e_contract::{
+    ROOT_SURFACE_APP, ROOT_SURFACE_LAUNCH_PROGRESS, ROOT_SURFACE_WIZARD, RootSurfaceJournal,
+};
+
 /// A request forwarded to the client's UI thread, with the one-shot reply
 /// channel the (blocking) server thread waits on.
 pub struct ElementOp {
@@ -1640,6 +1702,22 @@ pub enum ElementKind {
     /// `id`/`index`/`scope`/`arg`. A client whose clipboard is not the host's
     /// to read replies `{error: …}`, never an empty clipboard.
     ClipboardText,
+    /// Make the selection a person makes in the (indexed, scoped) element's
+    /// text with the platform's own selection gesture, and reply what it then
+    /// holds — `POST /element/select-text`, replying `{"selected": …}` (`""`
+    /// when the element's text cannot be selected), the route and reply shape
+    /// the web and macos bridges serve for `PlatformDriver.is_text_selectable`
+    /// (`e2e-conventions.md` § Driver primitives → *Reading whether text can
+    /// be selected*). The selection is left standing for [`Self::Selection`].
+    /// Never writes a selection range or sets a flag for the test. A client
+    /// with no such gesture replies `{error: …}`.
+    SelectText,
+    /// What the current selection holds — `POST /page/selection`, replying
+    /// `{"selected": …}` (`""` when nothing is selected), the route the web
+    /// and macos bridges serve for `PlatformDriver.selected_text`. Ignores
+    /// `id`/`index`/`scope`/`arg`. A client that cannot read a selection
+    /// replies `{error: …}`, never an empty selection.
+    Selection,
 }
 
 /// A liveness stamp the host's UI thread touches on its own cadence, so an
@@ -2129,6 +2207,10 @@ fn handle(request: &mut tiny_http::Request, hooks: &AgentHooks) -> (u16, Value) 
         ("GET", "/clipboard/text") => {
             element(hooks, req(ElementKind::ClipboardText, String::new()))
         }
+        ("POST", "/element/select-text") => {
+            element(hooks, req(ElementKind::SelectText, String::new()))
+        }
+        ("POST", "/page/selection") => element(hooks, req(ElementKind::Selection, String::new())),
         // State protocol — the driver POSTs a command then polls /app/state.
         ("GET", "/app/state") => (200, (hooks.app_state)()),
         ("POST", "/app/commands") => {

@@ -142,7 +142,7 @@ def claimed_nest(docker_image):
 # ── Test ──────────────────────────────────────────────────────────────
 
 
-@pytest.mark.feature("mail-server")
+@pytest.mark.feature("mail-server", "turn-on-mail")
 def test_mail_deploy_lifecycle_to_serving(claimed_nest):
     nest = claimed_nest
     name = nest["name"]

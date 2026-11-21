@@ -41,7 +41,7 @@ Stamped 2026-11-07 at ef4db96e39.
 | App | Status | Stamp |
 |---|---|---|
 | web | ✅ full | 0.1.7-dev+34330ae6 standalone |
-| linux |  no run recorded | |
+| linux | ✅ full | 0.1.7-dev+34330ae6 standalone |
 | windows |  no run recorded | |
 | macos |  no run recorded | |
 | ios |  no run recorded | |
@@ -52,14 +52,14 @@ Stamped 2026-11-07 at ef4db96e39.
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | web (linux): passed, tui (linux): passed, tui (macos): passed |
-| 2 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | web (linux): passed, tui (linux): passed, tui (macos): passed |
-| 3 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_a_region_withheld_post_opened_in_full_shows_the_notice` | web (linux): passed, tui (linux): passed, tui (macos): passed |
-| 4 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | web (linux): passed, tui (linux): passed, tui (macos): passed |
-| 5 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | web (linux): passed, tui (linux): passed, tui (macos): passed |
-| 6 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | web (linux): passed, tui (linux): passed, tui (macos): passed |
-| 7 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_settings_warns_when_the_rules_could_not_be_checked_lately` | web (linux): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_a_region_withheld_post_opened_in_full_shows_the_notice` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (macos): passed |
+| 5 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (macos): passed |
+| 6 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (macos): passed |
+| 7 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_settings_warns_when_the_rules_could_not_be_checked_lately` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (macos): passed |
 | 8 | nest | `tests/e2e-unified/tests/api/test_region_rules_web_notice.py::test_the_public_web_pages_show_the_region_notice_in_place_of_what_the_situs_policy_blocks` | nest (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | web (linux): passed, tui (linux): passed, tui (macos): passed |
-| 10 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | web (linux): passed, tui (linux): passed, tui (macos): passed |
+| 9 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (macos): passed |
+| 10 | app | `tests/e2e-unified/tests/test_region_content_policy.py::test_region_policy_reaches_the_render_and_the_settings_surface` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

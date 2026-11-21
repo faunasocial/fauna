@@ -14,6 +14,23 @@ pub use fauna_devices_machine::{
 use crate::folders_client::ffi_folder_members;
 use crate::{FfiError, FfiFolderMember, FfiFoldersClient, FfiNestClient, stringify};
 
+/// `device-p2p-participation-toggle` on a roster row painted `paint`:
+/// [`fauna_devices_machine::P2pParticipationPaint::possibility`] — possible on
+/// the own row and on a sibling that may still be on; blocked by the row's
+/// "turning off" label while an off request is pending, or by
+/// `devices.p2p_participation_on_there` on a sibling that is off
+/// (`docs/goal/ui/devices.md` § Errors & edge cases, *The participation switch
+/// answers one `Possibility`*). The record crosses by value and carries no
+/// method, so the app passes the one it holds. Gated `value-format` for the
+/// bare-`fauna_core`-type reason [`crate::offline::offline_possibility`] gives.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn p2p_participation_possibility(
+    paint: fauna_devices_machine::P2pParticipationPaint,
+) -> fauna_core::possibility::Possibility {
+    paint.possibility()
+}
+
 /// The `error-message` texts a folder row's background reads put up, one slot
 /// per (read, set), so a later good answer retires exactly its own text and
 /// never a gesture's (`ui/folders.md` § Errors & edge cases). The rule is
@@ -442,5 +459,42 @@ mod tests {
         let _host = crate::account_runtime::tests::host_with_no_runtime().await;
         let rows = vec![Some(fauna_core::hex32::encode(&[2u8; 32])), None];
         assert_eq!(devices_keyless_posture(rows).await, vec![false, false]);
+    }
+}
+
+#[cfg(all(test, feature = "value-format"))]
+mod participation_possibility_face_tests {
+    use super::*;
+    use fauna_core::localized::LocalizedText;
+    use fauna_core::possibility::Possibility;
+    use fauna_devices_machine::P2pParticipationPaint;
+
+    fn paint(checked: bool, actionable: bool) -> P2pParticipationPaint {
+        P2pParticipationPaint {
+            own: false,
+            checked,
+            label: LocalizedText::key("devices.p2p_participation_off_requested"),
+            actionable,
+        }
+    }
+
+    #[test]
+    fn a_blocked_sibling_says_why() {
+        assert_eq!(
+            p2p_participation_possibility(paint(true, true)),
+            Possibility::Possible
+        );
+        assert_eq!(
+            p2p_participation_possibility(paint(true, false))
+                .reason()
+                .map(|r| r.key.as_str()),
+            Some("devices.p2p_participation_off_requested")
+        );
+        assert_eq!(
+            p2p_participation_possibility(paint(false, false))
+                .reason()
+                .map(|r| r.key.as_str()),
+            Some("devices.p2p_participation_on_there")
+        );
     }
 }

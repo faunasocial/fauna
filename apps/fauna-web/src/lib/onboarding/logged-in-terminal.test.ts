@@ -23,7 +23,7 @@ function deferred(): { promise: Promise<void>; resolve: () => void; reject: (e: 
   return { promise, resolve, reject };
 }
 
-Deno.test("the app is entered only once the restored predecessors have landed", async () => {
+Deno.test("the launch starts only once the restored predecessors have landed", async () => {
   const persist = deferred();
   const order: string[] = [];
   const done = runLoggedInTerminal({
@@ -37,7 +37,10 @@ Deno.test("the app is entered only once the restored predecessors have landed", 
     },
     beginSession: () => order.push("begin"),
     handoffs: () => order.push("handoffs"),
-    enterApp: () => order.push("enter"),
+    launch: (atOnline) => {
+      order.push("launch");
+      atOnline();
+    },
     onFailure: () => order.push("failure"),
   });
   // Drain every queued turn: nothing but a landed persist may release entry.
@@ -46,10 +49,10 @@ Deno.test("the app is entered only once the restored predecessors have landed", 
   assertEquals(order, ["register", "persist"]);
   persist.resolve();
   await done;
-  assertEquals(order, ["register", "persist", "begin", "handoffs", "enter"]);
+  assertEquals(order, ["register", "persist", "begin", "launch", "handoffs"]);
 });
 
-Deno.test("a failed predecessor persist is reported and never strands the user", async () => {
+Deno.test("a failed predecessor persist is reported and the launch still runs", async () => {
   const failures: string[] = [];
   let entered = false;
   await runLoggedInTerminal({
@@ -57,7 +60,7 @@ Deno.test("a failed predecessor persist is reported and never strands the user",
     persistRestoredPredecessors: () => Promise.reject(new Error("quota")),
     beginSession: () => {},
     handoffs: () => {},
-    enterApp: () => {
+    launch: () => {
       entered = true;
     },
     onFailure: (step, e) => failures.push(`${step}: ${(e as Error).message}`),
@@ -66,7 +69,7 @@ Deno.test("a failed predecessor persist is reported and never strands the user",
   assertEquals(failures, ["restored predecessors: quota"]);
 });
 
-Deno.test("a failed registry write still persists the predecessors and enters the app", async () => {
+Deno.test("a failed registry write still persists the predecessors and runs the launch", async () => {
   const order: string[] = [];
   await runLoggedInTerminal({
     register: () => Promise.reject(new Error("locked")),
@@ -76,10 +79,13 @@ Deno.test("a failed registry write still persists the predecessors and enters th
     },
     beginSession: () => order.push("begin"),
     handoffs: () => order.push("handoffs"),
-    enterApp: () => order.push("enter"),
+    launch: (atOnline) => {
+      order.push("launch");
+      atOnline();
+    },
     onFailure: (step) => order.push(`failure:${step}`),
   });
-  assertEquals(order, ["failure:register", "persist", "begin", "handoffs", "enter"]);
+  assertEquals(order, ["failure:register", "persist", "begin", "launch", "handoffs"]);
 });
 
 Deno.test("an added restore lands its predecessors between the add and the switch", async () => {
@@ -100,7 +106,10 @@ Deno.test("an added restore lands its predecessors between the add and the switc
     },
     beginSession: () => order.push("begin"),
     handoffs: () => order.push("handoffs"),
-    enterApp: () => order.push("enter"),
+    launch: (atOnline) => {
+      order.push("launch");
+      atOnline();
+    },
     onFailure: () => order.push("failure"),
   });
   await new Promise((r) => setTimeout(r, 0));
@@ -108,7 +117,7 @@ Deno.test("an added restore lands its predecessors between the add and the switc
   assertEquals(order, ["add", "persist"]);
   persist.resolve();
   await done;
-  assertEquals(order, ["add", "persist", "begin", "switch", "handoffs", "enter"]);
+  assertEquals(order, ["add", "persist", "begin", "switch", "launch", "handoffs"]);
 });
 
 Deno.test("a failed add still lands the predecessors but switches to nothing", async () => {
@@ -125,17 +134,20 @@ Deno.test("a failed add still lands the predecessors but switches to nothing", a
     },
     beginSession: () => order.push("begin"),
     handoffs: () => order.push("handoffs"),
-    enterApp: () => order.push("enter"),
+    launch: (atOnline) => {
+      order.push("launch");
+      atOnline();
+    },
     onFailure: (step) => order.push(`failure:${step}`),
   });
-  assertEquals(order, ["failure:register", "persist", "begin", "handoffs", "enter"]);
+  assertEquals(order, ["failure:register", "persist", "begin", "launch", "handoffs"]);
 });
 
 // The session a claim starts runs over the account the claim created, never
 // over a client built before it: an identity committed ahead of its account
 // can have had its WS-RPC client stopped for good by the box it then claimed
 // (`not_registered`), and the hand-offs that follow dial through that client.
-Deno.test("the session begins after the registry write and before the hand-offs and entry", async () => {
+Deno.test("the session begins after the registry write and before the launch", async () => {
   const order: string[] = [];
   await runLoggedInTerminal({
     register: () => {
@@ -148,15 +160,18 @@ Deno.test("the session begins after the registry write and before the hand-offs 
     },
     beginSession: () => order.push("begin"),
     handoffs: () => order.push("handoffs"),
-    enterApp: () => order.push("enter"),
+    launch: (atOnline) => {
+      order.push("launch");
+      atOnline();
+    },
     onFailure: (step) => order.push(`failure:${step}`),
   });
   // After the persist too: the delivered handlers include the succession
   // aftermath, which reads the predecessors the persist just landed.
-  assertEquals(order, ["register", "persist", "begin", "handoffs", "enter"]);
+  assertEquals(order, ["register", "persist", "begin", "launch", "handoffs"]);
 });
 
-Deno.test("a failed session begin is reported and never strands the user", async () => {
+Deno.test("a failed session begin is reported and the launch still runs", async () => {
   const order: string[] = [];
   await runLoggedInTerminal({
     register: () => Promise.resolve(),
@@ -165,8 +180,49 @@ Deno.test("a failed session begin is reported and never strands the user", async
       throw new Error("retire");
     },
     handoffs: () => order.push("handoffs"),
-    enterApp: () => order.push("enter"),
+    launch: (atOnline) => {
+      order.push("launch");
+      atOnline();
+    },
     onFailure: (step, e) => order.push(`failure:${step}: ${(e as Error).message}`),
   });
-  assertEquals(order, ["failure:begin session: retire", "handoffs", "enter"]);
+  assertEquals(order, ["failure:begin session: retire", "launch", "handoffs"]);
+});
+
+// The finished wizard holds until the session is signed in
+// (`onboarding.md` § Wizard exit handling → *The finished wizard holds until
+// the session is signed in*): the terminal's last step is a launch, the app is
+// entered only from its `Online` verdict, and the work the wizard deferred to
+// the session runs there, once — never ahead of a launch that cannot connect.
+Deno.test("a launch that never reaches Online runs no deferred work", async () => {
+  const order: string[] = [];
+  await runLoggedInTerminal({
+    register: () => Promise.resolve(),
+    persistRestoredPredecessors: () => Promise.resolve(),
+    beginSession: () => order.push("begin"),
+    handoffs: () => order.push("handoffs"),
+    launch: () => order.push("launch"),
+    onFailure: (step) => order.push(`failure:${step}`),
+  });
+  assertEquals(order, ["begin", "launch"]);
+});
+
+Deno.test("the deferred work rides the launch through retries and runs once at Online", async () => {
+  const order: string[] = [];
+  let online!: () => void;
+  await runLoggedInTerminal({
+    register: () => Promise.resolve(),
+    persistRestoredPredecessors: () => Promise.resolve(),
+    beginSession: () => {},
+    handoffs: () => order.push("handoffs"),
+    launch: (atOnline) => {
+      order.push("launch");
+      online = atOnline;
+    },
+    onFailure: (step) => order.push(`failure:${step}`),
+  });
+  assertEquals(order, ["launch"]);
+  online();
+  online();
+  assertEquals(order, ["launch", "handoffs"]);
 });

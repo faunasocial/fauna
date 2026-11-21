@@ -38,7 +38,18 @@ public final class AdminMailVM {
     /// full re-render on every dispatch). Keyed by the sections' `.task(id:)`.
     public private(set) var snapshotVersion = 0
 
+    /// The answer every control that writes what the policy read decides is
+    /// painted from — the mail-enable and new-user auto-enable toggles, every
+    /// group's save, the standing-publish switch, the Microsoft save and the
+    /// rotate and publish confirms: the shared
+    /// `MailPolicyMachine::write_possibility` (admin.md § Errors & edge cases,
+    /// *Controls wait for their read*). Still loading before the machine
+    /// exists, failed to load when it could not be built. Re-read with every
+    /// snapshot; a press asks the machine live.
+    public private(set) var writeAnswer: Possibility = readPossibility(read: .pending)
+
     private var machine: MailPolicyMachine?
+    private var buildFailed = false
     /// The `APIClient` the cached ``machine`` was built from — re-vend on a session
     /// re-point, or the machine keeps talking to the old nest. See `MailSettingsVM`.
     private var configuredApi: APIClient?
@@ -46,6 +57,11 @@ public final class AdminMailVM {
     public init() {}
 
     /// True while a hydrate / save round-trip is in flight — gates every Save.
+    /// Whether the read this page's read-gated controls wait for has resolved
+    /// (``AdminPageReading``): the shared `MailPolicyMachine::read_state`. An unanswered one is asked again when the
+    /// nest connection comes back.
+    public var readAnswered: Bool { machine?.readState() == .resolved }
+
     public var isBusy: Bool {
         isLoading || (snapshot?.isWorking ?? false)
     }
@@ -60,7 +76,11 @@ public final class AdminMailVM {
                 built = try await api.mailPolicyMachine()
             } catch {
                 // A concurrent build for this api that succeeded owns the page.
-                if machine == nil || configuredApi !== api { errorMessage = DisplayError.message(error) }
+                if machine == nil || configuredApi !== api {
+                    errorMessage = DisplayError.message(error)
+                    buildFailed = true
+                    writeAnswer = livePossibility
+                }
                 return
             }
             // Re-entrant `configure`: the build that finishes first wins; a
@@ -90,7 +110,21 @@ public final class AdminMailVM {
 
     // MARK: - Deployment-wide toggles (dispatch-on-change)
 
+    /// `admin-mail-enabled-toggle`'s answer — the shared
+    /// `MailPolicySnapshot::enable_toggle_possibility` (`admin.md` § Errors &
+    /// edge cases, *Role and state gates answer one `Possibility` too*): turning
+    /// mail on is blocked by the `admin-mail-unavailable-notice` sentence on a
+    /// box that cannot enable it; mail already on stays possible so it can be
+    /// turned off. `nil` snapshot = the read has not landed.
+    public var enableTogglePossibility: Possibility {
+        guard let snapshot else { return readPossibility(read: .pending) }
+        return mailEnableTogglePossibility(snapshot: snapshot)
+    }
+
     public func setMailEnabled(_ enabled: Bool) async {
+        // The press asks what the paint asked (rule 7): a turn-on the box
+        // cannot take is refused with the notice's own sentence.
+        if enabled, refusePress(enableTogglePossibility, errorMessage: &errorMessage) { return }
         await dispatch(.setMailEnabled(enabled: enabled))
     }
 
@@ -133,7 +167,7 @@ public final class AdminMailVM {
 
     /// A fresh blocklist self-check + diagnostics run, then a re-read of the
     /// readout (mail-deliverability.md § The mail health readout).
-    public func recheckHealth() async { await dispatch(.recheckHealth) }
+    public func recheckHealth() async { await dispatch(.recheckHealth, gated: false) }
 
     /// One press of a confirm button — the shared machine holds the same-button
     /// two-click: the first press arms it (`snapshot.armed`), the second
@@ -146,7 +180,16 @@ public final class AdminMailVM {
 
     // MARK: - Plumbing
 
-    private func dispatch(_ action: MailPolicyAction) async {
+    /// The write answer asked of the machine NOW (the press's half of rule 7).
+    private var livePossibility: Possibility {
+        machinePossibility(machine, buildFailed: buildFailed) { $0.writePossibility() }
+    }
+
+    /// Run one action. Every action but the health re-check writes what the
+    /// policy read decides, so it is refused — reason on `error-message`,
+    /// nothing sent — while the write answer is not possible.
+    private func dispatch(_ action: MailPolicyAction, gated: Bool = true) async {
+        if gated, refusePress(livePossibility, errorMessage: &errorMessage) { return }
         guard let machine else { return }
         isLoading = true
         defer { isLoading = false }
@@ -162,6 +205,7 @@ public final class AdminMailVM {
         let snap = machine.snapshot()
         snapshot = snap
         if let e = snap.error { errorMessage = e } else { errorMessage = nil }
+        writeAnswer = machine.writePossibility()
         snapshotVersion += 1
     }
 }

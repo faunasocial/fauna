@@ -1,10 +1,14 @@
 package com.fauna.app.ui.viewmodel
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.fauna.app.core.ApiClient
+import com.fauna.app.ui.util.formRefusal
 import com.fauna.ffi.classifyLinkInput
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
+import uniffi.fauna_client_pair.linkInputPossibility
 import uniffi.fauna_client_pair.LinkInput
 import uniffi.fauna_client_pair.LinkedNestStatus
 import uniffi.fauna_client_pair.LinkedNestsAction
@@ -36,6 +40,7 @@ import javax.inject.Inject
 @HiltViewModel
 class LinkedNestsVM @Inject constructor(
     private val api: ApiClient,
+    @ApplicationContext private val appContext: Context,
 ) : ViewModel() {
 
     // Null until the WS-RPC connection is up; the page stays empty until then.
@@ -104,9 +109,17 @@ class LinkedNestsVM @Inject constructor(
      * canonical full self-sync set. Mirrors the linux lead's `submit_link`
      * (apps/fauna-linux/src/settings/linked_nests.rs).
      */
-    fun link(raw: String) {
+    fun link(raw: String, onResult: (Boolean) -> Unit) {
         val value = raw.trim()
-        if (value.isEmpty()) return
+        // The press asks the shared answer its submit was painted from
+        // (`link_input_possibility`) and refuses with its reason on
+        // `error-message` — never a silent drop (`ui/nests.md` § Errors & edge
+        // cases).
+        val refusal = formRefusal(appContext, linkInputPossibility(value))
+        if (refusal != null) {
+            errorMessage.value = refusal.reason
+            return onResult(false)
+        }
         val action = when (val classified = classifyLinkInput(value)) {
             is LinkInput.NestUrl -> LinkedNestsAction.LinkBoth(
                 otherNestUrl = classified.nestUrl,
@@ -122,7 +135,7 @@ class LinkedNestsVM @Inject constructor(
                 nestUrl = null,
             )
         }
-        dispatch(action)
+        dispatch(action, onResult)
     }
 
     /**
@@ -216,6 +229,7 @@ class LinkedNestsVM @Inject constructor(
         holderBridgeId: String,
         scope: List<TrustScope>,
         duration: TrustGrantDuration,
+        onResult: (Boolean) -> Unit,
     ) =
         dispatch(
             LinkedNestsAction.Mint(
@@ -224,6 +238,7 @@ class LinkedNestsVM @Inject constructor(
                 scope = scope,
                 duration = duration,
             ),
+            onResult,
         )
 
     /** Bless (or un-bless) a nest (`nest-trust-blessed-toggle`) — a
@@ -288,15 +303,23 @@ class LinkedNestsVM @Inject constructor(
             ),
         )
 
-    private fun dispatch(action: LinkedNestsAction) {
-        val m = machine ?: return
+    /**
+     * Run one action and publish the snapshot. [onResult] gets whether it went
+     * through (no throw and no error on the snapshot) — a form closes only then
+     * (`ui/nests.md` § Errors & edge cases).
+     */
+    private fun dispatch(action: LinkedNestsAction, onResult: (Boolean) -> Unit = {}) {
+        val m = machine ?: return onResult(false)
         viewModelScope.launch {
-            try {
+            val went = try {
                 m.dispatch(action)
+                true
             } catch (e: Exception) {
                 errorMessage.value = e.message
+                false
             }
             publish(m)
+            onResult(went && m.snapshot().error == null)
         }
     }
 

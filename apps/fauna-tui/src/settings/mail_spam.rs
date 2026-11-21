@@ -44,6 +44,7 @@
 //! the e2e's `toggle → poll until on` a genuine round-trip proof rather than an
 //! echo of the gesture (linux's own reasoning, `render_report_share`).
 
+use fauna_core::possibility::{Possibility, ReadState};
 use fauna_ui_ids as ids;
 use std::sync::Arc;
 
@@ -97,6 +98,43 @@ pub(crate) struct MailSpamState {
     /// of the "every op re-reads" bucket `share`/`published` are in, so a click
     /// on Reset/Contribute/Undo cannot clobber an in-progress, uncommitted edit.
     pub(super) spam_threshold_input: String,
+    /// Where the `report_share.status` read stands — the share-reports
+    /// toggle's answer is `Possibility::from_read` over it (rule 5), so a
+    /// pre-read `share_reports` default of `false` is never written as a guess.
+    pub(super) share_read: ReadState,
+    /// Where the threshold-override read stands — the input's answer, so an
+    /// empty pre-read draft is never committed as "clear the override".
+    pub(super) threshold_read: ReadState,
+    /// Bumped by each gesture's [`MailSpamRead`] fold; a re-read carries it, so
+    /// a late one drops the nest-read halves a newer gesture already painted.
+    pub(super) gesture_gen: super::GestureGen,
+}
+
+/// A read that failed keeps an earlier success: the page then still holds a
+/// value the nest confirmed (`admin.md` § Errors & edge cases, *Controls wait
+/// for their read*: a re-read that fails after one succeeded keeps the earlier
+/// answer).
+pub(super) fn read_failed(was: ReadState) -> ReadState {
+    was.after(false)
+}
+
+impl MailSpamState {
+    /// `mail-spam-contribute-baseline-toggle`: decided by the classifier
+    /// snapshot, so not possible before it lands (rule 5).
+    pub(super) fn contribute_answer(&self) -> Possibility {
+        Possibility::once_read(self.snapshot.is_some())
+    }
+
+    /// `mail-spam-share-reports-toggle`: decided by the report-share read.
+    pub(super) fn share_answer(&self) -> Possibility {
+        Possibility::from_read(self.share_read)
+    }
+
+    /// `mail-spam-threshold-override-input` and its commit: decided by the
+    /// threshold-override read.
+    pub(super) fn threshold_answer(&self) -> Possibility {
+        Possibility::from_read(self.threshold_read)
+    }
 }
 
 /// One awaited read of the whole page — three independent parts, because tui
@@ -120,6 +158,12 @@ pub(crate) struct MailSpamRead {
     /// unrelated dispatch (Reset/Contribute/Undo) cannot clobber an
     /// in-progress, uncommitted edit in `spam_threshold_input`.
     pub(super) threshold_override: Option<Result<Option<u32>, String>>,
+    /// `Some(generation)` on a re-read (`Op::HydrateMailSpam`: a visit's, or a
+    /// push resync's), carrying [`MailSpamState::gesture_gen`] as the op was
+    /// built; `None` on a gesture's own outcome, whose fold bumps it. A re-read
+    /// a gesture has outlived keeps only its classifier half, which folds the
+    /// machine as it stands (`settings::apply_mail_spam_read`).
+    pub(super) resync_of: Option<super::GestureGen>,
 }
 
 impl MailSpamState {
@@ -167,6 +211,7 @@ impl MailSpamState {
         reply: fauna_protocol::moderation::ModerationReportShareStatusReply,
     ) {
         self.share_reports = reply.share;
+        self.share_read = ReadState::Resolved;
         self.published = reply.published;
     }
 
@@ -175,6 +220,7 @@ impl MailSpamState {
     /// the draft from the persisted value, the `open_edit_form` shape.
     pub(super) fn apply_spam_threshold_override(&mut self, value: Option<u32>) {
         self.spam_threshold_override = value;
+        self.threshold_read = ReadState::Resolved;
         self.spam_threshold_input = value.map(|v| v.to_string()).unwrap_or_default();
     }
 }
@@ -265,7 +311,10 @@ pub(super) fn mail_spam_elements(state: &SettingsState) -> Vec<Element> {
             contribute,
             Gesture::Settings(Action::MailSpamToggleContribute),
         )
-        .attr("state", if contribute { "on" } else { "off" }),
+        .attr("state", if contribute { "on" } else { "off" })
+        // Each control waits for the read that decides it (rule 5); the seam
+        // disables a toggle with its reason.
+        .possible(s.contribute_answer()),
         Element::chrome(t::CONTRIBUTE_BASELINE_SUBTITLE),
         Element::checkbox_gesture(
             ids::MAIL_SPAM_SHARE_REPORTS_TOGGLE,
@@ -273,17 +322,28 @@ pub(super) fn mail_spam_elements(state: &SettingsState) -> Vec<Element> {
             s.share_reports,
             Gesture::Settings(Action::MailSpamToggleShareReports),
         )
-        .attr("state", if s.share_reports { "on" } else { "off" }),
+        .attr("state", if s.share_reports { "on" } else { "off" })
+        .possible(s.share_answer()),
         Element::chrome(t::SHARE_REPORTS_SUBTITLE),
+    ];
+    // The input keeps its prompt as its label, so its reason is a line of
+    // its own while it waits (walk invariant I8).
+    let threshold = s.threshold_answer();
+    els.push(
         Element::input_commit(
             ids::MAIL_SPAM_THRESHOLD_OVERRIDE_INPUT,
             s.spam_threshold_input.clone(),
             Field::Settings(super::SettingsField::MailSpamThresholdOverride),
             Gesture::Settings(Action::MailSpamCommitThreshold),
         )
-        .labelled(t::THRESHOLD_OVERRIDE_LABEL),
-        Element::chrome(t::THRESHOLD_OVERRIDE_SUBTITLE),
-    ];
+        .labelled(t::THRESHOLD_OVERRIDE_LABEL)
+        .enabled(threshold.is_possible())
+        .possible(threshold.clone()),
+    );
+    if let Some(reason) = threshold.reason() {
+        els.push(Element::chrome(crate::wizard::localized(reason)));
+    }
+    els.push(Element::chrome(t::THRESHOLD_OVERRIDE_SUBTITLE));
 
     // ── "What this nest publishes" (report-sharing.md § transparency surface) ──
     // The container is a real element, not decoration: the driver counts it.
@@ -598,6 +658,35 @@ mod tests {
     /// Both toggles carry the `state` attr the shared action reads
     /// (`get_attr(id, "state")`), and the report-share one reflects only what a
     /// nest reply set — never a local click.
+    #[test]
+    fn every_control_waits_for_its_read() {
+        let mut state = SettingsState::default();
+        let s = &state.mail_spam;
+        let loading = Some("common.still_loading".to_string());
+        let key = |p: Possibility| p.reason().map(|r| r.key.clone());
+        assert_eq!(key(s.contribute_answer()), loading);
+        assert_eq!(key(s.share_answer()), loading);
+        assert_eq!(key(s.threshold_answer()), loading);
+        // The threshold input is not live and says why within eyeshot.
+        let els = mail_spam_elements(&state);
+        let input = els
+            .iter()
+            .find(|e| e.id == "mail-spam-threshold-override-input")
+            .expect("input painted");
+        assert!(!input.enabled);
+        let loading_text = fauna_i18n::strings::common::STILL_LOADING;
+        assert!(els.iter().any(|e| e.text == loading_text));
+        // A failed read says so; a later success resolves it.
+        state.mail_spam.share_read = read_failed(state.mail_spam.share_read);
+        assert_eq!(
+            key(state.mail_spam.share_answer()),
+            Some("common.load_failed".to_string())
+        );
+        state.mail_spam.apply_spam_threshold_override(None);
+        assert!(state.mail_spam.threshold_answer().is_possible());
+        assert_eq!(read_failed(ReadState::Resolved), ReadState::Resolved);
+    }
+
     #[test]
     fn both_toggles_carry_a_state_attr_and_share_reports_is_nest_confirmed() {
         let mut state = state_with(Vec::new(), Vec::new());

@@ -19,6 +19,9 @@ import com.fauna.ffi.FfiSignOutResidue
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.TextButton
 
 @HiltViewModel
 class IdentityChoiceVM @Inject constructor(

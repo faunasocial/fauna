@@ -132,7 +132,11 @@ struct FeedListView: View {
                     .accessibilityIdentifier(Ids.feedTrendingItem)
                     .automationActivate(
                         Ids.feedTrendingItem,
-                        value: { vm.trendingSelected ? "on" : "off" }
+                        value: { vm.trendingSelected ? "on" : "off" },
+                        // `state` names the one-of-N choice in force, as tui's
+                        // radio does, so a re-chosen current feed reads as the
+                        // current choice (`e2e-systematic-ui-walks.md`, layer (c)).
+                        attributes: { ["state": vm.trendingSelected ? "on" : "off"] }
                     ) { Task { await vm.selectTrendingFeed() } }
 
                     // Built-in Local entry (feed.md § Layout & flow, region 1) —
@@ -151,7 +155,8 @@ struct FeedListView: View {
                     .accessibilityIdentifier(Ids.feedLocalItem)
                     .automationActivate(
                         Ids.feedLocalItem,
-                        value: { vm.trendingSelected || vm.selectedFeedId != nil ? "off" : "on" }
+                        value: { vm.trendingSelected || vm.selectedFeedId != nil ? "off" : "on" },
+                        attributes: { ["state": vm.trendingSelected || vm.selectedFeedId != nil ? "off" : "on"] }
                     ) { Task { await vm.selectLocalFeed() } }
 
                     ForEach(Array(vm.feeds.enumerated()), id: \.element.feedId) { index, feed in
@@ -243,12 +248,11 @@ struct FeedListView: View {
                                 }
                                 .buttonStyle(.borderedProminent)
                                 .controlSize(.small)
-                                .disabled(bridgeFeedUri.isEmpty || bridgeFeedName.isEmpty)
                                 .accessibilityIdentifier(Ids.bridgeFormSubscribeButton)
-                                .automationActivate(
-                                    Ids.bridgeFormSubscribeButton,
-                                    isEnabled: { !(bridgeFeedUri.isEmpty || bridgeFeedName.isEmpty) }
-                                ) { subscribeBridgeAction() }
+                                .automationActivate(Ids.bridgeFormSubscribeButton) {
+                                    subscribeBridgeAction()
+                                }
+                                .faunaPossible(bridgeSubscribePossibility)
                                 Button(L.common.cancel) { showBridgeSubscribe = false }
                                     .controlSize(.small)
                                     .accessibilityIdentifier(Ids.bridgeFormCancelButton)
@@ -256,6 +260,7 @@ struct FeedListView: View {
                                         showBridgeSubscribe = false
                                     }
                             }
+                            FaunaPossibilityReason(bridgeSubscribePossibility)
                         }
                     }
 
@@ -343,17 +348,18 @@ struct FeedListView: View {
                                     Image(systemName: "arrow.up.circle.fill")
                                 }
                                 .accessibilityIdentifier(Ids.postSubmitButton)
-                                .disabled(
-                                    vm.composeText.trimmingCharacters(in: .whitespaces).isEmpty
-                                    || !vm.composeReady
-                                )
+                                .disabled(!vm.composeReady)
                                 .automationActivate(
                                     Ids.postSubmitButton,
-                                    isEnabled: {
-                                        !vm.composeText.trimmingCharacters(in: .whitespaces).isEmpty
-                                        && vm.composeReady
-                                    }
+                                    isEnabled: { vm.composeReady }
                                 ) { Task { await vm.submitPost() } }
+                                // The draft's shared answer (`fauna_feed::forms`),
+                                // outside the automation modifier so the registry
+                                // reads it too.
+                                // The always-mounted composer carries the reason
+                                // on the control (its accessibility hint), not a
+                                // standing caption under an empty field.
+                                .faunaPossible(vm.postSubmitPossibility)
                             }
                             TextField(L.feed.post.tagsPlaceholder, text: tagsBinding)
                             .font(.caption)
@@ -527,6 +533,7 @@ struct FeedListView: View {
                                     // (load-remote-content, the interaction bar) keep working
                                     // — mirrors macOS `MacFeedDetailView`.
                                     .contentShape(Rectangle())
+                                    .faunaActsOnClick()
                                     .onTapGesture { openPostCard(post) }
                                     .accessibilityElement(children: .contain)
                                     .accessibilityIdentifier(Ids.postCard)
@@ -729,15 +736,27 @@ struct FeedListView: View {
     }
     /// The bridge-subscribe button's action, factored out so the automation
     /// sibling drives the exact same code path the Button does.
+    ///
+    /// `FeedVM.subscribeBridge` asks the shared predicate again; the form
+    /// clears and closes only once the subscription is saved — a refusal or a
+    /// failure keeps what was typed (`ui/README.md` § Offer only what is
+    /// possible, rule 7).
     private func subscribeBridgeAction() {
         Task {
-            await vm.subscribeBridge(bridge: bridgeFormBridge,
-                                     feedUri: bridgeFeedUri,
-                                     name: bridgeFeedName)
+            guard await vm.subscribeBridge(bridge: bridgeFormBridge,
+                                           feedUri: bridgeFeedUri,
+                                           name: bridgeFeedName) else { return }
             bridgeFeedUri = ""
             bridgeFeedName = ""
             showBridgeSubscribe = false
         }
+    }
+
+    /// `bridge-form-subscribe-button`'s shared draft-validity answer
+    /// (`fauna_feed::forms::bridge_subscribe_possibility`): the bridge and the
+    /// feed URI; the name is optional.
+    private var bridgeSubscribePossibility: Possibility {
+        vm.bridgeSubscribePossibility(bridge: bridgeFormBridge, feedUri: bridgeFeedUri)
     }
 
     /// Shared logic — FaunaKit's `openPostCard(_:vm:selectedPost:)`.

@@ -206,6 +206,12 @@ pub enum StepStatus {
 pub enum SubstepKey {
     DomainCheckingAvailability,
     DomainRegistering,
+    /// DNS runs at another provider: creating the domain's zone there
+    /// (`onboarding-provisioning.md` § 6).
+    DomainCreatingZone,
+    /// DNS runs at another provider: setting the domain's nameservers at its
+    /// registrar to that zone's.
+    DomainSettingNameservers,
     DomainVerifyingZone,
     ServerGeneratingDkim,
     ServerCreating,
@@ -213,6 +219,11 @@ pub enum SubstepKey {
     DnsAddingEmailRecords,
     DnsSettingReverseDns,
     OnlineWaiting,
+    /// The `Online` poll past [`ONLINE_STILL_STARTING_AFTER_MS`] from the step's
+    /// own start: the long-wait text in place of the plain polling (or retry)
+    /// text — `onboarding-provisioning.md` § 6 *A running step shows activity,
+    /// never an attempt count*.
+    OnlineStillStarting,
     /// The claim that turns "built" into "built **and claimed**" — `Online`'s
     /// final substep on the standard path, run by the machine (not this crate's
     /// provider-facing orchestrator) the instant `/health` answers.
@@ -233,6 +244,9 @@ pub enum SkipReason {
     DnsRecordAlreadyExists,
     PtrAlreadySet,
     NestAlreadyOnline,
+    /// This wizard already registered the domain (a Retry of a run that
+    /// registers and publishes nothing).
+    DomainAlreadyRegistered,
 }
 
 /// One step's slot in the snapshot.
@@ -249,10 +263,12 @@ pub struct StepSnapshot {
     pub started_at_ms: Option<u64>,
     pub finished_at_ms: Option<u64>,
     /// Display projection: whether the `provisioning-substep` text row should
-    /// render. Whether the `provisioning-step-error` row should render. Whether
-    /// the `(attempt N of M)` suffix should be appended.
+    /// render. Whether the `provisioning-step-error` row should render. (No
+    /// projection shows `attempt` / `max_attempts`: the count never reaches the
+    /// page and is kept for the log line and for tests —
+    /// `onboarding-provisioning.md` § 6.)
     ///
-    /// These three are the *single source* of the per-step visibility rule that
+    /// These two are the *single source* of the per-step visibility rule that
     /// every app used to re-derive (it had drifted — Android most of all).
     /// They are populated by `ProvisioningSnapshot::enrich_display`, called by
     /// the machine's `provisioning_snapshot()` getter on its outgoing clone, so
@@ -270,8 +286,6 @@ pub struct StepSnapshot {
     pub shows_substep: bool,
     #[serde(default)]
     pub shows_error: bool,
-    #[serde(default)]
-    pub shows_attempt_suffix: bool,
 }
 
 impl StepSnapshot {
@@ -289,13 +303,11 @@ impl StepSnapshot {
             // Display projections — filled by `recompute_display` at getter time.
             shows_substep: false,
             shows_error: false,
-            shows_attempt_suffix: false,
         }
     }
 
-    /// Recompute the display-projection fields (`shows_substep`, `shows_error`,
-    /// `shows_attempt_suffix`) from this step's `status` / `substep` / `attempt` /
-    /// `last_error`. This is the **canonical** per-step visibility rule — the one
+    /// Recompute the display-projection fields (`shows_substep`, `shows_error`)
+    /// from this step's `status` / `substep` / `last_error`. This is the **canonical** per-step visibility rule — the one
     /// place it lives; clients read the resulting fields and never re-derive it.
     /// Driven by `ProvisioningSnapshot::enrich_display` → the `provisioning_snapshot()`
     /// getter, never stored through a mutation (the `set_cancelled` path mutates
@@ -303,22 +315,17 @@ impl StepSnapshot {
     /// would go stale there).
     ///
     /// - **Substep row** — shown on `Skipped` (the "already configured" placeholder
-    ///   text), and on `Running`/`Failed` when there is a substep label *or* an
-    ///   attempt suffix to show. That is exactly when the client's resolved text is
-    ///   non-empty, relying on the i18n invariant that every `SubstepKey` label and
-    ///   the `status_skipped` / attempt-suffix strings are non-empty. Hidden on
-    ///   `Pending`/`Succeeded`.
+    ///   text), and on `Running`/`Failed` when the step carries a substep label.
+    ///   That is exactly when the client's resolved text is non-empty, relying on
+    ///   the i18n invariant that every `SubstepKey` label and the `status_skipped`
+    ///   string are non-empty. Hidden on `Pending`/`Succeeded`.
     /// - **Error row** — only on `Failed` with a non-empty `last_error`. A `Running`
     ///   row mid-retry can still carry a stale `last_error` from the prior attempt,
     ///   which must not surface — hence the `Failed` gate (not "when populated").
-    /// - **Attempt suffix** — `max_attempts > 1 && attempt > 1`.
     pub fn recompute_display(&mut self) {
-        self.shows_attempt_suffix = self.max_attempts > 1 && self.attempt > 1;
         self.shows_substep = match self.status {
             StepStatus::Skipped => true,
-            StepStatus::Running | StepStatus::Failed => {
-                self.substep.is_some() || self.shows_attempt_suffix
-            }
+            StepStatus::Running | StepStatus::Failed => self.substep.is_some(),
             StepStatus::Pending | StepStatus::Succeeded => false,
         };
         self.shows_error = matches!(self.status, StepStatus::Failed)
@@ -499,7 +506,7 @@ pub fn status_glyph(status: StepStatus) -> String {
 /// The i18n key for a step's user-visible name, as a [`LocalizedText`] the client
 /// resolves through its own pipeline (same carrier as [`elapsed_display`]). The
 /// canonical key family is `onboarding.provision.step.*` — the cohesive home
-/// alongside `substep.*` / `step_failed` / `step_attempt_template`; the
+/// alongside `substep.*` / `step_failed`; the
 /// identical-valued `onboarding.nest_provisioning.step.*` entries were a stray
 /// duplicate, removed 2026-06-14 once android (the last remaining consumer)
 /// swapped onto this fn. No args.
@@ -525,6 +532,10 @@ pub fn substep_label(key: SubstepKey, cause: Option<String>) -> LocalizedText {
             "onboarding.provision.substep.domain_checking_availability"
         }
         SubstepKey::DomainRegistering => "onboarding.provision.substep.domain_registering",
+        SubstepKey::DomainCreatingZone => "onboarding.provision.substep.domain_creating_zone",
+        SubstepKey::DomainSettingNameservers => {
+            "onboarding.provision.substep.domain_setting_nameservers"
+        }
         SubstepKey::DomainVerifyingZone => "onboarding.provision.substep.domain_verifying_zone",
         SubstepKey::ServerGeneratingDkim => "onboarding.provision.substep.server_generating_dkim",
         SubstepKey::ServerCreating => "onboarding.provision.substep.server_creating",
@@ -536,6 +547,7 @@ pub fn substep_label(key: SubstepKey, cause: Option<String>) -> LocalizedText {
         }
         SubstepKey::DnsSettingReverseDns => "onboarding.provision.substep.dns_setting_reverse_dns",
         SubstepKey::OnlineWaiting => "onboarding.provision.substep.online_waiting",
+        SubstepKey::OnlineStillStarting => "onboarding.provision.substep.online_still_starting",
         SubstepKey::OnlineClaiming => "onboarding.provision.substep.online_claiming",
         SubstepKey::StatusSkipped => "onboarding.provision.substep.status_skipped",
         SubstepKey::StatusRetrying => "onboarding.provision.substep.status_retrying",
@@ -566,6 +578,30 @@ where
     f(&mut guard.steps[idx]);
 }
 
+/// How long the `Online` step runs, from its own `started_at_ms`, before its
+/// polling text gives way to [`SubstepKey::OnlineStillStarting`]
+/// (`onboarding-provisioning.md` § 6 *A running step shows activity, never an
+/// attempt count*: three minutes).
+pub const ONLINE_STILL_STARTING_AFTER_MS: u64 = 3 * 60 * 1000;
+
+/// The text a polling substep of `s` reads now: on the `Online` step, past
+/// [`ONLINE_STILL_STARTING_AFTER_MS`], the plain polling text
+/// ([`SubstepKey::OnlineWaiting`]) and the retry text between polls
+/// ([`SubstepKey::StatusRetrying`]) both read
+/// [`SubstepKey::OnlineStillStarting`] — a poll failing while the box boots is
+/// the wait itself, not news. Every other key and step passes through.
+fn polling_text(s: &StepSnapshot, key: SubstepKey, now: u64) -> SubstepKey {
+    let is_poll_text = matches!(key, SubstepKey::OnlineWaiting | SubstepKey::StatusRetrying);
+    let past_line = s
+        .started_at_ms
+        .is_some_and(|start| now.saturating_sub(start) >= ONLINE_STILL_STARTING_AFTER_MS);
+    if s.kind == ProvisionStep::Online && is_poll_text && past_line {
+        SubstepKey::OnlineStillStarting
+    } else {
+        key
+    }
+}
+
 /// Mutate the running step's slot to reflect a new attempt.
 pub fn set_running(
     state: &Mutex<ProvisioningSnapshot>,
@@ -589,7 +625,7 @@ pub fn set_running(
             s.started_at_ms = Some(now_ms());
         }
         if let Some(k) = substep {
-            s.substep = Some(k);
+            s.substep = Some(polling_text(s, k, now_ms()));
         }
     });
 }
@@ -604,7 +640,7 @@ pub fn set_retrying(
     with_step(state, step, |s| {
         s.attempt = attempt;
         s.last_error = Some(err.to_string());
-        s.substep = Some(SubstepKey::StatusRetrying);
+        s.substep = Some(polling_text(s, SubstepKey::StatusRetrying, now_ms()));
     });
 }
 
@@ -675,7 +711,9 @@ pub fn set_cancelled(state: &Mutex<ProvisioningSnapshot>) {
 /// progress seam for work a *caller* runs inside a step (today: the machine's
 /// claim, `Online`'s final substep).
 pub fn set_substep(state: &Mutex<ProvisioningSnapshot>, step: ProvisionStep, key: SubstepKey) {
-    with_step(state, step, |s| s.substep = Some(key));
+    with_step(state, step, |s| {
+        s.substep = Some(polling_text(s, key, now_ms()))
+    });
 }
 
 /// Re-open the finished `Online` step for its **claiming** substep, and put the
@@ -945,7 +983,6 @@ mod tests {
             let s = display(st, None, 1, 1, None);
             assert!(!s.shows_substep, "{st:?} substep");
             assert!(!s.shows_error, "{st:?} error");
-            assert!(!s.shows_attempt_suffix, "{st:?} suffix");
         }
 
         // Skipped: substep row always shows (the "already configured" placeholder),
@@ -954,21 +991,18 @@ mod tests {
         assert!(skipped.shows_substep);
         assert!(!skipped.shows_error);
 
-        // Running with a substep: substep shows; no error; no suffix at attempt 1.
+        // Running with a substep: substep shows; no error.
         let running = display(Running, Some(SubstepKey::ServerCreating), 1, 3, None);
         assert!(running.shows_substep);
         assert!(!running.shows_error);
-        assert!(!running.shows_attempt_suffix);
 
-        // Running with no substep and not retried: text would be empty → hidden.
+        // Running with no substep: the text would be empty → hidden, retried or
+        // not (the attempt count is never shown — `onboarding-provisioning.md`
+        // § 6 *A running step shows activity, never an attempt count*).
         let running_bare = display(Running, None, 1, 3, None);
         assert!(!running_bare.shows_substep);
-
-        // Running with no substep but retried: the attempt suffix alone keeps the
-        // row non-empty → shown.
         let running_retry = display(Running, None, 2, 3, None);
-        assert!(running_retry.shows_substep);
-        assert!(running_retry.shows_attempt_suffix);
+        assert!(!running_retry.shows_substep);
 
         // Failed with substep + last_error: both rows show.
         let failed = display(Failed, Some(SubstepKey::ServerCreating), 3, 3, Some("boom"));
@@ -981,11 +1015,9 @@ mod tests {
         assert!(!failed_bare.shows_substep);
         assert!(!failed_bare.shows_error);
 
-        // Failed, no substep, retried: suffix keeps the substep row (this is the
-        // case web used to hide — the drift this lift resolves).
+        // Failed, no substep, retried: no text to show, so no substep row.
         let failed_retry = display(Failed, None, 2, 3, None);
-        assert!(failed_retry.shows_substep);
-        assert!(failed_retry.shows_attempt_suffix);
+        assert!(!failed_retry.shows_substep);
 
         // Failed with an empty last_error string: no error row (empty ≠ populated).
         let failed_empty = display(Failed, None, 1, 1, Some(""));
@@ -1000,6 +1032,132 @@ mod tests {
             Some("prior"),
         );
         assert!(!running_stale_err.shows_error);
+    }
+
+    #[test]
+    fn a_snapshot_mid_retry_carries_no_attempt_suffix() {
+        // The attempt count leaves the page on every step: the snapshot every app
+        // renders from carries no projection that could append it, while the
+        // counts themselves stay for the log line and for tests.
+        let mut snap = ProvisioningSnapshot::idle();
+        let online = &mut snap.steps[step_index(ProvisionStep::Online)];
+        online.status = StepStatus::Running;
+        online.substep = Some(SubstepKey::OnlineWaiting);
+        online.attempt = 7;
+        online.max_attempts = 480;
+        snap.enrich_display();
+        let value = serde_json::to_value(&snap).unwrap();
+        for s in value["steps"].as_array().unwrap() {
+            let obj = s.as_object().unwrap();
+            assert!(
+                !obj.keys().any(|k| k.contains("attempt_suffix")),
+                "a step still exposes an attempt-suffix projection: {obj:?}"
+            );
+        }
+        assert_eq!(step(&snap, ProvisionStep::Online).attempt, 7);
+        assert_eq!(step(&snap, ProvisionStep::Online).max_attempts, 480);
+    }
+
+    fn online_started_ago(ms: u64) -> Mutex<ProvisioningSnapshot> {
+        let mut snap = ProvisioningSnapshot::idle();
+        snap.overall = OverallStatus::Running;
+        let online = &mut snap.steps[step_index(ProvisionStep::Online)];
+        online.status = StepStatus::Running;
+        online.started_at_ms = Some(now_ms().saturating_sub(ms));
+        Mutex::new(snap)
+    }
+
+    fn online_substep(state: &Mutex<ProvisioningSnapshot>) -> Option<SubstepKey> {
+        step(&state.lock().unwrap(), ProvisionStep::Online).substep
+    }
+
+    #[test]
+    fn an_online_step_past_the_line_reads_still_starting() {
+        let policy = ProvisionStep::Online.default_retry_policy();
+        let state = online_started_ago(ONLINE_STILL_STARTING_AFTER_MS + 1_000);
+
+        // A new poll attempt past the line.
+        set_running(
+            &state,
+            ProvisionStep::Online,
+            42,
+            policy.max_attempts,
+            Some(SubstepKey::OnlineWaiting),
+        );
+        assert_eq!(
+            online_substep(&state),
+            Some(SubstepKey::OnlineStillStarting)
+        );
+
+        // A failed poll past the line: still the still-starting text, not the
+        // retry text — the poll failing while the box boots is the wait itself.
+        let err = ProvisionError::Provider {
+            status: 503,
+            body: String::new(),
+        };
+        set_retrying(&state, ProvisionStep::Online, 42, &err);
+        assert_eq!(
+            online_substep(&state),
+            Some(SubstepKey::OnlineStillStarting)
+        );
+
+        // The machine's claim probe past the line.
+        set_substep(&state, ProvisionStep::Online, SubstepKey::OnlineWaiting);
+        assert_eq!(
+            online_substep(&state),
+            Some(SubstepKey::OnlineStillStarting)
+        );
+        // The claim itself keeps its own text.
+        set_substep(&state, ProvisionStep::Online, SubstepKey::OnlineClaiming);
+        assert_eq!(online_substep(&state), Some(SubstepKey::OnlineClaiming));
+    }
+
+    #[test]
+    fn an_online_step_inside_the_line_keeps_the_polling_text() {
+        let policy = ProvisionStep::Online.default_retry_policy();
+        let state = online_started_ago(ONLINE_STILL_STARTING_AFTER_MS - 10_000);
+        set_running(
+            &state,
+            ProvisionStep::Online,
+            3,
+            policy.max_attempts,
+            Some(SubstepKey::OnlineWaiting),
+        );
+        assert_eq!(online_substep(&state), Some(SubstepKey::OnlineWaiting));
+        let err = ProvisionError::Provider {
+            status: 503,
+            body: String::new(),
+        };
+        set_retrying(&state, ProvisionStep::Online, 3, &err);
+        assert_eq!(online_substep(&state), Some(SubstepKey::StatusRetrying));
+    }
+
+    #[test]
+    fn another_step_past_the_line_never_reads_still_starting() {
+        let mut snap = ProvisioningSnapshot::idle();
+        let server = &mut snap.steps[step_index(ProvisionStep::Server)];
+        server.status = StepStatus::Running;
+        server.started_at_ms = Some(now_ms().saturating_sub(ONLINE_STILL_STARTING_AFTER_MS * 2));
+        let state = Mutex::new(snap);
+        set_running(
+            &state,
+            ProvisionStep::Server,
+            2,
+            3,
+            Some(SubstepKey::ServerCreating),
+        );
+        assert_eq!(
+            step(&state.lock().unwrap(), ProvisionStep::Server).substep,
+            Some(SubstepKey::ServerCreating)
+        );
+    }
+
+    #[test]
+    fn the_still_starting_key_has_its_own_string() {
+        assert_eq!(
+            substep_label(SubstepKey::OnlineStillStarting, None).key,
+            "onboarding.provision.substep.online_still_starting"
+        );
     }
 
     #[test]
@@ -1029,7 +1187,6 @@ mod tests {
             let obj = s.as_object_mut().unwrap();
             obj.remove("shows_substep");
             obj.remove("shows_error");
-            obj.remove("shows_attempt_suffix");
         }
         // Parses despite the absent projection fields (defaulting to false)...
         let mut parsed: ProvisioningSnapshot = serde_json::from_value(value).unwrap();
@@ -1368,6 +1525,14 @@ mod tests {
             (
                 SubstepKey::DomainRegistering,
                 "onboarding.provision.substep.domain_registering",
+            ),
+            (
+                SubstepKey::DomainCreatingZone,
+                "onboarding.provision.substep.domain_creating_zone",
+            ),
+            (
+                SubstepKey::DomainSettingNameservers,
+                "onboarding.provision.substep.domain_setting_nameservers",
             ),
             (
                 SubstepKey::DomainVerifyingZone,

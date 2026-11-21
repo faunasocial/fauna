@@ -28,6 +28,7 @@ Stamped 2026-11-07 at 6a0ded1015.
 2. [app] A single file downloads from a snapshot byte for byte — `docs/goal/behavior/backup-restore.md` § 3. Restore: Single File
    - `tests/e2e-unified/tests/test_backups.py::test_snapshot_file_download_button_downloads_sealed_bytes`
    - `tests/e2e-unified/tests/test_backups_download.py::test_download_single_file_bytes_roundtrip`
+   - `tests/e2e-unified/tests/test_use_case_backup_journey.py::test_a_person_backs_up_a_folder_and_gets_a_file_back`
 3. [app] Prune previews before it deletes, a pruned snapshot can be recovered, and deleting for good needs a typed confirmation — `docs/goal/ui/backups.md` § Snapshot-list shape
    - `tests/e2e-unified/tests/test_backups.py::test_prune_previews_before_it_deletes`
    - `tests/e2e-unified/tests/test_backups.py::test_a_soft_deleted_snapshot_can_be_recovered_from_the_app`
@@ -65,17 +66,19 @@ Stamped 2026-11-07 at 6a0ded1015.
     - `tests/e2e-unified/tests/api/test_snapshot_auto_capture.py::test_a_conversation_with_new_messages_snapshots_itself`
 16. [nest] Restoring a posts snapshot brings back the posts it holds and never removes a post you made since — `docs/goal/architecture/message-segment-store.md` § Implementation status today
    - `tests/e2e-unified/tests/api/test_dr_restore.py::test_a_posts_snapshot_restore_adds_its_posts_and_keeps_a_later_one`
+17. [app] Delete is offered only on a snapshot that is neither waiting for deletion nor already deleted; and Restore is disabled, with its reason, until a snapshot exists, its kind is ticked and its id is typed again — `docs/goal/ui/backups.md` § Errors & edge cases
+    - `tests/e2e-unified/tests/test_backups_offer_only_possible.py::test_restore_and_delete_say_why_until_their_snapshot_allows_them`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+3b591c2e standalone |
-| linux | ✅ full | 0.1.5-dev+3b591c2e standalone |
-| windows | ✅ full | 0.1.5-dev+3b591c2e standalone |
-| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.5-dev+3b591c2e standalone |
+| web | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
+| linux | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
+| windows | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
+| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+3b591c2e standalone |
 | android-kids |  no run recorded | |
@@ -88,6 +91,7 @@ Stamped 2026-11-07 at 6a0ded1015.
 | 1 | app | `tests/e2e-unified/tests/test_backups.py::test_backup_folder_selector_visible` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_backups.py::test_snapshot_file_download_button_downloads_sealed_bytes` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_backups_download.py::test_download_single_file_bytes_roundtrip` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_use_case_backup_journey.py::test_a_person_backs_up_a_folder_and_gets_a_file_back` | tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_backups.py::test_prune_previews_before_it_deletes` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_backups.py::test_a_soft_deleted_snapshot_can_be_recovered_from_the_app` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_backups.py::test_snapshot_immediate_delete` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
@@ -109,7 +113,8 @@ Stamped 2026-11-07 at 6a0ded1015.
 | 12 | nest | `tests/e2e-unified/tests/api/test_snapshot_auto_capture.py::test_a_changed_then_quiet_folder_snapshots_itself` | nest (linux): passed |
 | 13 | nest | `tests/e2e-unified/tests/api/test_snapshot_diff.py::test_diff_reports_added_removed_and_modified` | nest (linux): passed |
 | 14 | app | `tests/e2e-unified/tests/test_backups.py::test_a_mail_snapshot_taken_from_its_kind_entry_is_offered_for_restore` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 14 | app | `tests/e2e-unified/tests/test_backups_conversation_snapshot.py::test_a_conversation_snapshot_taken_from_its_kind_entry_is_offered_for_restore` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 14 | app | `tests/e2e-unified/tests/test_backups_conversation_snapshot.py::test_a_conversation_snapshot_taken_from_its_kind_entry_is_offered_for_restore` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 15 | nest | `tests/e2e-unified/tests/api/test_snapshot_auto_capture.py::test_a_conversation_with_new_messages_snapshots_itself` | nest (linux): passed |
 | 16 | nest | `tests/e2e-unified/tests/api/test_dr_restore.py::test_a_posts_snapshot_restore_adds_its_posts_and_keeps_a_later_one` | nest (linux): passed |
+| 17 | app | `tests/e2e-unified/tests/test_backups_offer_only_possible.py::test_restore_and_delete_say_why_until_their_snapshot_allows_them` — requires `blocked-reason-read` (test harness) (not built: windows) | tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

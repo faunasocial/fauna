@@ -362,9 +362,9 @@ know: they reconnect to it as the same server, with no warning that its identity
    it or restore anything.
 2. At Step 5, before you save the setup file, open an installed Fauna app (the web app
    is served by the server you lost, so it can't open until the new one is
-   running) and choose **Recover a lost box** (it appears on the "Couldn't reach your nest" screen,
-   and on the screen of a newly installed app where you choose **Create New
-   Identity**). Pick this nest, then
+   running) and choose **Recover a lost box** (it appears on the "Couldn't reach your nest" screen once the app finds a server
+   key it keeps for you, and on the screen of a newly installed app where you choose
+   **Create New Identity**). Pick this nest, then
    **Install on my own server**, and copy the line it shows. It starts with
    `FAUNA_DEPLOYMENT_SEED=` and goes on with 64 letters and digits.
 3. In the setup file, add one line at the end of the `environment:` block
@@ -381,11 +381,25 @@ know: they reconnect to it as the same server, with no warning that its identity
    without it makes a new key of its own and ignores the line from then on.
    The line is your server's key, so keep the file locked down as Step 5
    says.
-4. Carry on to the end of the guide, Step 9 included: on **Admin → DNS**,
-   update any record that doesn't show **OK**.
-5. Bring your data back from your backup, as
-   [Backup with Fauna](cloud-backup.md) describes.
-6. If this server was the doorway for a home nest, don't say yes to
+4. Carry on through Step 8 and claim the new server (if this server was the
+   doorway for a home nest, read step 7 before you claim it). If email
+   switched on when you claimed it, your mailbox comes back with the app
+   passwords it had instead of a new one, so the mail apps you already set up
+   keep working as they are.
+5. Straight after the claim, before Step 9, bring your data back from your
+   backup, as [Backup with Fauna](cloud-backup.md) describes. Mail other
+   servers kept for you while the server was down can start arriving soon
+   after the claim, and a mail app can save a draft there. If any message
+   lands before the restore has brought your mail back (it copies everything
+   first, so this can take a while), nothing is lost: the restore copies your
+   old messages into the folders they were in, beside the new ones. If a
+   calendar or contacts app has already added something on the new server,
+   the restore still copies in what is missing beside it. If the Backups page
+   then shows a banner saying a backup still holds data your nest lost,
+   [Backup with Fauna](cloud-backup.md) describes how to get it back.
+6. Then finish the guide from Step 9: on **Admin → DNS**, update any record
+   that doesn't show **OK**.
+7. If this server was the doorway for a home nest, don't say yes to
    **Trust this box?** when you claim it at Step 8 (if you did, take that back
    for it under **Settings → Nests**), then redo Steps 1 and 2 of
    [Link a home nest to an internet nest](nest-relay-setup.md): the link and

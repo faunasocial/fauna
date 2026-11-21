@@ -611,7 +611,11 @@ public partial class App : Application
     /// </summary>
     internal static void NoteShellView(string view)
     {
-        if (Current is App app) app._testCurrentView = view;
+        if (Current is not App app) return;
+        // The one trace of a view the shell (not a nav patch) published — a
+        // state read that disagrees with the last nav names its writer here.
+        FaunaApp.Core.Logs.E2eTrace.Write($"[nav] shell view {app._testCurrentView} -> {view}");
+        app._testCurrentView = view;
     }
     // An explicit `set_state({"session": {"authenticated": …}})` override, which
     // WINS over _mainAppMounted while it is set — the exact shape of linux's
@@ -1046,10 +1050,13 @@ public partial class App : Application
 
     // ── e2e nav-readiness barrier (Views.IAsyncLoadedPage) ──
     // A shell frame-nav arms this with the target page's LoadComplete task when that
-    // page implements IAsyncLoadedPage; the TestAgent takes + awaits it (bounded) before
-    // signalling ready=true, so `set_state({nav})` returns only once the page finished
-    // its async Page_Loaded — not merely once the frame-nav was kicked off. Fixes the
-    // whole-file test_folders.py wizard-render race (see Views.IAsyncLoadedPage). Only
+    // page implements IAsyncLoadedPage, and the main shell adds the selected page's
+    // load (AddNavLoad, from MainPage.NoteViewWhenLoaded); the TestAgent takes + awaits
+    // it (bounded) before signalling ready=true, so `set_state({nav})` returns only once
+    // the page is loaded, its view published and any async Page_Loaded finished — not
+    // merely once the frame-nav was kicked off. Fixes the whole-file test_folders.py
+    // wizard-render race (see Views.IAsyncLoadedPage) and test_page_loads reading the
+    // page before (MainPage.NoteViewWhenLoaded). Only
     // touched under e2e (ArmNavLoad no-ops without a live TestAgent), so production
     // navigation is byte-unchanged. Single-threaded UI-thread arm-then-take — the plain
     // field needs no synchronization.
@@ -1075,6 +1082,19 @@ public partial class App : Application
     }
 
 #if DEBUG || FAUNA_E2E_AGENT
+    /// <summary>Add <paramref name="load"/> to the armed nav-load barrier, beside what
+    /// is armed already rather than in its place: one selection can arm twice — the
+    /// Settings shell arms its sub-page from inside the main shell's navigation, and
+    /// <c>MainPage.NoteViewWhenLoaded</c> then arms the shell's own page load — and
+    /// ready=true waits for both. No-op unless the e2e TestAgent is live.</summary>
+    internal static void AddNavLoad(Task load)
+    {
+        if (Testing.TestAgent.Instance is null) return;
+        PendingNavLoad = PendingNavLoad is { IsCompleted: false } armed
+            ? Task.WhenAll(armed, load)
+            : load;
+    }
+
     /// <summary>Take + clear the armed nav-load task (the TestAgent awaits it once,
     /// bounded, before ready=true). Null when no IAsyncLoadedPage nav was armed.
     /// Debug-only: the TestAgent is its only caller.</summary>
@@ -2946,11 +2966,11 @@ public partial class App : Application
         // Primary-only (no-op under E2E): listen for a second launch's activation
         // signal and surface this window — the single-instance redirect target.
         SingleInstanceManager.StartActivationListener(_window);
-        // Restart-Manager cooperative shutdown (no-op under E2E): register for OS
-        // restart + listen for session-end (WM_QUERYENDSESSION/WM_ENDSESSION) so an
-        // MSI install/upgrade can close-and-relaunch us without force-killing, and
-        // unsaved drafts are persisted on the way down. apps/windows.md
-        // § App Lifecycle, "Cooperative shutdown for installers".
+        // Restart-Manager cooperative shutdown: register for OS restart (not under
+        // E2E) + listen for session-end (WM_QUERYENDSESSION/WM_ENDSESSION, in every
+        // build) so an installer or a package deployment can close-and-relaunch us
+        // without force-killing, and unsaved drafts are persisted on the way down.
+        // apps/windows.md § App Lifecycle, "Cooperative shutdown for installers".
         RestartManagerService.Initialize();
     }
 
@@ -4612,28 +4632,25 @@ public partial class App : Application
     /// e2e state key (<c>ServingEnablementForSerialization</c>, compiled only with
     /// the e2e agent).
     /// </para>
-    /// Best-effort: every step logs its own failure inside the shared step, so only
-    /// a connect or secret-decode failure surfaces here — logged, never thrown into
-    /// the handoff.
+    /// The shared step waits out and retries a passing failure itself; a step the
+    /// nest refuses for good ends it, and the refusal it answers is said on the page
+    /// the person is on — the current page's <c>error-message</c>, through the
+    /// canonical message setter — never only logged (onboarding.md § 3b → <i>The step
+    /// completes; it is not fired once</i>; <see cref="Core.Helpers.ServingEnablement"/>).
+    /// A connect or secret-decode failure is logged inside the helper, never thrown
+    /// into the handoff.
     /// </summary>
     private static async Task ApplyPostClaimServingEnablementAsync(
         Core.Services.INestRpcClient rpc, string nestUrl, bool enableMail, bool enableCaldav,
         bool enableCarddav, bool enableWebdav)
     {
-        try
-        {
-            // Over the session's own connection (transport.md: one WebSocket per
-            // actor); nodeUrl is the nest's literal URL, as before.
-            await rpc.ApplyPostClaimServingEnablementAsync(
-                nestUrl, enableMail, enableCaldav, enableCarddav, enableWebdav);
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine(
-                $"[onboarding] post-claim serving enablement failed: {ex.Message}");
-            ShellLog.Error("App",
-                $"[onboarding] post-claim serving enablement failed: {ex.Message}");
-        }
+        // Over the session's own connection (transport.md: one WebSocket per
+        // actor); nodeUrl is the nest's literal URL, as before.
+        var refusal = await Core.Helpers.ServingEnablement.ApplyAsync(
+            rpc, nestUrl, enableMail, enableCaldav, enableCarddav, enableWebdav);
+        if (refusal is null) return;
+        _currentErrorMessage = refusal;
+        Views.MainPage.Current?.UpdateTestMessages(refusal, _currentWarningMessage, _currentInfoMessage);
     }
 
     /// <summary>
@@ -7187,6 +7204,7 @@ public partial class App : Application
                 }
                 if (session.TryGetValue("authenticated", out var auth) && auth.GetBoolean())
                 {
+                    FaunaApp.Core.Logs.E2eTrace.Write($"[nav] login view {_testCurrentView} -> feed");
                     _testCurrentView = "feed";  // default view after login
                     _currentErrorMessage = null;
                     _injectedErrorMessage = null;
@@ -7609,6 +7627,7 @@ public partial class App : Application
                             && !string.IsNullOrWhiteSpace(homeEl.GetString()))
                             profileHome = homeEl.GetString();
                     }
+                    FaunaApp.Core.Logs.E2eTrace.Write($"[nav] patch view {_testCurrentView} -> {view}");
                     _testCurrentView = view;
                     _currentErrorMessage = null;
                     // A nav ends an injected message's lifetime (tui's `apply_nav`),

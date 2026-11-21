@@ -53,12 +53,15 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
             crate::element::Gesture::Wizard(Action::SelectNatMode(NodeMode::Private)),
         )
         .attr("state", if public { "off" } else { "on" }),
+        // The snapshot's answer (`ui/README.md` § Offer only what is
+        // possible, rule 6); `submit_nat_mode_choice` asks the same one.
         Element::button(
             ids::NAT_MODE_CONFIRM_BUTTON,
             t::CONFIRM_BUTTON,
-            snap.submit_enabled,
+            true,
             Action::SubmitNatModeChoice,
-        ),
+        )
+        .possible(snap.submit_possibility()),
         Element::button(
             ids::NAT_MODE_DEFER_BUTTON,
             t::DEFER_BUTTON,

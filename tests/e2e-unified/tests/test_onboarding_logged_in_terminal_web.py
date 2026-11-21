@@ -144,8 +144,6 @@ def test_web_logged_in_terminal_survives_a_page_reload(nest_instance, spa_url):
                 "args": {"handle": handle},
             },
             "continue_enabled": True,
-            "control_checkbox_visible": False,
-            "control_checkbox_checked": False,
         }, handle=handle)
         driver.click(HANDLE_CONTINUE_BUTTON)
 

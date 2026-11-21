@@ -151,7 +151,7 @@ class AccountSettingsVMTest {
 
         var completed = false
         var residue: com.fauna.ffi.FfiSignOutResidue? = null
-        vm.signOut {
+        vm.signOut(onError = { throw AssertionError("a finished sign-out reports no error: $it") }) {
             completed = true
             residue = it
         }
@@ -188,9 +188,57 @@ class AccountSettingsVMTest {
         ).thenReturn(CLEAN_FINISH.copy(residue = left))
 
         var residue: com.fauna.ffi.FfiSignOutResidue? = null
-        vm.signOut { residue = it }
+        vm.signOut(onError = { throw AssertionError("unexpected: $it") }) { residue = it }
 
         assertTrue("the finish's residue reaches the caller", residue === left)
+    }
+
+    /**
+     * A throw inside the AWAITED half — the runtime stop here — reaches
+     * `onError`, and `onComplete` never runs: the person stays on the page
+     * and reads why (`account-age-band.md` § *Kids-app eligibility while it is
+     * unknown*, the sign-out clause; `ui/README.md` rule 7). Before the fix the
+     * throw died inside `viewModelScope.launch`, out of every caller's catch.
+     */
+    @Test
+    fun signOut_aThrowInsideTheAwaitedStopReachesTheErrorAndNotOnComplete() = runTest {
+        val (vm, api, _, _, actorScope, accountStores) = makeVm()
+        whenever(accountStores.recordSignOut(null)).thenReturn(emptyList())
+        whenever(api.stopAccountRuntimeForSignOutAwaited()).thenThrow(RuntimeException("stop failed"))
+
+        var completed = false
+        var failure: SignOutFailure? = null
+        vm.signOut(onError = { failure = it }) { completed = true }
+
+        assertEquals(SignOutFailure.Threw("stop failed"), failure)
+        assertFalse("onComplete must not run", completed)
+        verify(actorScope, never()).dropActorScopedState()
+    }
+
+    /**
+     * A finish the shared routine answers *refused* (another instance serves
+     * an account it reaches) is a sign-out that did not happen: `onError`
+     * hears it and `onComplete` — which would send the person to onboarding
+     * with the account still there — never runs.
+     */
+    @Test
+    fun signOut_aRefusedFinishReachesTheErrorAndNotOnComplete() = runTest {
+        val (vm, _, _, _, _, accountStores) = makeVm()
+        whenever(accountStores.recordSignOut(null)).thenReturn(emptyList())
+        whenever(
+            accountStores.finishSignOut(
+                anyHost(),
+                eqCaller(com.fauna.ffi.FfiFinishCaller.GESTURE),
+                org.mockito.ArgumentMatchers.eq(emptyList()),
+            )
+        ).thenReturn(CLEAN_FINISH.copy(refused = true, credentialsWiped = false))
+
+        var completed = false
+        var failure: SignOutFailure? = null
+        vm.signOut(onError = { failure = it }) { completed = true }
+
+        assertEquals(SignOutFailure.Refused, failure)
+        assertFalse("onComplete must not run", completed)
     }
 
     /** `ArgumentMatchers.any` for a non-null Kotlin parameter. */

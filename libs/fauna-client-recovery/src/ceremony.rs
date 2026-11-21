@@ -113,6 +113,67 @@ pub const STOLEN_CONFIRM_WORD: &str = "SUCCEED";
 /// signed-in page and the signed-out door.
 pub const LOCKOUT_CONFIRM_WORD: &str = "LOCK";
 
+/// `identity-stolen-button`'s draft-validity answer (`docs/goal/ui/README.md`
+/// § Offer only what is possible, rule 4's form case), in the form's field
+/// order: a recovery kit pasted (`settings.recovery_kit.kit_phrase_required`
+/// while it is blank), then the confirm field holding exactly
+/// [`STOLEN_CONFIRM_WORD`] (blocked with the prompt that names the word). The
+/// one answer every surface of the ceremony paints its button from and
+/// re-asks before it starts, so the irreversible act's gate is never an app's
+/// own comparison.
+pub fn stolen_entry_possibility(
+    phrase: &str,
+    confirm_word: &str,
+) -> fauna_core::possibility::Possibility {
+    use fauna_core::possibility::Possibility;
+    if phrase.trim().is_empty() {
+        return Possibility::blocked(LocalizedText::key(
+            "settings.recovery_kit.kit_phrase_required",
+        ));
+    }
+    if confirm_word != STOLEN_CONFIRM_WORD {
+        return Possibility::blocked(LocalizedText::key(
+            "settings.recovery_kit.stolen_confirm_placeholder",
+        ));
+    }
+    Possibility::Possible
+}
+
+#[cfg(test)]
+mod stolen_entry_draft_tests {
+    use super::*;
+
+    #[test]
+    fn the_phrase_blocks_first_then_the_word() {
+        let key = |p: &str, c: &str| {
+            stolen_entry_possibility(p, c)
+                .reason()
+                .map(|r| r.key.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(key("", ""), "settings.recovery_kit.kit_phrase_required");
+        assert_eq!(
+            key("  ", "SUCCEED"),
+            "settings.recovery_kit.kit_phrase_required"
+        );
+        assert_eq!(
+            key("fauna://recovery?x", ""),
+            "settings.recovery_kit.stolen_confirm_placeholder"
+        );
+        assert_eq!(
+            key("fauna://recovery?x", "succeed"),
+            "settings.recovery_kit.stolen_confirm_placeholder"
+        );
+        assert!(stolen_entry_possibility("fauna://recovery?x", STOLEN_CONFIRM_WORD).is_possible());
+        for k in [
+            "settings.recovery_kit.kit_phrase_required",
+            "settings.recovery_kit.stolen_confirm_placeholder",
+        ] {
+            assert!(fauna_i18n::strings::lookup(k).is_some(), "{k}");
+        }
+    }
+}
+
 /// What the post-succession group sweep did — the ceremony's own outcome, which
 /// the surface renders in the flow that ran it (`identity-succession.md`
 /// § Propagation → *MLS groups*).

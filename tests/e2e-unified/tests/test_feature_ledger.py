@@ -1285,6 +1285,43 @@ def test_the_ledgers_own_output_is_not_dirt(tmp_path):
     assert fl.tree_dirt(repo) == ["?? docs/features/feed-read.md"]
 
 
+def _write_part_one_record(repo):
+    """What a candidate run's part 1 leaves in the checkout: the ledger files and
+    every other record file `RUN_RECORD_PATHS` names (the release gate's publish
+    entries, where this tree carries the gate)."""
+    ledger = repo / fl.LEDGER_REL
+    ledger.mkdir(parents=True)
+    for name in ("nest.json", "tui.json", "releases.json"):
+        (ledger / name).write_text("{}\n", encoding="utf-8")
+    for rel in fl.RUN_RECORD_PATHS[1:]:
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text("x\n", encoding="utf-8")
+
+
+def test_a_candidate_runs_own_record_is_not_dirt(tmp_path):
+    """The candidate run is two invocations (release-table.md § Release-candidate
+    run): part 1 writes its record, then part 2 re-verifies the clean tree. On 0.1.7
+    part 1's publish-gate entries made part 2 refuse "not clean" every time. Those
+    files are the run's own record, exempt with the ledger (`RUN_RECORD_PATHS`); a
+    neighbouring file in the same directory is still dirt."""
+    repo = _git_repo(tmp_path)
+    _write_part_one_record(repo)
+    assert fl.tree_dirt(repo) == []
+    neighbour = Path(fl.RUN_RECORD_PATHS[-1]).parent / "neighbour-row-6095.txt"
+    (repo / neighbour).write_text("", encoding="utf-8")
+    assert fl.tree_dirt(repo) == [f"?? {neighbour.as_posix()}"]
+
+
+def test_part_two_of_a_candidate_run_passes_the_tree_check_after_part_one(tmp_path):
+    """Past the tree check the gate reaches `docker inspect`, whose failure is the
+    proof the tree passed."""
+    repo = _git_repo(tmp_path)
+    _write_part_one_record(repo)
+    refusal = fl.release_candidate_refusal_for_image(
+        "fauna-nest-test:no-such-image-row-6095", repo=repo)
+    assert refusal and "docker inspect" in refusal and "not clean" not in refusal, refusal
+
+
 def test_a_tree_git_cannot_read_is_unknown(tmp_path):
     assert fl.tree_dirt(tmp_path / "not-a-repo") is None
 
@@ -1444,8 +1481,9 @@ def _built_from(monkeypatch, build_commit: str):
 
 
 def test_a_public_build_paired_by_its_sync_point_is_a_candidate(tmp_path, monkeypatch):
-    repo = _git_repo(tmp_path)
-    head = fl.head_commit(repo)
+    # The version's commit must be main-derived (the candidate precondition's last
+    # check), so the fixture's one commit is also its `origin/main`.
+    repo, head = _repo_with_origin_main(tmp_path)
     clone, public = _public_clone(tmp_path, head[:10])
     _built_from(monkeypatch, public)
     assert fl.release_candidate_verdict_for_image(
@@ -1485,7 +1523,7 @@ def test_a_build_commit_the_public_clone_lacks_is_refused(tmp_path, monkeypatch)
 
 
 def test_a_private_build_of_head_records_no_public_commit(tmp_path, monkeypatch):
-    repo = _git_repo(tmp_path)
+    repo, _head = _repo_with_origin_main(tmp_path)
     _built_from(monkeypatch, fl.head_commit(repo))
     assert fl.release_candidate_verdict_for_image(
         "ghcr.io/faunasocial/nest:sha-x", repo=repo,

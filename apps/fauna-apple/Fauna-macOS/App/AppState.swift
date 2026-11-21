@@ -167,6 +167,16 @@ class MacAppState {
     /// that identity-scoped page instead of its own landing).
     static let landingSidebar: SidebarItem = .conversations
 
+    /// Whether the search bar — `search-query-field` (the sidebar field) and the
+    /// `search-submit-button` / `search-type-filter` / `search-clear-button`
+    /// toolbar items — is shown; flipped by `search-toggle-button` (ui.yaml
+    /// `search-bar`: the toggle collapses and reveals that row on every app).
+    /// The twin of iOS's `AppState.showSearchBar`; held here rather than in the
+    /// window's `@State` so the e2e `{"view":"search"}` nav patch can reveal it.
+    /// Starts open, as on the desktop apps (tui's `bar_visible` defaults to
+    /// `true`) and as the field always was here before the toggle was real.
+    var showSearchBar = true
+
     init() {
         // Convention 11's MOUNTED-SHELL derivation for macOS, installed once and
         // read live (`SessionState.mainShellMountedProbe`). This is exactly the
@@ -257,6 +267,12 @@ class MacAppState {
     /// from `APIClient.amIAdmin()` on login and reconnect. Mirrors web's
     /// `userIsAdmin` and the shared iOS `AppState.isAdmin`.
     var isAdmin: Bool = false
+    /// The admin entry points' answer (`admin-tab`, the Bridges page's
+    /// hosted-plugin section): the shared `admin_entry_possibility` over
+    /// ``isAdmin`` — possible for an admin, absent otherwise (`admin.md`
+    /// § Errors & edge cases, *Role and state gates answer one `Possibility`
+    /// too*). Painted with `faunaPossible`; no view tests `isAdmin` itself.
+    var adminEntry: Possibility { adminEntryPossibility(isAdmin: isAdmin) }
     /// The caller's `fauna.family.status` projection — gates the two global
     /// family surfaces (family-safety.md § App surface): the `family-tab`
     /// sidebar row on any relationship (guardian OR supervised), and the global
@@ -603,6 +619,22 @@ class MacAppState {
         profileActorId = actorId
         profileHome = actorId == nil ? nil : home
         selectedSidebar = .profile
+        logMessage(
+            level: .info, target: "fauna.app",
+            message: "[profile] open actor=\(actorId.map { String($0.prefix(12)) } ?? "self") home=\(profileHome ?? "this nest")")
+    }
+
+    /// Drop an OTHER-profile target on a top-level navigation; logged when it
+    /// drops one, so a profile that loses its target (or its carried home)
+    /// after an open says which path dropped it (e2e convention 6).
+    func clearProfileTarget(_ why: String) {
+        if profileActorId != nil || profileHome != nil {
+            logMessage(
+                level: .info, target: "fauna.app",
+                message: "[profile] target cleared by \(why) (was actor=\(profileActorId.map { String($0.prefix(12)) } ?? "self") home=\(profileHome ?? "this nest"))")
+        }
+        profileActorId = nil
+        profileHome = nil
     }
 
     func updateDockVisibility() {

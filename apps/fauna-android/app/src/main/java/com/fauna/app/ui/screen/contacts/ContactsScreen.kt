@@ -1,5 +1,6 @@
 package com.fauna.app.ui.screen.contacts
 
+import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -38,13 +39,23 @@ import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.navigation.profileRoute
 import com.fauna.app.ui.util.ValueFormat
 import com.fauna.app.ui.util.localized
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.ffi.FfiAddressbookRow
 import com.fauna.ffi.FfiCardRow
 import com.fauna.app.ui.viewmodel.ContactOverlaysVM
+import com.fauna.app.ui.viewmodel.AddressBookPlaceholder
 import com.fauna.app.ui.viewmodel.ContactsSegment
+import com.fauna.app.ui.viewmodel.addressBookPlaceholder
 import com.fauna.app.ui.viewmodel.ContactsVM
 import com.fauna.app.ui.viewmodel.ConversationsVM
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.FilterChip
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.TextButton
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -60,6 +71,7 @@ fun ContactsScreen(
     // Address Book segment (CardDAV vCards — slice 4b, read-only master-detail).
     val segment by vm.segment.collectAsState()
     val addressbooks by vm.addressbooks.collectAsState()
+    val addressbooksRead by vm.addressbooksRead.collectAsState()
     val selectedBookId by vm.selectedBookId.collectAsState()
     val cards by vm.cards.collectAsState()
     val selectedCard by vm.selectedCard.collectAsState()
@@ -108,7 +120,10 @@ fun ContactsScreen(
     val knockAsk by vm.knockAsk.collectAsState()
     val wardContactRequests by vm.wardContactRequests.collectAsState()
     val knockError by vm.knockError.collectAsState()
-    val askRender = remember(knockAsk, wardContactRequests) { vm.contactAskRenderFor(knockAsk) }
+    val wardSupervision by vm.wardSupervision.collectAsState()
+    val askRender = remember(knockAsk, wardContactRequests, wardSupervision, contacts) {
+        vm.contactAskRenderFor(knockAsk)
+    }
     LaunchedEffect(knockError) {
         appMessages.showError(knockError)
     }
@@ -151,13 +166,13 @@ fun ContactsScreen(
                 onClick = { vm.showPeople() },
                 shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
                 modifier = Modifier.testTag(Ids.CONTACTS_SEGMENT_PEOPLE)
-            ) { Text(stringResource(R.string.common_contacts)) }
+            ) { DisableSelection { Text(stringResource(R.string.common_contacts)) } }
             SegmentedButton(
                 selected = segment == ContactsSegment.ADDRESS_BOOK,
                 onClick = { vm.showAddressBook() },
                 shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
                 modifier = Modifier.testTag(Ids.CONTACTS_SEGMENT_ADDRESSBOOK)
-            ) { Text(stringResource(R.string.contacts_address_book_title)) }
+            ) { DisableSelection { Text(stringResource(R.string.contacts_address_book_title)) } }
         }
 
         if (segment == ContactsSegment.ADDRESS_BOOK) {
@@ -166,6 +181,7 @@ fun ContactsScreen(
                 selectedBookId = selectedBookId,
                 cards = cards,
                 selectedCard = selectedCard,
+                bookPlaceholder = addressBookPlaceholder(addressbooksRead),
                 loading = abLoading,
                 error = abError,
                 onSelectBook = { vm.selectBook(it) },
@@ -252,9 +268,15 @@ fun ContactsScreen(
                                 // (tui's `knock_sent`), never optimistically.
                                 val sent = knockAsk.peer == resolved.actorId && knockAsk.knockSent
                                 val inFlight = knockAsk.peer == resolved.actorId && knockAsk.knockInFlight
+                                // The ward's entry gate (contacts.md § Errors &
+                                // edge cases): the shared knock predicate over
+                                // the ward's supervision and this peer's roster edge.
+                                val knockAnswer = remember(wardSupervision, contacts, resolved.actorId) {
+                                    vm.knockAnswerFor(resolved.actorId)
+                                }
                                 Button(
                                     onClick = { vm.addContact(resolved.actorId, resolved.nestUrl) },
-                                    enabled = !sent && !inFlight,
+                                    enabled = !sent && !inFlight && knockAnswer.isPossible,
                                     modifier = Modifier.testTag(Ids.CONTACTS_ADD_BUTTON)
                                 ) {
                                     Text(stringResource(if (sent) R.string.contacts_sent else R.string.contacts_knock))
@@ -277,6 +299,12 @@ fun ContactsScreen(
                                         Text(stringResource(R.string.contacts_find_user_open_profile))
                                     }
                                 }
+                            }
+                            if (!knockAsk.knockSent) {
+                                DisabledControlReasonText(
+                                    localized(vm.knockAnswerFor(resolved.actorId).blockedReason),
+                                    modifier = Modifier.align(Alignment.End),
+                                )
                             }
                             // The pair belongs to the peer this lookup found
                             // (`knockAsk.peer`), never a previous result's.
@@ -398,6 +426,7 @@ private fun AddressBookSegment(
     selectedBookId: String?,
     cards: List<FfiCardRow>,
     selectedCard: FfiCardRow?,
+    bookPlaceholder: AddressBookPlaceholder,
     loading: Boolean,
     error: String?,
     onSelectBook: (String) -> Unit,
@@ -412,7 +441,11 @@ private fun AddressBookSegment(
         // Book picker (horizontal chips — mirror the Events calendar-item row).
         if (addressbooks.isEmpty()) {
             Text(
-                text = if (loading) stringResource(R.string.common_loading)
+                // An unresolved read (a missing key: the mint in flight) is
+                // loading, never an empty address book (contacts.md § Errors &
+                // edge cases).
+                text = if (bookPlaceholder == AddressBookPlaceholder.LOADING)
+                           stringResource(R.string.contacts_address_book_loading)
                        else stringResource(R.string.contacts_address_book_no_addressbooks),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -569,6 +602,12 @@ private fun KnockItem(knock: Knock, senderLabel: String, vm: ContactsVM) {
     // family-safety.md § App surface) — the shared rule over the ward's own
     // status policy, no per-knock wire field.
     val awaitsGuardian by vm.knocksAwaitGuardian.collectAsState()
+    // Accept is blocked while the guardian decides knocks (or the status read
+    // is unresolved) — the shared accept_possibility; its reason is the
+    // `knock-guardian-pending` line the row already paints. Block and dismiss
+    // stay the ward's.
+    val supervision by vm.wardSupervision.collectAsState()
+    val acceptAnswer = remember(supervision) { vm.acceptAnswer() }
     ListItem(
         headlineContent = {
             Text(senderLabel, maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -605,6 +644,7 @@ private fun KnockItem(knock: Knock, senderLabel: String, vm: ContactsVM) {
                     modifier = Modifier.padding(top = 4.dp)
                 ) {
                     TextButton(onClick = { vm.acceptKnock(knock.sender) },
+                        enabled = acceptAnswer.isPossible,
                         modifier = Modifier.testTag(Ids.CONTACTS_ACCEPT_BUTTON)) {
                         Text(stringResource(R.string.common_accept))
                     }

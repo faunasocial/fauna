@@ -39,9 +39,10 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
         Element::button(
             ids::INVITE_REQUEST_SUBMIT_BUTTON,
             t::REQUEST_BUTTON,
-            !w.machine.is_loading(),
+            true,
             Action::SubmitInviteRequest,
-        ),
+        )
+        .possible(w.machine.invite_submit_possibility()),
         Element::label(ids::INVITE_REQUEST_STATUS, localized(&snap.message)),
     ];
 
@@ -64,12 +65,19 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
         )
         .labelled(t::CODE_LABEL),
     );
-    out.push(Element::button(
-        ids::INVITE_CODE_CHECK_BUTTON,
-        common::CHECK,
-        !code.is_empty(),
-        Action::VerifyOobInviteCode,
-    ));
+    // Painted from the shared draft predicate (`ui/README.md` § Offer only
+    // what is possible, rule 4's form case).
+    out.push(
+        Element::button(
+            ids::INVITE_CODE_CHECK_BUTTON,
+            common::CHECK,
+            true,
+            Action::VerifyOobInviteCode,
+        )
+        .possible(fauna_onboarding_machine::invite_code_draft_possibility(
+            code.clone(),
+        )),
+    );
     out.push(Element::label(
         ids::INVITE_CODE_STATUS,
         localized(&snap.oob_message),
@@ -101,13 +109,18 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
     if let Some(rules) = w.machine.joining_nest_rules(crate::nest_rules::UI_LANG) {
         out.extend(crate::nest_rules::joining_elements(&rules));
     }
-    out.extend(super::terms_notice());
-    out.push(Element::button(
-        ids::INVITE_REQUEST_CONTINUE_BUTTON,
-        common::CONTINUE,
-        snap.continue_enabled,
-        Action::InviteContinue,
-    ));
+    out.extend(super::terms_notice(w.terms_copied));
+    // The snapshot's answer (`ui/README.md` § Offer only what is possible,
+    // rule 6); `redeem_invite` asks the same one first.
+    out.push(
+        Element::button(
+            ids::INVITE_REQUEST_CONTINUE_BUTTON,
+            common::CONTINUE,
+            true,
+            Action::InviteContinue,
+        )
+        .possible(snap.continue_possibility()),
+    );
     out.push(Element::button(
         ids::INVITE_REQUEST_BACK_BUTTON,
         common::BACK,

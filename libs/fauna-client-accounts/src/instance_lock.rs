@@ -308,6 +308,71 @@ pub fn choosable_accounts(
         .collect()
 }
 
+/// How often a shown launch-collision chooser re-reads the facts it rests on
+/// ([`chooser_watch_step`]). One second: a person who just quit the other
+/// window sees this one continue without a perceptible wait, and the cost is
+/// one probe per registered account per second, in a process that is doing
+/// nothing else.
+pub const CHOOSER_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// What one [`chooser_watch_step`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChooserWatchStep {
+    /// Nothing the chooser shows has changed.
+    Unchanged,
+    /// The account this launch collided with is no longer served by anyone:
+    /// the collision is over, and the chooser continues as the plain launch
+    /// of that account — the same continuation as focus-existing's
+    /// [`FocusExistingOutcome::NoLongerServed`].
+    Freed,
+    /// The collided account is still served, but the set of accounts the
+    /// chooser may offer moved (one opened or closed elsewhere): the new
+    /// list, in [`choosable_accounts`]' shape and order.
+    Choices(Vec<(String, String)>),
+}
+
+/// The launch-collision chooser's watch, one step: is the collided account
+/// still served, and is the list still right? (`account-scoping.md`
+/// § Concurrent instances → the colliding instance's surface: the chooser
+/// notices the change of facts it rests on.)
+///
+/// **The mechanism is a poll of the display-only probe, by decision.** Every
+/// server holds the lock *shared*, so a blocking shared acquire would succeed
+/// at once beside the serving instance and cannot wait for it; a blocking
+/// exclusive wait would hold the lock exclusively the moment it is granted
+/// and refuse every co-server meanwhile; a file watch sees no event when a
+/// kernel lock is dropped; and the linux raise bus name is linux's alone.
+/// The probe is the one read that answers "has the *last* holder gone?" on
+/// every platform, and [`AccountInstanceLock::acquire_shared`] already
+/// absorbs its two-syscall window, so polling it at
+/// [`CHOOSER_WATCH_INTERVAL`] refuses nobody.
+///
+/// The app owns the cadence (its own event loop ticks this while the chooser
+/// is shown) and the continuation; this step owns the answer, so the three
+/// chooser platforms read the same facts the same way. `shown` is the list
+/// currently on screen; `entries` the registry rows the chooser rendered
+/// from. Advisory like every probe: a `Freed` launch still arbitrates at its
+/// own acquire.
+pub fn chooser_watch_step(
+    base: &Path,
+    served_actor_id: &str,
+    entries: &[(String, Option<String>)],
+    shown: &[(String, String)],
+) -> ChooserWatchStep {
+    if !AccountInstanceLock::is_served(base, served_actor_id) {
+        return ChooserWatchStep::Freed;
+    }
+    let now: Vec<(String, String)> = choosable_accounts(base, entries)
+        .into_iter()
+        .filter(|(id, _)| id != served_actor_id)
+        .collect();
+    if now.as_slice() == shown {
+        ChooserWatchStep::Unchanged
+    } else {
+        ChooserWatchStep::Choices(now)
+    }
+}
+
 /// What the launch-collision chooser's focus-existing button resolves to
 /// (`account-scoping.md` § Concurrent instances → the raise channel, "the
 /// ratified degrade").
@@ -1085,6 +1150,27 @@ mod tests {
         }
     }
 
+    /// The first non-`Unchanged` answer of [`chooser_watch_step`] after a
+    /// release, polled for the same reason [`reads_free`] polls: a release is
+    /// observable late while a sibling test's `fork` holds a copy of the
+    /// descriptor. `Unchanged` past the budget is returned as-is, so the
+    /// caller's assert names what never happened.
+    fn watch_settles(
+        base: &Path,
+        served: &str,
+        entries: &[(String, Option<String>)],
+        shown: &[(String, String)],
+    ) -> ChooserWatchStep {
+        let deadline = std::time::Instant::now() + RELEASE_OBSERVABLE_BUDGET;
+        loop {
+            let step = chooser_watch_step(base, served, entries, shown);
+            if step != ChooserWatchStep::Unchanged || std::time::Instant::now() >= deadline {
+                return step;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     /// A second acquire for the same (base, actor) is refused while the
     /// first lock lives — including from another handle in this process
     /// (flock treats each open file description as a distinct owner, which
@@ -1487,6 +1573,76 @@ mod tests {
                 .map(|(id, _)| id.as_str())
                 .collect::<Vec<_>>(),
             vec![actor(b'a').as_str(), actor(b'b').as_str()],
+        );
+    }
+
+    /// The chooser watch: while the collided account is still served and
+    /// nothing else moved, nothing happens; once the LAST shared holder lets
+    /// go, the step answers `Freed` — the chooser's cue to continue as the
+    /// plain launch (`account-scoping.md` § Concurrent instances).
+    #[test]
+    fn chooser_watch_frees_only_when_the_last_shared_holder_quits() {
+        let dir = tempfile::tempdir().unwrap();
+        let served = actor(b'a');
+        let first = match AccountInstanceLock::acquire_shared(dir.path(), &served) {
+            InstanceLockOutcome::Held(l) => l,
+            _ => panic!("the first server must hold"),
+        };
+        let second = match AccountInstanceLock::acquire_shared(dir.path(), &served) {
+            InstanceLockOutcome::Held(l) => l,
+            _ => panic!("a co-server must coexist"),
+        };
+        let entries = vec![(served.clone(), None), (actor(b'b'), None)];
+        let shown = choosable_accounts(dir.path(), &entries);
+        assert_eq!(
+            chooser_watch_step(dir.path(), &served, &entries, &shown),
+            ChooserWatchStep::Unchanged,
+            "a served account with an unchanged list is no change"
+        );
+        drop(first);
+        assert_eq!(
+            chooser_watch_step(dir.path(), &served, &entries, &shown),
+            ChooserWatchStep::Unchanged,
+            "one co-server leaving is not the account being freed"
+        );
+        drop(second);
+        assert_eq!(
+            watch_settles(dir.path(), &served, &entries, &shown),
+            ChooserWatchStep::Freed,
+            "the last holder leaving frees the account"
+        );
+        // Freed means the plain launch the chooser hands over to can take
+        // the account.
+        assert!(matches!(
+            AccountInstanceLock::acquire_shared(dir.path(), &served),
+            InstanceLockOutcome::Held(_)
+        ));
+    }
+
+    /// The other half of the watch: another account opened or closed
+    /// elsewhere while the chooser is up refreshes the list it offers.
+    #[test]
+    fn chooser_watch_refreshes_the_list_when_another_account_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let served = actor(b'a');
+        let _a = AccountInstanceLock::acquire_shared(dir.path(), &served);
+        let entries = vec![
+            (served.clone(), None),
+            (actor(b'b'), Some("bo".to_string())),
+        ];
+        let shown = choosable_accounts(dir.path(), &entries);
+        assert_eq!(shown.len(), 1, "b is offered at render");
+        let b = AccountInstanceLock::acquire_shared(dir.path(), &actor(b'b'));
+        assert_eq!(
+            chooser_watch_step(dir.path(), &served, &entries, &shown),
+            ChooserWatchStep::Choices(Vec::new()),
+            "b opened elsewhere → no longer offered"
+        );
+        drop(b);
+        assert_eq!(
+            watch_settles(dir.path(), &served, &entries, &[]),
+            ChooserWatchStep::Choices(vec![(actor(b'b'), "bo".to_string())]),
+            "b closed elsewhere → offered again"
         );
     }
 

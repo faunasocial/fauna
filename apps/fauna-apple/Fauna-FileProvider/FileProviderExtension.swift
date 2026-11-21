@@ -143,6 +143,24 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         }
         super.init()
         startRefreshTick()
+        if host != nil { Self.releaseRemovedDomainHosts() }
+    }
+
+    /// Release the process's held hosts (`heldAppDeadHost`) whose domain the
+    /// app has removed: a held host outlives every extension instance, so the
+    /// OS's live domain list — not an instance's end — is what lets it go.
+    /// A failed listing releases nothing.
+    private static func releaseRemovedDomainHosts() {
+        NSFileProviderManager.getDomainsWithCompletionHandler { domains, error in
+            guard error == nil, let actorId = FileProviderCredentialStore.load()?.actorId
+            else { return }
+            let actorHex = data_to_hex(actorId)
+            let live = domains
+                .compactMap { FileProviderDomainIdentity.parse($0.identifier.rawValue) }
+                .filter { $0.actorIdHex == actorHex }
+                .map(\.folderId)
+            try? retainHeldDomainHosts(actorId: actorId, folderIds: live)
+        }
     }
 
     func invalidate() {
@@ -156,8 +174,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     /// (`defaultRescanIntervalSecs()` — the one constant every seat ticks at
     /// since folders re-model phase 5, crossed from Rust rather than copied
     /// here) we `host.refresh()` and, iff it folded something new or flipped an
-    /// item's keep, tell the OS to re-enumerate — the root, and the working set
-    /// whose change feed reports the kept flips (`FileProviderWorkingSetFeed`;
+    /// item's keep, signal the root and the working set, whose change feeds
+    /// report what moved (`FileProviderWorkingSetFeed`;
     /// `on-demand-files.md` § Apple File Provider binding — *a pulled remote
     /// change signals the enumerator*). A `nil` host or an indeterminate binding starts no tick.
     ///

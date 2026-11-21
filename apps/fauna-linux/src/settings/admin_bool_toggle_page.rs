@@ -21,6 +21,7 @@
 macro_rules! admin_bool_toggle_page {
     (
         page_fn: $page_fn:ident,
+        stack_child: $stack_child:literal,
         machine: $Machine:ty,
         action: $Action:ident,
         snapshot: $Snapshot:ty,
@@ -118,7 +119,35 @@ macro_rules! admin_bool_toggle_page {
                 w: widgets,
             });
 
+            // The toggle waits for the read (`admin.md` § Errors & edge
+            // cases, *Controls wait for their read*): painted from the
+            // machine's `toggle_possibility` now and on every render.
+            paint_toggle(&ctx);
             hydrate_and_render(&ctx);
+
+            // Re-read whenever the page is shown again, as the mail page
+            // does: the sub-page outlives its first visit, so a read that
+            // failed while the nest was away would otherwise leave the toggle
+            // saying *failed to load* for good.
+            {
+                let ctx = std::rc::Rc::clone(&ctx);
+                ctx.w.enabled_toggle.clone().connect_map(move |_| {
+                    hydrate_and_render(&ctx);
+                });
+            }
+            // ...and again when the nest connection comes back with the page
+            // on screen, while its read has not answered (`admin.md` § Errors
+            // & edge cases, *Controls wait for their read*).
+            {
+                let answered = std::rc::Rc::clone(&ctx);
+                let reread = std::rc::Rc::clone(&ctx);
+                crate::admin_reread::register_widget(
+                    $stack_child,
+                    &ctx.w.enabled_toggle,
+                    move || crate::admin_reread::resolved(answered.machine.read_state()),
+                    move || hydrate_and_render(&reread),
+                );
+            }
 
             // enable toggle → Set*Enabled (skip the echo from render()).
             {
@@ -128,6 +157,17 @@ macro_rules! admin_bool_toggle_page {
                     .clone()
                     .connect_active_notify(move |sw| {
                         if ctx.syncing.get() {
+                            return;
+                        }
+                        // The answer asked again: a flip before the read (or
+                        // while a change is on its way) is put back, its
+                        // reason on `error-message`, nothing sent.
+                        if crate::possible::refused_toggle(
+                            sw,
+                            &ctx.machine.toggle_possibility(),
+                            &ctx.w.error_label,
+                            &ctx.syncing,
+                        ) {
                             return;
                         }
                         dispatch_action(
@@ -183,6 +223,16 @@ macro_rules! admin_bool_toggle_page {
                 w.enabled_toggle.set_active(snap.$field);
                 ctx.syncing.set(false);
             }
+            paint_toggle(ctx);
+        }
+
+        /// Paint the enable toggle from the machine's read-and-idle answer.
+        fn paint_toggle(ctx: &Ctx) {
+            crate::possible::paint(
+                &ctx.w.enabled_toggle,
+                None,
+                ctx.machine.toggle_possibility(),
+            );
         }
     };
 }

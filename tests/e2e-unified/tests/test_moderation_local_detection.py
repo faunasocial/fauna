@@ -27,7 +27,8 @@ Two legs, one contract:
   two real GUI apps of the same client: alice's sends, bob's receives. Uses the
   client-matched second-real-client fixture (``second_real_faunamls_app``), so it
   runs on every app the ``moderation-queue-second-real-engine`` surface lists
-  (linux, tui, macos, ios, windows).
+  (linux, tui, macos, ios, windows, android — where the phone plays bob and
+  alice sends from a tui seat of her own).
 * **web** (``test_web_local_spam_detection_surfaces_in_moderation_queue``) — bob's web
   SPA is the only real GUI engine; the *sender* is a throwaway engine driven via the
   ``mls-group-gen`` helper (the pattern ``test_fauna_mls_web_receive.py`` established,
@@ -82,13 +83,14 @@ SPAM_BODY = "BUY NOW!!! CLICK HERE for FREE MONEY!!! Limited time — act now!!!
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.windows
+@pytest.mark.android
 @pytest.mark.real_conversations
 @pytest.mark.feature("moderation-queue")
 def test_local_spam_detection_surfaces_in_moderation_queue(
     real_faunamls_app, second_real_faunamls_app, nest_instance
 ):
-    alice = real_faunamls_app
-    alice.moderation.require_second_real_engine_fixture_supported(
+    alice = second_real_faunamls_app.owner_app
+    real_faunamls_app.moderation.require_second_real_engine_fixture_supported(
         flow="the moderation-queue UI"
     )
     bob_app, bob = second_real_faunamls_app

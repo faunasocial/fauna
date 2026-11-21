@@ -177,17 +177,32 @@ WARMUP_FIELDS = {
 
 @pytest.mark.feature("admin-mail-policy", "mail-server")
 def test_admin_reads_warmup_status(nest_instance):
-    """A fresh deployment (no outbound yet) reports day 1, nothing used, the
-    day-1 cap of 50, and 'never' (0) for both timestamps."""
+    """The status read has the full shape and, right after the test's own reset
+    (the nest is session-shared, so other modules may have moved the warm-up
+    state: a 'fresh deployment' is never assumed), reports day 1, nothing used
+    and the day-1 cap of 50.
+
+    "Nothing used" is read off the reset's OWN reply, the one atomic view of
+    the state the reset made. The status read that follows is a second
+    request on a session-shared nest whose bridge may still be draining
+    outbound mail an earlier module queued, so its `today_used` counts
+    whatever was sent in between (the mac tester saw 4 and 5 on re-runs at
+    one commit). That count says how fast the queue drained, not what a reset
+    does. The status read is anchored on the reset by its `last_reset_at`
+    instead (convention 14)."""
     admin = _admin_client(nest_instance)
     with admin:
+        reset = admin.call("fauna.bridges.outbound_warmup_reset", {})
         reply = admin.call("fauna.bridges.outbound_warmup_status", {})
+    assert reset["today_used"] == 0, f"a reset starts the day unused: {reset!r}"
     assert set(reply) >= WARMUP_FIELDS, f"bad status shape: {reply!r}"
-    assert reply["current_day"] == 1, f"fresh deployment is day 1: {reply!r}"
-    assert reply["today_used"] == 0
+    assert reply["last_reset_at"] == reset["last_reset_at"], (
+        f"the status read sees the test's own reset: reset={reset!r} status={reply!r}"
+    )
+    assert reply["current_day"] == 1, f"a reset restarts at day 1: {reply!r}"
     assert reply["today_max"] == 50, f"day-1 cap is 50: {reply!r}"
-    assert reply["first_outbound_at"] == 0, "no outbound yet → 0 (never)"
-    assert reply["last_reset_at"] == 0, "no reset yet → 0 (never)"
+    assert reply["first_outbound_at"] > 0, f"reset stamps first_outbound_at: {reply!r}"
+    assert reply["last_reset_at"] > 0, f"reset stamps last_reset_at: {reply!r}"
 
 
 @pytest.mark.feature("admin-mail-health")

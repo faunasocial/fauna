@@ -20,7 +20,10 @@ import com.fauna.app.R
 import com.fauna.app.core.OnboardingHost
 import com.fauna.app.core.UrlOpener
 import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.util.blockedReason
 import com.fauna.app.ui.util.getStringFmt
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.isShown
 import com.fauna.app.ui.util.localized
 import com.fauna.ffi.onboarding.CredentialForm
 import com.fauna.ffi.onboarding.FieldMetaPlain
@@ -32,13 +35,19 @@ import com.fauna.ffi.onboarding.handleTld
 import com.fauna.ffi.provisioning.ContactInfo
 import com.fauna.ffi.provisioning.RegistrarAvailability
 import dagger.hilt.android.lifecycle.HiltViewModel
+import javax.inject.Inject
 import kotlinx.coroutines.launch
 import social.fauna.generated.Capability
+import social.fauna.generated.Ids
 import social.fauna.generated.PROVIDERS
 import social.fauna.generated.ProviderMeta
 import uniffi.fauna_core.LocalizedText
-import javax.inject.Inject
-import social.fauna.generated.Ids
+import uniffi.fauna_core.Possibility
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.FilledTonalButton
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.TextButton
 
 @HiltViewModel
 class DnsConfigVM @Inject constructor(
@@ -57,7 +66,7 @@ class DnsConfigVM @Inject constructor(
     fun setContact(contact: ContactInfo) = host.machine.setContact(contact)
 }
 
-private fun emptyContact() = ContactInfo(
+internal fun emptyContact() = ContactInfo(
     firstName = "",
     lastName = "",
     email = "",
@@ -77,8 +86,10 @@ fun DnsConfigScreen(
     val tick by vm.host.tick.collectAsState()
     val state = remember(tick) { vm.host.machine.dnsConfig() }
     val isLoading = remember(tick) { vm.host.machine.isLoading() }
-    val canContinue = remember(tick) { vm.host.machine.canContinueDns() }
-    val canVerify = remember(tick) { vm.host.machine.canVerifyDns() }
+    // Continue's answer is the machine's (`ui/README.md` § Offer only what is possible, rule 6);
+    // its reason is the status line `dns-status-text` already shows.
+    val continueAnswer = remember(tick) { vm.host.machine.dnsContinuePossibility() }
+    val verifyAnswer = remember(tick) { vm.host.machine.verifyDnsPossibility() }
     val statusKey = remember(tick) { vm.host.machine.dnsStatusTextKey() }
     val visibleFields = remember(tick) { vm.host.machine.visibleDnsFields() }
     val providerStatus = remember(tick) { vm.host.machine.providerStatus() }
@@ -113,8 +124,8 @@ fun DnsConfigScreen(
             it.id to hostedAuthButtonLabel(ctx, vm.host.machine.hostedAuthState(CredentialForm.DNS, it.id))
         }
     }
-    val hostedAuthEnabled = remember(tick, hostedAuthDnsFields) {
-        hostedAuthDnsFields.associate { it.id to vm.host.machine.hostedAuthCanBegin(CredentialForm.DNS, it.id) }
+    val hostedAuth = remember(tick, hostedAuthDnsFields) {
+        hostedAuthDnsFields.associate { it.id to vm.host.machine.hostedAuthPossibility(CredentialForm.DNS, it.id) }
     }
 
     val dnsProviders = remember { PROVIDERS.filter { it.capabilities.contains(Capability.DNS) } }
@@ -191,7 +202,7 @@ fun DnsConfigScreen(
                 enabled = !isLoading,
                 onChange = { id, v -> vm.setCred(id, v) },
                 hostedAuthLabels = hostedAuthLabels,
-                hostedAuthEnabled = hostedAuthEnabled,
+                hostedAuth = hostedAuth,
                 onHostedAuthClick = { fieldId ->
                     scope.launch {
                         try {
@@ -210,13 +221,14 @@ fun DnsConfigScreen(
             Spacer(Modifier.height(8.dp))
             Button(
                 onClick = { vm.verify() },
-                enabled = canVerify && !isLoading,
+                enabled = verifyAnswer.isPossible && !isLoading,
                 modifier = Modifier.testTag(Ids.DNS_VERIFY_BUTTON),
             ) {
                 if (isLoading) {
                     CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                 } else Text(stringResource(R.string.common_verify))
             }
+            DisabledControlReasonText(localized(verifyAnswer.blockedReason))
 
             // dns-status-text — i18n key from snapshot.dns_status_text_key().
             // Resolve through the canonical by-name resolver (folds what was a
@@ -315,7 +327,7 @@ fun DnsConfigScreen(
                     vm.continueAction()
                     navController.navigate(routeForStep(vm.host.machine.step()))
                 },
-                enabled = canContinue && !isLoading,
+                enabled = continueAnswer.isPossible && !isLoading,
                 modifier = Modifier.testTag(Ids.DNS_CONFIG_CONTINUE_BUTTON),
             ) { Text(stringResource(R.string.common_continue)) }
         }
@@ -411,7 +423,7 @@ internal fun CredentialsForm(
     enabled: Boolean,
     onChange: (String, String) -> Unit,
     hostedAuthLabels: Map<String, String> = emptyMap(),
-    hostedAuthEnabled: Map<String, Boolean> = emptyMap(),
+    hostedAuth: Map<String, Possibility> = emptyMap(),
     onHostedAuthClick: (String) -> Unit = {},
 ) {
     Column(modifier = Modifier.fillMaxWidth().testTag(tag)) {
@@ -421,13 +433,19 @@ internal fun CredentialsForm(
                 // bundled provider's hosted sign-in (onboarding.md § 4), tui's
                 // `hosted_auth_button` shape one-to-one: same derived id, same
                 // begin → open → wait sequence (caller-owned, this composable
-                // stays FFI-free — plain label/enabled data in, a callback
-                // out).
-                Button(
-                    onClick = { onHostedAuthClick(field.id) },
-                    enabled = enabled && (hostedAuthEnabled[field.id] ?: false),
-                    modifier = Modifier.fillMaxWidth().testTag("$tag-${field.id}"),
-                ) { Text(hostedAuthLabels[field.id] ?: "") }
+                // stays FFI-free — the label and the shared answer in, a
+                // callback out). The answer (`hosted_auth_possibility`) is
+                // painted with its reason beneath, rule 2 of
+                // `docs/goal/ui/README.md` § Offer only what is possible.
+                val answer = hostedAuth[field.id] ?: Possibility.Absent
+                if (answer.isShown) {
+                    Button(
+                        onClick = { onHostedAuthClick(field.id) },
+                        enabled = enabled && answer.isPossible,
+                        modifier = Modifier.fillMaxWidth().testTag("$tag-${field.id}"),
+                    ) { Text(hostedAuthLabels[field.id] ?: "") }
+                    DisabledControlReasonText(localized(answer.blockedReason))
+                }
             } else {
                 OutlinedTextField(
                     value = creds[field.id] ?: "",
@@ -450,7 +468,7 @@ internal fun CredentialsForm(
 }
 
 @Composable
-private fun ContactForm(
+internal fun ContactForm(
     contact: ContactInfo,
     enabled: Boolean,
     onChange: (ContactInfo) -> Unit,

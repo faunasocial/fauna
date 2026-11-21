@@ -424,12 +424,15 @@ pub fn elements(mount: &Mount, bindings: Bindings) -> Vec<Element> {
         editable,
         (bindings.edit)(Edit::Add),
     ));
-    els.push(Element::gesture_button(
-        ids::RULE_EDITOR_SAVE_BUTTON,
-        t::SAVE_BUTTON,
-        view.can_save,
-        bindings.save,
-    ));
+    els.push(
+        Element::gesture_button(
+            ids::RULE_EDITOR_SAVE_BUTTON,
+            t::SAVE_BUTTON,
+            editor.save_possibility().is_possible(),
+            bindings.save,
+        )
+        .possible(editor.save_possibility()),
+    );
     // The host's verdict wins; before one, the first thing that stops a save.
     let status = mount
         .status

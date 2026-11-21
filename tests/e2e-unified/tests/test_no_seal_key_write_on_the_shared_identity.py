@@ -88,7 +88,9 @@ def test_the_fence_is_about_the_seal_key_only(registry):
 def test_the_session_nest_admin_is_registered_where_the_nest_is_created():
     """``nest_instance`` itself records its admin as shared, so no fixture can
     reach the admin before the fences can see it."""
-    tree = ast.parse(_CONFTEST.read_text(encoding="utf-8"))
+    from helpers import source_scan
+
+    tree = source_scan.parsed(_CONFTEST)  # shared, read-only
     fixture = next(
         node
         for node in tree.body

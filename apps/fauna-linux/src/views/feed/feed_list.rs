@@ -449,6 +449,7 @@ fn build_new_feed_dialog(
         .modal(true)
         .default_width(400)
         .build();
+    crate::modal_escape::close_on_escape(&dialog);
 
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 12);
     vbox.set_margin_top(16);
@@ -786,6 +787,26 @@ fn build_new_feed_dialog(
     let cancel_btn = gtk::Button::with_label(common::CANCEL);
     crate::testid::set_test_id(&cancel_btn, ids::FEED_CREATE_CANCEL);
 
+    // Painted from the shared predicate as the name is typed; the dialog
+    // covers the page, so its refusal and a failed save are painted on its
+    // own `error-message` (`ui/feed.md` § Errors & edge cases).
+    let error_label = crate::form_gate::dialog_error_label();
+    crate::form_gate::paint_submit(
+        &create_btn,
+        &fauna_feed::forms::create_feed_possibility(&name_entry.text()),
+        None,
+    );
+    {
+        let btn = create_btn.clone();
+        name_entry.connect_changed(move |e| {
+            crate::form_gate::paint_submit(
+                &btn,
+                &fauna_feed::forms::create_feed_possibility(&e.text()),
+                None,
+            );
+        });
+    }
+
     let button_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     button_row.set_halign(gtk::Align::End);
     button_row.append(&cancel_btn);
@@ -801,6 +822,7 @@ fn build_new_feed_dialog(
     vbox.append(&gtk::Label::new(Some(feed::create::FACTORS)));
     vbox.append(&factor_row);
     vbox.append(&factors_summary);
+    vbox.append(&error_label);
     vbox.append(&button_row);
 
     dialog.set_content(Some(&vbox));
@@ -813,11 +835,16 @@ fn build_new_feed_dialog(
         let combo_r = combo.clone();
         let rules = Rc::clone(&rules);
         let factors = Rc::clone(&factors);
-        create_btn.connect_clicked(move |_| {
+        let error_label = error_label.clone();
+        create_btn.connect_clicked(move |btn| {
             let name = name_e.text().to_string();
-            if name.is_empty() {
+            if crate::form_gate::refuse(
+                &fauna_feed::forms::create_feed_possibility(&name),
+                &error_label,
+            ) {
                 return;
             }
+            crate::form_gate::show_error(&error_label, None);
             // The model carries the wire values, so read the selection back
             // rather than re-deriving it from a magic index — the same
             // `dropdown_wire_value` shape `views/admin.rs` uses. This is what
@@ -832,12 +859,29 @@ fn build_new_feed_dialog(
             let rule_inputs = rules.borrow().clone();
             let factor_inputs = factors.borrow().clone();
             let m = Arc::clone(&m);
-            rt.spawn(async move {
-                let _ = m
-                    .create_feed(name, rule_inputs, combination, None, None, factor_inputs)
-                    .await;
-            });
-            d.close();
+            // The dialog stays open while the feed saves and closes only on
+            // success; a failure keeps the name and rules typed.
+            btn.set_sensitive(false);
+            let d = d.clone();
+            let error_label = error_label.clone();
+            let btn = btn.clone();
+            let name_e = name_e.clone();
+            crate::async_helper::spawn_with_snapshot(
+                &rt,
+                move || async move {
+                    m.create_feed(name, rule_inputs, combination, None, None, factor_inputs)
+                        .await
+                        .map(|_| ())
+                },
+                move |result: Result<(), String>| {
+                    crate::form_gate::paint_submit(
+                        &btn,
+                        &fauna_feed::forms::create_feed_possibility(&name_e.text()),
+                        None,
+                    );
+                    crate::form_gate::finish_save(&d, &error_label, result);
+                },
+            );
         });
     }
 
@@ -858,6 +902,7 @@ fn build_subscribe_bridge_dialog(manager: &Arc<LinuxFeedManager>, rt: &Handle) -
         .modal(true)
         .default_width(360)
         .build();
+    crate::modal_escape::close_on_escape(&dialog);
 
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 12);
     vbox.set_margin_top(16);
@@ -891,6 +936,43 @@ fn build_subscribe_bridge_dialog(manager: &Arc<LinuxFeedManager>, rt: &Handle) -
     subscribe_btn.add_css_class("suggested-action");
     crate::testid::set_test_id(&subscribe_btn, ids::BRIDGE_FORM_SUBSCRIBE_BUTTON);
     crate::offline_gate::declare_wire_kind(&subscribe_btn, "fauna.bridges.feeds.create");
+    let error_label = crate::form_gate::dialog_error_label();
+
+    // The selected bridge's id — empty when the nest serves none, which the
+    // shared predicate answers `feed.bridge_form.kind_required`.
+    let selected_kind = {
+        let available = available.clone();
+        let dd = bridge_dropdown.clone();
+        Rc::new(move || {
+            available
+                .get(dd.selected() as usize)
+                .map(|b| b.id.clone())
+                .unwrap_or_default()
+        })
+    };
+    // Painted from the shared predicate as the form is filled in
+    // (`ui/feed.md` § Errors & edge cases).
+    let repaint: Rc<dyn Fn()> = {
+        let btn = subscribe_btn.clone();
+        let ue = uri_entry.clone();
+        let kind = Rc::clone(&selected_kind);
+        Rc::new(move || {
+            crate::form_gate::paint_submit(
+                &btn,
+                &fauna_feed::forms::bridge_subscribe_possibility(&kind(), &ue.text()),
+                None,
+            );
+        })
+    };
+    repaint();
+    {
+        let repaint = Rc::clone(&repaint);
+        uri_entry.connect_changed(move |_| repaint());
+    }
+    {
+        let repaint = Rc::clone(&repaint);
+        bridge_dropdown.connect_selected_notify(move |_| repaint());
+    }
 
     let button_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     button_row.set_halign(gtk::Align::End);
@@ -909,6 +991,7 @@ fn build_subscribe_bridge_dialog(manager: &Arc<LinuxFeedManager>, rt: &Handle) -
     vbox.append(&uri_entry);
     vbox.append(&gtk::Label::new(Some(&format!("{}:", common::NAME))));
     vbox.append(&name_entry);
+    vbox.append(&error_label);
     vbox.append(&button_row);
 
     dialog.set_content(Some(&vbox));
@@ -924,28 +1007,49 @@ fn build_subscribe_bridge_dialog(manager: &Arc<LinuxFeedManager>, rt: &Handle) -
         let m = Arc::clone(manager);
         let rt = rt.clone();
         let d = dialog.clone();
-        let dd = bridge_dropdown.clone();
-        let available = available.clone();
+        let kind = Rc::clone(&selected_kind);
         let ue = uri_entry.clone();
         let ne = name_entry.clone();
-        subscribe_btn.connect_clicked(move |_| {
+        let error_label = error_label.clone();
+        let repaint = Rc::clone(&repaint);
+        subscribe_btn.connect_clicked(move |btn| {
             // The dropdown index maps to the available-bridge id sent as
             // `CreateFeedRequest.bridge` — never a free-typed protocol string.
-            let bridge = match available.get(dd.selected() as usize) {
-                Some(b) => b.id.clone(),
-                None => return,
-            };
+            let bridge = kind();
             let uri = ue.text().to_string();
             let name = ne.text().to_string();
-            if bridge.is_empty() || uri.is_empty() {
+            if crate::form_gate::refuse(
+                &fauna_feed::forms::bridge_subscribe_possibility(&bridge, &uri),
+                &error_label,
+            ) {
                 return;
             }
+            crate::form_gate::show_error(&error_label, None);
             let display_name = if name.is_empty() { uri.clone() } else { name };
             let m = Arc::clone(&m);
-            rt.spawn(async move {
-                let _ = m.subscribe_bridge(bridge, uri, display_name).await;
-            });
-            d.close();
+            // The dialog stays open while the subscription saves and closes
+            // only on success; a failure keeps what was typed and shows the
+            // manager's own `feed.error_subscribe` sentence.
+            btn.set_sensitive(false);
+            let d = d.clone();
+            let error_label = error_label.clone();
+            let repaint = Rc::clone(&repaint);
+            crate::async_helper::spawn_with_snapshot(
+                &rt,
+                move || async move {
+                    let result = m.subscribe_bridge(bridge, uri, display_name).await;
+                    let stamped = m.snapshot().bridge_form.error;
+                    result.map(|_| ()).map_err(|e| {
+                        stamped
+                            .map(|t| t.resolve(crate::i18n::strings::lookup))
+                            .unwrap_or(e)
+                    })
+                },
+                move |result: Result<(), String>| {
+                    repaint();
+                    crate::form_gate::finish_save(&d, &error_label, result);
+                },
+            );
         });
     }
 
@@ -1047,6 +1151,147 @@ mod tests {
                     opt.value,
                 );
             }
+        });
+    }
+
+    // ── Form validity (`ui/feed.md` § Errors & edge cases; `ui/README.md`
+    // § Offer only what is possible, rules 4 and 7) ─────────────────────
+
+    fn form_offline_manager() -> Arc<LinuxFeedManager> {
+        Arc::new(fauna_feed::FeedManager::new(
+            fauna_client::NestClient::new(
+                "http://127.0.0.1:1".to_string(),
+                fauna_core::identity::ActorKeypair::generate(),
+            ),
+            [7u8; 32],
+        ))
+    }
+
+    /// A client whose nest is a closed port (`post_list`'s fixture idiom).
+    fn form_offline_client() -> (
+        Rc<FaunaClient>,
+        std::sync::mpsc::Receiver<crate::app::UiMessage>,
+    ) {
+        let (tx, rx) = crate::client::ui_channel();
+        let machine = fauna_launch_machine::LaunchMachine::new(
+            Arc::new(fauna_launch_machine::NullObserver),
+            Arc::new(fauna_launch_machine::InMemoryPersistence::new()),
+        );
+        let client = Rc::new(FaunaClient::new(
+            "http://127.0.0.1:1".to_string(),
+            "11".repeat(32),
+            tx,
+            machine,
+        ));
+        (client, rx)
+    }
+
+    fn form_on_private_context(body: impl FnOnce(&glib::MainContext) + Send + 'static) {
+        run_on_gtk_thread(move || {
+            let ctx = glib::MainContext::new();
+            ctx.with_thread_default(|| body(&ctx))
+                .expect("acquire a private main context");
+        });
+    }
+
+    fn form_pump(ctx: &glib::MainContext, done: impl Fn() -> bool) -> bool {
+        for _ in 0..4_000 {
+            if done() {
+                return true;
+            }
+            if !ctx.iteration(false) {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        done()
+    }
+
+    fn form_found<T: IsA<gtk::Widget>>(root: &impl IsA<gtk::Widget>, id: &str) -> T {
+        crate::testid::find_by_test_id(root, id)
+            .unwrap_or_else(|| panic!("{id} not built"))
+            .downcast::<T>()
+            .unwrap_or_else(|_| panic!("{id} has another widget type"))
+    }
+
+    fn form_reason(key: &str) -> String {
+        fauna_core::localized::LocalizedText::key(key).resolve(crate::i18n::strings::lookup)
+    }
+
+    fn form_count_closes(window: &impl IsA<gtk::Window>) -> Rc<std::cell::Cell<u32>> {
+        let closes = Rc::new(std::cell::Cell::new(0));
+        let c = Rc::clone(&closes);
+        window.connect_close_request(move |_| {
+            c.set(c.get() + 1);
+            glib::Propagation::Stop
+        });
+        closes
+    }
+
+    /// Create-feed: a nameless feed is not offered (`feed.create.name_required`),
+    /// a submit anyway refuses with it on the dialog's `error-message`, and a
+    /// FAILED save keeps the dialog open with the name typed.
+    #[test]
+    fn form_gate_create_feed_paints_refuses_and_stays_open_on_failure() {
+        form_on_private_context(|ctx| {
+            crate::offline_gate::reset_for_test("connected");
+            let manager = form_offline_manager();
+            let (client, _rx) = form_offline_client();
+            let rt = client.runtime_handle();
+            let dialog = build_new_feed_dialog(&manager, &client, &rt);
+            dialog.present();
+            let closes = form_count_closes(&dialog);
+            let submit: gtk::Button = form_found(&dialog, ids::CREATE_FEED);
+            let name: gtk::Entry = form_found(&dialog, ids::FEED_CREATE_FEED_NAME);
+            let error: gtk::Label = form_found(&dialog, ids::ERROR_MESSAGE);
+            let reason = form_reason("feed.create.name_required");
+
+            assert!(!submit.is_sensitive());
+            assert_eq!(submit.tooltip_text().as_deref(), Some(reason.as_str()));
+            submit.emit_clicked();
+            assert!(error.is_visible());
+            assert_eq!(error.text().as_str(), reason);
+
+            name.set_text("Mine");
+            assert!(submit.is_sensitive());
+            submit.emit_clicked();
+            assert!(
+                form_pump(ctx, || error.is_visible()
+                    && error.text().as_str() != reason
+                    && submit.is_sensitive()),
+                "the failed save reports back"
+            );
+            assert_eq!(closes.get(), 0, "a failed create keeps the dialog open");
+            dialog.destroy();
+            assert_eq!(name.text().as_str(), "Mine");
+            crate::offline_gate::reset_for_test("disconnected");
+        });
+    }
+
+    /// Bridge-subscribe: with no bridge the nest can serve, the subscribe is
+    /// not offered (`feed.bridge_form.kind_required`), and a submit anyway
+    /// refuses with that reason on the dialog's `error-message` and stays open.
+    #[test]
+    fn form_gate_bridge_subscribe_paints_and_refuses_without_a_bridge() {
+        form_on_private_context(|_ctx| {
+            crate::offline_gate::reset_for_test("connected");
+            let manager = form_offline_manager();
+            let (client, _rx) = form_offline_client();
+            let dialog = build_subscribe_bridge_dialog(&manager, &client.runtime_handle());
+            dialog.present();
+            let closes = form_count_closes(&dialog);
+            let submit: gtk::Button = form_found(&dialog, ids::BRIDGE_FORM_SUBSCRIBE_BUTTON);
+            let uri: gtk::Entry = form_found(&dialog, ids::BRIDGE_FORM_URI_INPUT);
+            let error: gtk::Label = form_found(&dialog, ids::ERROR_MESSAGE);
+            let reason = form_reason("feed.bridge_form.kind_required");
+
+            uri.set_text("https://x.example/feed");
+            assert!(!submit.is_sensitive());
+            assert_eq!(submit.tooltip_text().as_deref(), Some(reason.as_str()));
+            submit.emit_clicked();
+            assert_eq!(error.text().as_str(), reason);
+            assert_eq!(closes.get(), 0);
+            dialog.destroy();
+            crate::offline_gate::reset_for_test("disconnected");
         });
     }
 }

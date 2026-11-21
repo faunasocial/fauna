@@ -58,6 +58,10 @@ Stamped 2026-11-07 at 1a3d8611f5.
     - `tests/e2e-unified/tests/test_admin.py::test_settings_tier_negative_cap_saves_as_zero_and_garbage_is_refused`
 16. [nest] A negative tier cap sent to the nest is refused and never stored; a cap of 0 is accepted — `docs/goal/behavior/value-formatting.md` § Tier cap validation
     - `tests/e2e-unified/tests/api/test_tier_negative_cap_api.py::test_the_nest_refuses_a_negative_tier_cap_and_stores_nothing`
+17. [app] The free tier's row carries no delete control, since the nest never removes that tier — `docs/goal/behavior/admin.md` § 3. Settings
+    - `tests/e2e-unified/tests/test_admin_offer_only_possible.py::test_the_free_tier_row_carries_no_delete_control`
+18. [app] Until the tier list has loaded, the add-tier form is disabled and says it is still loading, or that it failed to load; pressing it says the same and sends nothing — `docs/goal/behavior/admin.md` § Errors & edge cases
+    - `tests/e2e-unified/tests/test_admin_controls_wait_for_their_read.py::test_the_add_tier_form_waits_for_the_tier_list`
 
 ## Status
 
@@ -66,9 +70,9 @@ Stamped 2026-11-07 at 1a3d8611f5.
 |---|---|---|
 | web | ✅ full | 0.1.5-dev+3ef45f1b standalone |
 | linux | ✅ full | 0.1.5-dev+3ef45f1b standalone |
-| windows | ✅ full | 0.1.5-dev+3ef45f1b standalone |
-| macos | ⚠ partial | 0.1.5-dev+3ef45f1b standalone |
-| ios | ⚠ partial | 0.1.5-dev+3ef45f1b standalone |
+| windows | ⚠ partial | 0.1.5-dev+3ef45f1b standalone |
+| macos | ✅ full | 0.1.5-dev+3ef45f1b standalone |
+| ios | ✅ full | 0.1.5-dev+3ef45f1b standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+3ef45f1b standalone |
 | android-kids | — absent | |
@@ -97,6 +101,8 @@ Stamped 2026-11-07 at 1a3d8611f5.
 | 12 | nest | `tests/e2e-unified/tests/api/test_tier_removal_api.py::test_a_tier_is_removable_only_once_nothing_names_it` | nest (linux): passed, nest (macos): passed |
 | 13 | app | `tests/e2e-unified/tests/test_admin.py::test_settings_tier_delete` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 14 | nest | `tests/e2e-unified/tests/api/test_membership_lapse.py::test_a_refund_drops_the_member_to_the_lapse_tier_at_once` | nest (linux): passed |
-| 15 | app | `tests/e2e-unified/tests/test_admin.py::test_settings_tier_negative_cap_saves_as_zero_and_garbage_is_refused` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (macos): passed |
+| 15 | app | `tests/e2e-unified/tests/test_admin.py::test_settings_tier_negative_cap_saves_as_zero_and_garbage_is_refused` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 16 | nest | `tests/e2e-unified/tests/api/test_tier_negative_cap_api.py::test_the_nest_refuses_a_negative_tier_cap_and_stores_nothing` | nest (linux): passed, nest (macos): passed |
+| 17 | app | `tests/e2e-unified/tests/test_admin_offer_only_possible.py::test_the_free_tier_row_carries_no_delete_control` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 18 | app | `tests/e2e-unified/tests/test_admin_controls_wait_for_their_read.py::test_the_add_tier_form_waits_for_the_tier_list` — requires `admin-tier-add-read-gate` (not built: windows, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

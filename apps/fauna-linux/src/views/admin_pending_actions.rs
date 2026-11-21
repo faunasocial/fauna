@@ -74,12 +74,22 @@ pub fn render(
     while let Some(child) = section.list.first_child() {
         section.list.remove(&child);
     }
+    // The viewing admin's raw actor id — what the shared approve answer keys
+    // on (its own scheduled action is not offered for approval).
+    let viewer = client
+        .actor_id()
+        .and_then(|h| hex::decode(h).ok())
+        .unwrap_or_default();
     for action in rows {
-        section.list.append(&build_row(action, client));
+        section.list.append(&build_row(action, client, &viewer));
     }
 }
 
-fn build_row(action: &AdminPendingActionSummary, client: &Rc<FaunaClient>) -> adw::ActionRow {
+fn build_row(
+    action: &AdminPendingActionSummary,
+    client: &Rc<FaunaClient>,
+    viewer: &[u8],
+) -> adw::ActionRow {
     let description = format!(
         "{} {}",
         fauna_protocol::pending_actions::describe_pending_action(
@@ -120,10 +130,23 @@ fn build_row(action: &AdminPendingActionSummary, client: &Rc<FaunaClient>) -> ad
         .valign(gtk::Align::Center)
         .build();
     crate::testid::set_test_id(&approve_btn, ids::ADMIN_PENDING_ACTION_APPROVE_BUTTON);
+    // `admin.md` § 2 → *What a row offers*: absent on the viewer's own
+    // scheduled action (the nest refuses self-approval); the click asks again.
+    crate::possible::paint(
+        &approve_btn,
+        None,
+        fauna_client_admin::pending_approve_possibility(action, viewer),
+    );
     crate::offline_gate::declare_wire_kind(&approve_btn, "fauna.pending_actions.approve");
     {
         let client = Rc::clone(client);
-        approve_btn.connect_clicked(move |_| client.approve_admin_pending_action(id));
+        let asked = action.clone();
+        let viewer = viewer.to_vec();
+        approve_btn.connect_clicked(move |_| {
+            if fauna_client_admin::pending_approve_possibility(&asked, &viewer).is_possible() {
+                client.approve_admin_pending_action(id);
+            }
+        });
     }
     row.add_suffix(&approve_btn);
 

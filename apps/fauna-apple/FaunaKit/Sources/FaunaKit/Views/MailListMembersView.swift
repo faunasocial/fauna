@@ -236,13 +236,12 @@ struct MailListMemberAddSheet: View {
                 Button(submitting ? "…" : L.mailLists.addMemberSubmit) {
                     Task { await submit() }
                 }
-                .disabled(submitting || address.trimmingCharacters(in: .whitespaces).isEmpty)
                 .accessibilityIdentifier(Ids.mailListMembersAddSheetSubmitButton)
-                .automationActivate(
-                    Ids.mailListMembersAddSheetSubmitButton,
-                    isEnabled: { !submitting && !address.trimmingCharacters(in: .whitespaces).isEmpty }
-                ) { Task { await submit() } }
+                .automationActivate(Ids.mailListMembersAddSheetSubmitButton) { Task { await submit() } }
                 .faunaGate("fauna.bridges.add_list_member")
+                .faunaPossible(submitAnswer)
+                .disabled(submitting)
+                FaunaPossibilityReason(submitAnswer)
                 Button(L.mailLists.addMemberCancel, role: .cancel) { dismiss() }
                     .accessibilityIdentifier(Ids.mailListMembersAddSheetCancelButton)
                     .automationActivate(Ids.mailListMembersAddSheetCancelButton) { dismiss() }
@@ -251,7 +250,13 @@ struct MailListMemberAddSheet: View {
         .formStyle(.grouped)
     }
 
+    /// The shared `member_add_possibility` (`mail-settings.md` § Errors &
+    /// edge cases, *The in-page predicates*): blocked with nothing typed.
+    private var submitAnswer: Possibility { memberAddPossibility(address: address) }
+
     private func submit() async {
+        // The press asks what the paint asked (rule 7): never a silent return.
+        if refusePress(submitAnswer, errorMessage: &error) { return }
         submitting = true
         defer { submitting = false }
         await vm.dispatch(.addMember(address: address.trimmingCharacters(in: .whitespaces)))
@@ -289,13 +294,12 @@ struct MailListMemberImportSheet: View {
                 Button(submitting ? "…" : L.mailLists.importSubmit) {
                     Task { await submit() }
                 }
-                .disabled(submitting || addresses.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .accessibilityIdentifier(Ids.mailListMembersImportSheetSubmitButton)
-                .automationActivate(
-                    Ids.mailListMembersImportSheetSubmitButton,
-                    isEnabled: { !submitting && !addresses.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-                ) { Task { await submit() } }
+                .automationActivate(Ids.mailListMembersImportSheetSubmitButton) { Task { await submit() } }
                 .faunaGate("fauna.bridges.batch_import_list_members")
+                .faunaPossible(submitAnswer)
+                .disabled(submitting)
+                FaunaPossibilityReason(submitAnswer)
                 Button(L.mailLists.importCancel, role: .cancel) { dismiss() }
                     .accessibilityIdentifier(Ids.mailListMembersImportSheetCancelButton)
                     .automationActivate(Ids.mailListMembersImportSheetCancelButton) { dismiss() }
@@ -304,7 +308,13 @@ struct MailListMemberImportSheet: View {
         .formStyle(.grouped)
     }
 
+    /// The shared `member_import_possibility`: blocked until a non-blank
+    /// line is pasted.
+    private var submitAnswer: Possibility { memberImportPossibility(paste: addresses) }
+
     private func submit() async {
+        // The press asks what the paint asked (rule 7): never a silent return.
+        if refusePress(submitAnswer, errorMessage: &error) { return }
         submitting = true
         defer { submitting = false }
         await vm.dispatch(.batchImport(addresses: addresses))

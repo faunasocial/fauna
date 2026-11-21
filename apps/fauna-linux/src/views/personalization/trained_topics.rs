@@ -88,6 +88,44 @@ struct Ctx {
     /// message a later successful read retires; a gesture's error stays until
     /// the next gesture.
     read_error_shown: Cell<bool>,
+    /// A create, rename or delete is on its way — the answers' in-flight half.
+    busy: Cell<bool>,
+    /// Each built row's Publish… button and whether its row has an
+    /// addressable model, repainted with [`paint_controls`].
+    publish_buttons: RefCell<Vec<(gtk::Button, bool)>>,
+}
+
+/// The create / save-name button's answer, painted on it and asked again by
+/// the press and the input's Enter (`docs/goal/ui/settings.md` § Errors & edge
+/// cases, *Personal form submits paint from their draft*): the shared
+/// `fauna_client_personalization::drafts::factor_name_possibility`.
+fn name_answer(ctx: &Ctx) -> fauna_core::possibility::Possibility {
+    fauna_client_personalization::drafts::factor_name_possibility(
+        &ctx.w.input.text(),
+        ctx.busy.get(),
+    )
+}
+
+/// A row's Publish… answer: absent with no addressable model, blocked while
+/// the live feed manager — whose loaded window is the corpus — is not up, so
+/// no sheet opens onto nothing
+/// (`fauna_client_personalization::drafts::publish_open_possibility`).
+fn publish_open_answer(ctx: &Ctx, has_factor_key: bool) -> fauna_core::possibility::Possibility {
+    fauna_client_personalization::drafts::publish_open_possibility(
+        has_factor_key,
+        crate::feed::host::manager().is_some(),
+        ctx.busy.get(),
+    )
+}
+
+/// Repaint the create button and every row's Publish… from their answers.
+fn paint_controls(ctx: &Ctx) {
+    crate::form_gate::paint_submit(&ctx.w.create_button, &name_answer(ctx), None);
+    for (button, has_key) in ctx.publish_buttons.borrow().iter() {
+        let answer = publish_open_answer(ctx, *has_key);
+        button.set_visible(answer.is_shown());
+        crate::form_gate::paint_submit(button, &answer, None);
+    }
 }
 
 /// Build the facet's static widget tree — every static ui.yaml ID present, no
@@ -178,7 +216,17 @@ pub fn wire(
         publish: RefCell::new(Some(publish)),
         painted: RefCell::new(None),
         read_error_shown: Cell::new(false),
+        busy: Cell::new(false),
+        publish_buttons: RefCell::new(Vec::new()),
     });
+    paint_controls(&ctx);
+    {
+        let ctx = Rc::clone(&ctx);
+        ctx.w
+            .input
+            .clone()
+            .connect_changed(move |_| paint_controls(&ctx));
+    }
 
     {
         let ctx = Rc::clone(&ctx);
@@ -199,6 +247,8 @@ impl TrainedTopics {
     /// Load the registry + per-factor counts.
     pub fn refresh(&self) {
         let ctx = &self.ctx;
+        // The feed manager may have come up since the rows were painted.
+        paint_controls(ctx);
         let store = crate::account_runtime::handle_source();
         let nest = ctx.nest.clone();
         let ctx_render = Rc::clone(ctx);
@@ -234,21 +284,20 @@ fn apply_read(ctx: &Rc<Ctx>, result: FacetResult) {
 }
 
 /// Commit the name-input: a rename when a row retargeted it, else a create.
-/// A blank buffer is refused here, before the round trip, with the shared
-/// [`TrainedTopicsError::BlankName`] sentence — the one tui paints — never a
-/// silent no-op that leaves the user wondering why nothing was created.
+/// The press asks [`name_answer`] first and refuses with its reason — the one
+/// tui paints — never a silent no-op that leaves the user wondering why
+/// nothing was created.
 fn submit(ctx: &Rc<Ctx>) {
-    let name = ctx.w.input.text().trim().to_string();
-    if name.is_empty() {
-        let refusal = localize(TrainedTopicsError::BlankName);
-        crate::settings::render_error_label(&ctx.error_label, Some(&refusal));
+    if crate::form_gate::refuse(&name_answer(ctx), &ctx.error_label) {
         return;
     }
+    let name = ctx.w.input.text().trim().to_string();
     let renaming = ctx.renaming.borrow().clone();
     let store = crate::account_runtime::handle_source();
     let nest = ctx.nest.clone();
     let ctx_render = Rc::clone(ctx);
-    ctx.w.create_button.set_sensitive(false);
+    ctx.busy.set(true);
+    paint_controls(ctx);
     spawn_with_snapshot(
         &ctx.rt,
         move || async move {
@@ -274,7 +323,7 @@ fn submit(ctx: &Rc<Ctx>) {
 
 /// Render a load/mutation outcome (GTK main thread).
 fn apply(ctx: &Rc<Ctx>, result: FacetResult) {
-    ctx.w.create_button.set_sensitive(true);
+    ctx.busy.set(false);
     ctx.read_error_shown.set(false);
     match result {
         Ok(rows) => {
@@ -291,6 +340,7 @@ fn apply(ctx: &Rc<Ctx>, result: FacetResult) {
         }
         Err(msg) => crate::settings::render_error_label(&ctx.error_label, Some(&msg)),
     }
+    paint_controls(ctx);
 }
 
 /// Whether the publish sheet is open — while it is, its own lifecycle owns
@@ -312,10 +362,12 @@ fn render_rows(ctx: &Rc<Ctx>, rows: &[TrainedTopicRow]) {
     while let Some(child) = ctx.w.list.first_child() {
         ctx.w.list.remove(&child);
     }
+    ctx.publish_buttons.borrow_mut().clear();
     for row in rows {
         ctx.w.list.append(&build_row(ctx, row));
     }
     ctx.w.empty.set_visible(rows.is_empty());
+    paint_controls(ctx);
 }
 
 /// One row: name + example count + rename/delete.
@@ -420,10 +472,17 @@ fn build_row(ctx: &Rc<Ctx>, factor: &TrainedTopicRow) -> gtk::Box {
         let ctx = Rc::clone(ctx);
         let id = factor.id.clone();
         // A corrupt (non-16-byte) id has no addressable model — nothing to
-        // score, nothing to publish — so the row simply offers no publish.
+        // score, nothing to publish — so the row offers no publish (absent);
+        // without the live feed manager the press refuses with its reason.
         let key = factor.factor_key.clone();
-        publish_btn.set_sensitive(key.is_some());
+        ctx.publish_buttons
+            .borrow_mut()
+            .push((publish_btn.clone(), key.is_some()));
         publish_btn.connect_clicked(move |_| {
+            if crate::form_gate::refuse(&publish_open_answer(&ctx, key.is_some()), &ctx.error_label)
+            {
+                return;
+            }
             let (Some(sheet), Some(key)) = (ctx.publish.borrow().clone(), key.clone()) else {
                 return;
             };

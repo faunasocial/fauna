@@ -43,6 +43,10 @@ windows = { version = "0.61", features = [
     # the WinRT read surface is measurably dead for unpackaged processes (see
     # SYNC_ROOT_MANAGER_KEY's doc + tests/shell_enumeration_probe.rs).
     "Win32_System_Registry",
+    # package_family_installed: whether a root's registering package is still
+    # installed for this user (GetPackagesByPackageFamily), the startup janitor's
+    # test for a removed package's leftover root.
+    "Win32_Storage_Packaging_Appx",
 ] }
 
 # The live cfapi harness (tests/live_population.rs) needs a scratch sync root.

@@ -13,6 +13,7 @@
 //! reach for keys. No local cache: the page is a read-through.
 
 use fauna_core::localized::LocalizedText;
+use fauna_core::possibility::{Possibility, ReadState};
 use fauna_protocol::sessions::SessionInfo;
 
 /// i18n keys this fold (and the page) resolve — `i18n/strings/en.yaml`
@@ -29,6 +30,7 @@ pub mod keys {
     pub const LOAD_FAILED: &str = "sessions.load_failed";
     pub const ACT_FAILED: &str = "sessions.act_failed";
     pub const NO_OWN_SESSION: &str = "sessions.no_own_session";
+    pub const NO_OTHER_SESSIONS: &str = "sessions.no_other_sessions";
     pub const LOCKOUT_WRONG_WORD: &str = "sessions.lockout_wrong_word";
 }
 
@@ -251,6 +253,31 @@ where
 /// arm and not only in the render (`ui/sessions.md` § Errors & edge cases).
 pub fn lockout_word_refusal(typed: &str, word: &str) -> Option<LocalizedText> {
     (typed != word).then(|| LocalizedText::key_arg(keys::LOCKOUT_WRONG_WORD, "word", word))
+}
+
+/// `sessions-revoke-others-button`'s answer (`docs/goal/ui/README.md`
+/// § Offer only what is possible, rules 2 and 5; the ruling is
+/// `docs/goal/ui/sessions.md` § Errors & edge cases): still loading before the
+/// first read folds, the read's failure while it holds no rows, nothing to end
+/// when no other sign-in is listed (the own row is the only one — the nest
+/// would revoke nothing), and in flight while an act is on its way. The
+/// press asks the same answer.
+pub fn revoke_others_possibility(snapshot: Option<&SessionsSnapshot>, busy: bool) -> Possibility {
+    let read = match snapshot {
+        None => Possibility::once_read(false),
+        Some(s) if s.rows.is_empty() && s.error.is_some() => {
+            Possibility::from_read(ReadState::Failed)
+        }
+        Some(s) if !s.rows.iter().any(|r| r.can_revoke) => {
+            Possibility::blocked(LocalizedText::key(keys::NO_OTHER_SESSIONS))
+        }
+        Some(_) => Possibility::Possible,
+    };
+    read.and(if busy {
+        Possibility::blocked(LocalizedText::key("common.in_flight"))
+    } else {
+        Possibility::Possible
+    })
 }
 
 /// A failed read → the page error, carrying the transport's own words.
@@ -480,5 +507,49 @@ mod tests {
         with_ip.ip_address = Some("192.0.2.7".into());
         let detail = session_detail(&with_ip, |t| t.to_string(), |_| None::<String>);
         assert_eq!(detail.args["address"], "192.0.2.7");
+    }
+
+    #[test]
+    fn revoke_others_waits_for_the_read_and_for_another_sign_in() {
+        let key = |p: Possibility| p.reason().map(|r| r.key.clone());
+        let row = |id: &str, can_revoke: bool| SessionRowView {
+            token_id: id.into(),
+            kind: LocalizedText::key(keys::KIND_APP),
+            mark: None,
+            created_at: NOW,
+            last_used_at: NOW,
+            expires_at: NOW + 60,
+            ip_address: None,
+            can_revoke,
+        };
+        assert_eq!(
+            key(revoke_others_possibility(None, false)),
+            Some("common.still_loading".into())
+        );
+        let failed = SessionsSnapshot {
+            rows: vec![],
+            error: Some(load_failed("offline")),
+        };
+        assert_eq!(
+            key(revoke_others_possibility(Some(&failed), false)),
+            Some("common.load_failed".into())
+        );
+        let alone = SessionsSnapshot {
+            rows: vec![row("own", false)],
+            error: None,
+        };
+        assert_eq!(
+            key(revoke_others_possibility(Some(&alone), false)),
+            Some(keys::NO_OTHER_SESSIONS.into())
+        );
+        let others = SessionsSnapshot {
+            rows: vec![row("own", false), row("phone", true)],
+            error: None,
+        };
+        assert!(revoke_others_possibility(Some(&others), false).is_possible());
+        assert_eq!(
+            key(revoke_others_possibility(Some(&others), true)),
+            Some("common.in_flight".into())
+        );
     }
 }

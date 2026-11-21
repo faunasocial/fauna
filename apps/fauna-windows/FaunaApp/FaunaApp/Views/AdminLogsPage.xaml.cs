@@ -6,6 +6,7 @@ using FaunaApp.Core.Logs;
 using FaunaApp.Core.Services;
 using FaunaApp.Core.ViewModels;
 using FaunaApp.Helpers;
+using Microsoft.UI.Xaml.Automation;
 
 namespace FaunaApp.Views;
 
@@ -78,10 +79,25 @@ public sealed partial class AdminLogsPage : Page
         UpdateEmpty();
     }
 
+    /// <summary><c>log-copy-button</c>: asks the shared ring answer again (an empty
+    /// ring copies nothing), then confirms a copy that reached the clipboard ("Copied!"
+    /// + its <c>copied</c> attr) or puts <c>common.copy_failed</c> on
+    /// <c>error-message</c>.</summary>
     private void CopyButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_vm is null) return;
-        ClipboardHelper.CopyText(_vm.CopyText());
+        if (_vm?.CopyPayload() is not { } text) return;
+        Exception? failure = null;
+        try
+        {
+            ClipboardHelper.CopyText(text);
+        }
+        catch (Exception ex)
+        {
+            failure = ex;
+        }
+        _vm.RecordCopyOutcome(text, failure);
+        RenderError(_vm.Error);
+        UpdateEmpty();
     }
 
     private async void AuditMoreButton_Click(object sender, RoutedEventArgs e)
@@ -102,10 +118,17 @@ public sealed partial class AdminLogsPage : Page
         AuditMoreButton.IsEnabled = _vm.AuditMoreEnabled;
     }
 
+    /// <summary>The empty line and <c>log-copy-button</c>, painted from the shared
+    /// <see cref="AdminLogsViewModel.RingAction"/> answer. Its blocked reason IS the
+    /// page's own empty line (<c>admin.logs_page.empty</c>), already visible, so no
+    /// second copy is painted beside the button.</summary>
     private void UpdateEmpty()
     {
         if (_vm is null) return;
         EmptyPlaceholder.Visibility = _vm.Entries.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        CopyButton.ApplyPossibility(_vm.RingAction());
+        CopyButton.Content = _vm.Copied is null ? Strings.Get("logs/copy_button") : Strings.Get("common/copied");
+        AutomationProperties.SetHelpText(CopyButton, _vm.Copied ?? string.Empty);
     }
 
     private void RenderError(string? msg)

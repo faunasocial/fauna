@@ -12,8 +12,8 @@
   // `error-message` (no duplicate IDs) via the bindable `error`.
   // Behavior + IDs: docs/goal/ui/mail-settings.md, ui.yaml § mail-settings.
   import { identity } from '#lib/store';
+  import { sharedMailSettingsMachine } from '#lib/mail-usable';
   import {
-    mailSettingsMachine,
     setupStatus,
     forwardAllToGet,
     forwardAllToSet,
@@ -43,7 +43,12 @@
     passwordStrengthLabel,
     settingsStatusLabel,
     resolveMuaUsername,
+    mailUsableUnbuilt,
+    readPossibility,
   } from '#lib/wasm';
+  import { blockedReason, credentialSectionPaint, paintAnswer, refusal } from '#lib/mail-affordances';
+  import { readFailed, type ReadWord } from '#lib/read-gate';
+  import type { Possibility } from '#lib/possibility';
   import { resolveLocalized, resolveComposed } from '#lib/i18n/localized';
   import { onMount } from 'svelte';
   import { configStageSettled } from '#lib/succession-aftermath';
@@ -138,18 +143,57 @@
 
   let machine: WasmMailSettingsMachine | null = null;
   let snap = $state<MailSnapshot | null>(null);
+  // The wasm core is loaded — the shared answers are askable from here on
+  // (before it, a waiting control paints disabled with no reason: `paintAnswer`).
+  let wasmReady = $state(false);
 
-  // The credential-management reachability predicate — email OR CalDAV OR CardDAV
-  // on, OR >=1 folder served over WebDAV. All ride the one shared MSEK +
-  // `default` credential, so the credential-management section (keys explainer,
-  // credentials list, add/rotate) and the serve-here toggle render whenever a
-  // mailbox exists or is needed, NOT only when email is on (mail-settings.md
-  // § CalDAV-only mailbox). The email IMAP/SMTP connection block stays gated on
-  // `enabled`. Computed once in shared Rust (`MailSettingsSnapshot::
-  // credential_management_reachable`) — every app reads the field rather than
-  // re-deriving the disjunction, so a future DAV sibling widens it in one place
-  // (priority #2/#4).
-  const mailbox = $derived(Boolean(snap?.credential_management_reachable));
+  // Controls wait for their reads (`mail-settings.md` § Errors & edge cases,
+  // *Controls wait for their reads*; `ui/README.md` § Offer only what is
+  // possible, rules 5–7): each control that writes what a read decides is
+  // blocked still loading before that read and failed to load after a failed
+  // one (a failure after a success keeps the earlier answer — `readFailed`),
+  // and its handler asks the same answer again at the press and refuses with
+  // its reason, sending nothing. The answers are shared Rust over wasm; the
+  // read words live beside the reads they track. Matches tui's
+  // `MailState::{enable,forward_all,autorespond}_answer`.
+  //
+  // `mail-settings-enabled-toggle`: the shared
+  // `MailSettingsSnapshot::enable_toggle_possibility` over the machine's LIVE
+  // snapshot — still loading before the first hydrate (no machine yet included),
+  // then blocked by the unavailable notice for a turn-on on a box that cannot
+  // serve mail — so the enable form never opens on the never-read "off".
+  function enableAnswerNow(): Possibility | null {
+    if (machine) return machine.enableTogglePossibility() as Possibility;
+    return wasmReady ? readPossibility('pending') : null;
+  }
+  const enablePaint = $derived.by(() => {
+    void snap; // re-read on every snapshot
+    return paintAnswer(enableAnswerNow());
+  });
+
+  // The credential-management section's answer — the shared
+  // `MailSettingsSnapshot::credential_management_possibility()` over the
+  // reachability predicate (email OR CalDAV OR CardDAV on, OR >=1 folder served
+  // over WebDAV; mail-settings.md § CalDAV-only mailbox), read off the machine's
+  // LIVE snapshot, never re-derived (`mail-settings.md` § Errors & edge cases,
+  // *The in-page predicates*; `ui/README.md` § Offer only what is possible,
+  // rules 2 and 6). Absent → no section; blocked (mail off, nothing else
+  // reaching the credential) → Add password visible, disabled, its reason
+  // beside it, the rest hidden; possible → the whole section (keys explainer,
+  // add/rotate, serve-here toggle, connection details). `snap` is read so the
+  // answer re-reads on every snapshot. Matches tui's `mail_elements`.
+  const credentialAnswer = $derived.by(() =>
+    snap && machine ? (machine.credentialManagementPossibility() as Possibility) : null,
+  );
+  const credentials = $derived(credentialSectionPaint(credentialAnswer));
+  const mailbox = $derived(credentials.sectionShown);
+
+  // A gesture whose machine is missing refuses with the shared unbuilt reason
+  // on the page's `error-message`, never silently (`ui/README.md` § Offer only
+  // what is possible, rule 7).
+  function refuseUnbuilt(): void {
+    error = resolveLocalized(blockedReason(mailUsableUnbuilt()));
+  }
 
   // Inline add-credential form (reveal, not modal — matches linux). The form is
   // opened from two entry points with different intent: the enabled-toggle
@@ -190,10 +234,37 @@
       : [...excludedCredentials, id];
   }
 
-  const rotationBusy = $derived(
-    snap?.pending_rotation != null ||
-      (typeof snap?.status === 'object' && snap?.status !== null && 'RotationInProgress' in snap.status),
-  );
+  // This page's own rotation, from confirm until its dispatch returns.
+  let rotating = $state(false);
+  // Rotate keys' and its confirm's answer: the shared
+  // `MailSettingsSnapshot::rotate_keys_possibility` over the machine's LIVE
+  // snapshot — blocked with `mail_settings.rotate_pending` while a rotation
+  // waits for the banner's Resume, *still saving* while this page's own runs
+  // (`mail-settings.md` § Errors & edge cases, *The in-page predicates*).
+  function rotateAnswerNow(): Possibility | null {
+    if (!snap || !machine) return null;
+    const running =
+      rotating ||
+      (typeof snap.status === 'object' && snap.status !== null && 'RotationInProgress' in snap.status);
+    return machine.rotateKeysPossibility(running) as Possibility;
+  }
+  const rotatePaint = $derived(paintAnswer(rotateAnswerNow()));
+
+  function openRotate(): void {
+    // The press asks the same answer again; a refusal says why (rules 6, 7).
+    if (!machine) {
+      refuseUnbuilt();
+      return;
+    }
+    const verdict = refusal(rotateAnswerNow());
+    if (verdict.refused) {
+      if (verdict.reason) error = resolveLocalized(verdict.reason);
+      return;
+    }
+    excludedCredentials = [];
+    rotateOpen = true;
+    error = '';
+  }
 
   // Disable-mail confirm (destructive overlay — mail-settings.md § Disable mail).
   // Flipping the enabled-toggle off opens this; confirming dispatches DisableMail
@@ -241,18 +312,41 @@
   let forwardPerHourInput = $state('');
   let forwardCeiling = $state<number | null>(null);
   let forwardingLoaded = false;
+  // Where the forward-all read stands: the address input and its commit wait
+  // on it, so an empty pre-read draft never clears a forward.
+  let forwardAllRead = $state<ReadWord>('pending');
+  const forwardAllAnswer = $derived(wasmReady ? readPossibility(forwardAllRead) : null);
+  const forwardAllPaint = $derived(paintAnswer(forwardAllAnswer));
+  // Where the forward-rate read stands: the limit and its commit wait on it,
+  // since the ceiling that bounds the value comes with it (tui's
+  // `forward_per_hour_answer`; the ceiling is only ever set from a read).
+  let forwardPerHourRead = $state<ReadWord>('pending');
+  function forwardPerHourAnswerNow(): Possibility | null {
+    if (!wasmReady) return null;
+    return readPossibility(forwardCeiling !== null ? 'resolved' : forwardPerHourRead);
+  }
+  const forwardPerHourPaint = $derived(paintAnswer(forwardPerHourAnswerNow()));
 
   async function loadForwarding(secretHex: string): Promise<void> {
     forwardingLoaded = true;
     try {
       const address = await forwardAllToGet(secretHex);
       forwardAllToInput = address ?? '';
+      forwardAllRead = 'resolved';
+    } catch (e) {
+      forwardAllRead = readFailed(forwardAllRead);
+      forwardingLoaded = false;
+      error = e instanceof Error ? e.message : String(e);
+    }
+    try {
       const limit = await forwardPerHourGet(secretHex);
       forwardPerHourInput = String(limit.value);
       forwardCeiling = limit.ceiling;
+      forwardPerHourRead = 'resolved';
     } catch (e) {
+      forwardPerHourRead = readFailed(forwardPerHourRead);
       forwardingLoaded = false;
-      error = e instanceof Error ? e.message : String(e);
+      if (!error) error = e instanceof Error ? e.message : String(e);
     }
   }
 
@@ -264,6 +358,11 @@
   async function commitForwardAllTo(): Promise<void> {
     const id = $identity;
     if (!id?.secretHex) return;
+    const verdict = refusal(wasmReady ? readPossibility(forwardAllRead) : null);
+    if (verdict.refused) {
+      if (verdict.reason) error = resolveLocalized(verdict.reason);
+      return;
+    }
     error = '';
     const outcome = forwardAllToDraftOutcome(forwardAllToInput);
     if (outcome.kind === 'refused') {
@@ -280,9 +379,15 @@
 
   async function commitForwardPerHour(): Promise<void> {
     const id = $identity;
-    // No ceiling yet = the first read has not resolved: nothing to bound the
-    // value by, so the commit is inert.
-    if (!id?.secretHex || forwardCeiling === null) return;
+    if (!id?.secretHex) return;
+    // No ceiling yet = the read has not resolved: nothing to bound the value
+    // by, so the commit refuses with the read's answer (still loading, or
+    // failed to load) — never silent (rules 5 and 7).
+    const verdict = refusal(forwardPerHourAnswerNow());
+    if (verdict.refused || forwardCeiling === null) {
+      if (verdict.refused && verdict.reason) error = resolveLocalized(verdict.reason);
+      return;
+    }
     error = '';
     const outcome = forwardPerHourDraftOutcome(forwardPerHourInput, forwardCeiling);
     if (outcome.kind === 'refused') {
@@ -309,12 +414,22 @@
   let autorespondMessageInput = $state('');
   let quotas = $state<unknown>(null);
   let accountLoaded = false;
+  // Where the automatic-reply read stands: the message input and its commit —
+  // which also turns the reply on — wait on it, so an empty pre-read draft
+  // never writes a reply filter. A held reply is only ever set from a read.
+  let autorespondRead = $state<ReadWord>('pending');
+  function autorespondAnswerNow(): Possibility | null {
+    if (!wasmReady) return null;
+    return readPossibility(autorespond !== null ? 'resolved' : autorespondRead);
+  }
+  const autorespondPaint = $derived(paintAnswer(autorespondAnswerNow()));
 
   function applyAutorespond(read: AutoRespond): void {
     // An off reply has no body; keep the draft so turning it back on sends the
     // last words.
     if (read.enabled) autorespondMessageInput = read.message;
     autorespond = read;
+    autorespondRead = 'resolved';
   }
 
   async function loadAccount(secretHex: string): Promise<void> {
@@ -324,6 +439,7 @@
       applyAutorespond(await emailAutorespondGet(secretHex));
       quotas = await mailQuotasGet(secretHex);
     } catch (e) {
+      autorespondRead = readFailed(autorespondRead);
       accountLoaded = false;
       error = e instanceof Error ? e.message : String(e);
     }
@@ -355,6 +471,11 @@
   async function setAutorespond(on: boolean): Promise<void> {
     const id = $identity;
     if (!id?.secretHex) return;
+    const verdict = refusal(autorespondAnswerNow());
+    if (verdict.refused) {
+      if (verdict.reason) error = resolveLocalized(verdict.reason);
+      return;
+    }
     error = '';
     let message: string | null = null;
     if (on) {
@@ -382,7 +503,11 @@
     if (!id?.secretHex) return;
     try {
       await ensureWasm();
-      machine = await mailSettingsMachine(id.secretHex);
+      wasmReady = true;
+      // The session's ONE machine: the Settings rail's mail-usable gate reads
+      // its live snapshot, so turning mail on here lights the mail rows at once
+      // (`mail-settings.md` § Errors & edge cases, the mail-usable gate).
+      machine = await sharedMailSettingsMachine(id.secretHex);
       await machine.hydrate();
       applySnapshot();
     } catch (e) {
@@ -411,6 +536,14 @@
   const unavailable = $derived(!snap?.enabled && Boolean(snap?.mail_unavailable_here));
 
   function onToggle(): void {
+    // The press asks the toggle's answer again (rule 6): before the first
+    // hydrate it refuses still loading, on a box that cannot serve mail a
+    // turn-on refuses with the unavailable notice — nothing opens.
+    const verdict = refusal(enableAnswerNow());
+    if (verdict.refused) {
+      if (verdict.reason) error = resolveLocalized(verdict.reason);
+      return;
+    }
     if (snap?.enabled) {
       disableConfirmOpen = true;
       error = '';
@@ -422,8 +555,18 @@
   }
 
   function openAddCredential(): void {
-    // Add a credential onto the existing mailbox (the button only renders when a
-    // mailbox is provisioned, so the MSEK is always present → AddCredential).
+    // Add a credential onto the existing mailbox — only while the shared answer
+    // is possible (a mailbox is provisioned, so the MSEK is present →
+    // AddCredential); the press asks the answer again (rule 6).
+    if (!machine) {
+      refuseUnbuilt();
+      return;
+    }
+    const verdict = refusal(machine.credentialManagementPossibility() as Possibility);
+    if (verdict.refused) {
+      if (verdict.reason) error = resolveLocalized(verdict.reason);
+      return;
+    }
     openForm('add');
   }
 
@@ -482,7 +625,10 @@
   }
 
   async function submitForm(): Promise<void> {
-    if (!machine) return;
+    if (!machine) {
+      refuseUnbuilt();
+      return;
+    }
     const display_name = nameInput.trim() || 'Default';
     error = '';
     let secretBytes: Uint8Array;
@@ -536,7 +682,10 @@
   // flag. The snapshot returns enabled:false with an empty credentials list; the
   // re-render flips the toggle back to "Enable mail". Cancel/dismiss is a no-op.
   async function confirmDisable(): Promise<void> {
-    if (!machine) return;
+    if (!machine) {
+      refuseUnbuilt();
+      return;
+    }
     error = '';
     try {
       await live(() => machine!.dispatch('DisableMail'));
@@ -559,7 +708,11 @@
   // reflects the nest's flag, not an optimistic local guess
   // (mail-settings.md § Local IMAP/CalDAV-serving toggle).
   async function onServeHereToggle(): Promise<void> {
-    if (!machine || !snap) return;
+    if (!machine) {
+      refuseUnbuilt();
+      return;
+    }
+    if (!snap) return;
     error = '';
     const enabled = !snap.serving_enabled;
     try {
@@ -572,7 +725,18 @@
   }
 
   async function confirmRotate(): Promise<void> {
-    if (!machine) return;
+    if (!machine) {
+      refuseUnbuilt();
+      return;
+    }
+    // The confirm asks the same answer as the button that opened it; a
+    // pending rotation is resumed from its banner, not confirmed again.
+    const verdict = refusal(rotateAnswerNow());
+    if (verdict.refused) {
+      if (verdict.reason) error = resolveLocalized(verdict.reason);
+      return;
+    }
+    rotating = true;
     try {
       await live(() => machine!.dispatch({ StartRotation: { excluded_credentials: excludedCredentials } }));
       applySnapshot();
@@ -581,11 +745,16 @@
     } catch (e) {
       applySnapshot();
       if (!error) error = e instanceof Error ? e.message : String(e);
+    } finally {
+      rotating = false;
     }
   }
 
   async function resumeRotation(): Promise<void> {
-    if (!machine) return;
+    if (!machine) {
+      refuseUnbuilt();
+      return;
+    }
     try {
       await live(() => machine!.dispatch('ResumeRotation'));
       applySnapshot();
@@ -629,7 +798,8 @@
     class:on={snap?.enabled}
     data-testid={IDS.MAIL_SETTINGS_ENABLED_TOGGLE}
     data-state={snap?.enabled ? 'on' : unavailable ? 'unavailable' : 'off'}
-    disabled={unavailable}
+    disabled={enablePaint.disabled}
+    title={enablePaint.reason ? resolveLocalized(enablePaint.reason) : undefined}
     onclick={onToggle}
   >{t.settings.mail.enable_title}</button>
 
@@ -660,24 +830,46 @@
     </div>
   {/if}
 
-  <!-- Add-credential is reachable whenever a mailbox is provisioned (email OR
-       CalDAV) so a CalDAV-only actor can mint + manage its one shared bridge
-       password; rotate appears once ≥1 credential exists (mirrors the linux lead:
-       manage_group on `mailbox`, rotate on `!credentials.is_empty()`). -->
-  {#if mailbox}
+  <!-- Add-credential paints from the shared credential answer: live whenever a
+       mailbox is provisioned (email OR CalDAV) so a CalDAV-only actor can mint +
+       manage its one shared bridge password; while mail is off it stays visible,
+       disabled, with the reason naming the enable toggle above; on a box that can
+       never serve mail it is not shown. Rotate appears once ≥1 credential exists
+       on a live section (mirrors the linux lead: manage_group on `mailbox`,
+       rotate on `!credentials.is_empty()`). -->
+  {#if credentials.addShown}
     <div class="actions">
-      <button class="btn" data-testid={IDS.MAIL_SETTINGS_ADD_CREDENTIAL_BUTTON} onclick={openAddCredential}>
+      <button
+        class="btn"
+        data-testid={IDS.MAIL_SETTINGS_ADD_CREDENTIAL_BUTTON}
+        disabled={credentials.addDisabled}
+        title={credentials.reason ? resolveLocalized(credentials.reason) : undefined}
+        onclick={openAddCredential}
+      >
         {t.settings.mail.add_credential}
       </button>
-      {#if (snap?.credentials.length ?? 0) >= 1}
-        <!-- Disabled while a rotation is pending or running (mail-settings.md §
+      {#if mailbox && (snap?.credentials.length ?? 0) >= 1}
+        <!-- Painted from the shared rotate answer: blocked with its reason
+             while a rotation is pending or running (mail-settings.md §
              Architectural rules 5); the shared machine already refuses a second
              StartRotation, this is the visible half. -->
-        <button class="btn" data-testid={IDS.MAIL_SETTINGS_ROTATE_KEYS_BUTTON} disabled={rotationBusy} onclick={() => { excludedCredentials = []; rotateOpen = true; error = ''; }}>
+        <button
+          class="btn"
+          data-testid={IDS.MAIL_SETTINGS_ROTATE_KEYS_BUTTON}
+          disabled={rotatePaint.disabled}
+          title={rotatePaint.reason ? resolveLocalized(rotatePaint.reason) : undefined}
+          onclick={openRotate}
+        >
           {t.settings.mail.rotate_keys}
         </button>
       {/if}
     </div>
+    {#if mailbox && (snap?.credentials.length ?? 0) >= 1 && rotatePaint.reason}
+      <p class="muted small">{resolveLocalized(rotatePaint.reason)}</p>
+    {/if}
+    {#if credentials.reason}
+      <p class="muted small">{resolveLocalized(credentials.reason)}</p>
+    {/if}
   {/if}
 
   <!-- Local IMAP/CalDAV-serving toggle (mail-settings.md § Local IMAP/CalDAV-
@@ -750,8 +942,14 @@
         type="text"
         data-testid={IDS.MAIL_SETTINGS_AUTORESPOND_MESSAGE_INPUT}
         bind:value={autorespondMessageInput}
+        disabled={autorespondPaint.disabled}
         onkeydown={(e) => { if (e.key === 'Enter') void setAutorespond(true); }}
       />
+      <!-- The input keeps its prompt as its label, so its reason is a line of
+           its own while it waits for the reply's read. -->
+      {#if autorespondPaint.reason}
+        <p class="muted small">{resolveLocalized(autorespondPaint.reason)}</p>
+      {/if}
     </div>
     {#if quotas}
       {@const notice = mailOverQuotaNotice(quotas)}
@@ -770,8 +968,12 @@
         type="text"
         data-testid={IDS.MAIL_SETTINGS_FORWARD_ALL_TO_INPUT}
         bind:value={forwardAllToInput}
+        disabled={forwardAllPaint.disabled}
         onkeydown={(e) => { if (e.key === 'Enter') void commitForwardAllTo(); }}
       />
+      {#if forwardAllPaint.reason}
+        <p class="muted small">{resolveLocalized(forwardAllPaint.reason)}</p>
+      {/if}
       <p class="muted small">{t.mail_settings.forward_all_to_subtitle}</p>
       <label class="muted small" for="forward-per-hour">{t.mail_settings.forward_per_hour_label}</label>
       <input
@@ -779,9 +981,13 @@
         class="input"
         type="text"
         data-testid={IDS.MAIL_SETTINGS_FORWARD_PER_HOUR_INPUT}
+        disabled={forwardPerHourPaint.disabled}
         bind:value={forwardPerHourInput}
         onkeydown={(e) => { if (e.key === 'Enter') void commitForwardPerHour(); }}
       />
+      {#if forwardPerHourPaint.reason}
+        <p class="muted small">{resolveLocalized(forwardPerHourPaint.reason)}</p>
+      {/if}
       {#if forwardCeiling !== null}
         <p class="muted small">{resolveLocalized(forwardPerHourHint(forwardCeiling))}</p>
       {/if}
@@ -884,7 +1090,12 @@
       </div>
       <span class="muted small" data-testid={IDS.MAIL_ROTATE_KEYS_PROGRESS_INDICATOR}>{statusLabel(snap?.status, Boolean(snap?.enabled))}</span>
       <div class="form-actions">
-        <button class="btn primary" data-testid={IDS.MAIL_ROTATE_KEYS_CONFIRM_BUTTON} onclick={confirmRotate}>
+        <button
+          class="btn primary"
+          data-testid={IDS.MAIL_ROTATE_KEYS_CONFIRM_BUTTON}
+          disabled={rotatePaint.disabled}
+          onclick={confirmRotate}
+        >
           {t.settings.mail.rotate_confirm}
         </button>
         <button class="btn" data-testid={IDS.MAIL_ROTATE_KEYS_CANCEL_BUTTON} onclick={() => { rotateOpen = false; }}>

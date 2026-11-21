@@ -27,7 +27,6 @@
 //! |---|---|
 //! | Show the substep row? | `StepSnapshot::shows_substep` |
 //! | Show the error row? | `StepSnapshot::shows_error` |
-//! | Append "(attempt n of m)"? | `StepSnapshot::shows_attempt_suffix` |
 //! | Which buttons are live? | `OverallStatus::{is_idle,is_running,can_retry,can_continue}` |
 //! | Step glyph / label / substep text | `status_glyph` / `step_label` / `substep_label` |
 //! | Elapsed time | `progress::elapsed_display` |
@@ -39,7 +38,6 @@
 
 use fauna_i18n::strings::common;
 use fauna_i18n::strings::onboarding::nest_provisioning as t;
-use fauna_i18n::strings::onboarding::provision;
 use fauna_provisioning::progress::{self, StepSnapshot};
 use fauna_ui_ids as ids;
 
@@ -58,21 +56,24 @@ pub fn description(w: &Wizard) -> Vec<String> {
 }
 
 /// The text of one step's substep line: the typed `SubstepKey` through the i18n
-/// table (never English), plus the attempt suffix when the shared snapshot says
-/// to show one.
+/// table (never English). No attempt count is ever shown
+/// (`onboarding-provisioning.md` § 6 *A running step shows activity, never an
+/// attempt count*).
 fn substep_text(step: &StepSnapshot) -> String {
-    let mut text = step
-        .substep
+    step.substep
         .map(|k| localized(&progress::substep_label(k, step.last_error.clone())))
-        .unwrap_or_default();
-    if step.shows_attempt_suffix {
-        // The template already carries its own leading space.
-        text.push_str(&provision::step_attempt_template(
-            &step.attempt.to_string(),
-            &step.max_attempts.to_string(),
-        ));
+        .unwrap_or_default()
+}
+
+/// The `action` attribute a test reads off a `provisioning-dns-plan-row`.
+fn dns_plan_action_key(a: fauna_provisioning::dns_plan::DnsPlanAction) -> &'static str {
+    use fauna_provisioning::dns_plan::DnsPlanAction as A;
+    match a {
+        A::Keep => "keep",
+        A::Add => "add",
+        A::Change => "change",
+        A::Remove => "remove",
     }
-    text
 }
 
 pub fn elements(w: &Wizard) -> Vec<Element> {
@@ -110,11 +111,26 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
     // Pre-derived by the shared machine (`resolve_nested`, not `localized`/
     // `resolve`: `{label}` carries the step's own i18n key). Mirrors linux's
     // `onboarding::nest_provisioning`.
+    // On a run entered from the choose-providers page the price is agreed
+    // here, at the purchase: the confirm sits directly under the domain line
+    // and gates *Buy and set up* (`onboarding-provisioning.md` § 3d *The
+    // choices on the setting-things-up page*). Its label is § 4's, unchanged.
+    let choices = m.provisioning_choices_visible();
     if let Some(text) = m.bom_domain_line() {
         out.push(Element::label(
             ids::PROVISIONING_BOM_DOMAIN_LINE,
             text.resolve_nested(fauna_i18n::strings::lookup),
         ));
+        // Whether the run buys — on the manual DNS cover too — is the
+        // machine's one predicate, never re-derived here.
+        if m.provisioning_price_confirm_visible() {
+            out.push(Element::checkbox(
+                ids::DNS_PRICE_CONFIRM_CHECKBOX,
+                fauna_i18n::strings::registrar::PRICE_CONFIRM,
+                m.dns_config().price_agreed,
+                Action::ConfirmPrice,
+            ));
+        }
     }
     if let Some(text) = m.bom_vps_line() {
         out.push(Element::label(
@@ -122,18 +138,43 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
             text.resolve_nested(fauna_i18n::strings::lookup),
         ));
     }
+    // The DNS plan (`onboarding-provisioning.md` § 6 *The DNS plan*): every
+    // record the run will keep, add, change or remove, read from the zone by
+    // the machine as it entered this page. Rows and their sentences come from
+    // the shared snapshot; nothing here decides an action.
+    let plan = m.dns_plan();
+    if plan.visible {
+        out.push(Element::label(
+            ids::PROVISIONING_DNS_PLAN,
+            localized(&plan.heading),
+        ));
+        for row in &plan.rows {
+            out.push(
+                Element::label(
+                    format!("{}[{}]", ids::PROVISIONING_DNS_PLAN_ROW, row.key),
+                    localized(&row.text),
+                )
+                .attr("action", dns_plan_action_key(row.action))
+                .within(ids::PROVISIONING_DNS_PLAN, 0),
+            );
+        }
+    }
+    // The choices region — location, server type, mail mode, update channel,
+    // SSH door — between the price summary and the start button, every one
+    // with a default; the same element list `vps_config` paints (§ 5's rules
+    // apply wherever those controls are shown).
+    if choices {
+        out.extend(super::vps_config::choices(w));
+    }
 
+    let now = progress::now_ms();
     for (i, step) in snap.steps.iter().enumerate() {
         let row = "provisioning-step-row";
         // The row itself is the indexed container; its children hang off it.
         out.push(Element::label(row, "").within(row, i));
-        out.push(
-            Element::label(
-                ids::PROVISIONING_STEP_CHECKBOX,
-                progress::status_glyph(step.status),
-            )
-            .within(row, i),
-        );
+        // The `running` paint animates (`crate::spinner`); the text stays
+        // `status_glyph`'s, so the automation read is frame-free.
+        out.push(crate::spinner::step_checkbox(step.status, now).within(row, i));
         out.push(
             Element::label(
                 ids::PROVISIONING_STEP_LABEL,
@@ -188,18 +229,30 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
     // bottom row — this page's Start builds and claims the nest, the gesture
     // that makes the account (`terms-and-content-guidelines.md` § The
     // decisions, item 3).
-    out.extend(super::terms_notice());
+    out.extend(super::terms_notice(w.terms_copied));
 
     // Affordances are the typed predicates', not ours — `can_retry()` is the one
     // carrying the Failed-**or-Cancelled** rule (a soft-cancel must leave retry
     // reachable, else the user is stranded with only Back).
+    // *Buy and set up* is dead while the machine names a reason (on a run
+    // entered from the choose-providers page: the price not agreed, no server
+    // type) — the reason on an un-id'd line beneath the button (rule 5). The
+    // routing guard is the machine's, folded into its answer.
+    let start = m.provisioning_start_possibility();
     if overall.is_idle() {
-        out.push(Element::button(
-            ids::PROVISIONING_START_BUTTON,
-            t::START_BUTTON,
-            true,
-            Action::StartProvisioning,
-        ));
+        let reason_line = start.reason().map(localized);
+        out.push(
+            Element::button(
+                ids::PROVISIONING_START_BUTTON,
+                t::START_BUTTON,
+                true,
+                Action::StartProvisioning,
+            )
+            .possible(start),
+        );
+        if let Some(line) = reason_line {
+            out.push(Element::chrome(line));
+        }
     }
     if overall.is_running() {
         out.push(Element::button(
@@ -224,12 +277,20 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
         true,
         Action::Back,
     ));
-    out.push(Element::button(
-        ids::PROVISIONING_CONTINUE_BUTTON,
-        common::CONTINUE,
-        overall.can_continue(),
-        Action::ContinueFromProvisioning,
-    ));
+    // Enabled is the seam's to decide (`ui/README.md` § Offer only what is
+    // possible, rule 6): the button declares the shared answer and
+    // `App::page_elements` disables it while that answer is blocked.
+    out.push(
+        Element::button(
+            ids::PROVISIONING_CONTINUE_BUTTON,
+            common::CONTINUE,
+            true,
+            Action::ContinueFromProvisioning,
+        )
+        .possible(fauna_core::possibility::Possibility::from_blocked_reason(
+            overall.continue_blocked_reason(),
+        )),
+    );
     // Rule 5's reason for the Continue directly above, from the same value
     // that disabled it. ID-less chrome: it is prose, not an affordance, and
     // rule 5's own exemplar is un-id'd on tui (the `dns-status-text` fix's
@@ -259,7 +320,8 @@ mod tests {
             .machine
             .set_step_for_test(OnboardingStep::NestProvisioning);
 
-        let els = app.wizard.elements();
+        // Through the seam, which is what disables Continue (rule 6).
+        let els = app.page_elements();
         let cont = els
             .iter()
             .find(|e| e.id == "provisioning-continue-button")
@@ -277,5 +339,47 @@ mod tests {
             "the screen must paint the reason its own predicate produced; got {:?}",
             els.iter().map(|e| &e.text).collect::<Vec<_>>()
         );
+    }
+
+    /// The DNS plan paints one keyed row per record with the shared sentence,
+    /// and nothing at all while the plan is hidden
+    /// (`onboarding-provisioning.md` § 6 *The DNS plan*).
+    #[test]
+    fn the_dns_plan_paints_one_keyed_row_per_record() {
+        use fauna_onboarding_machine::DnsPlanSnapshot;
+        use fauna_provisioning::dns_plan::{DnsPlanAction, DnsPlanRow};
+
+        let app = crate::app::tests::test_app();
+        let m = &app.wizard.machine;
+        m.set_step_for_test(OnboardingStep::NestProvisioning);
+        m.set_dns_plan_for_test(DnsPlanSnapshot::hidden());
+        assert!(
+            !app.page_elements()
+                .iter()
+                .any(|e| e.id.starts_with(ids::PROVISIONING_DNS_PLAN)),
+            "a hidden plan paints nothing"
+        );
+
+        let rows = [DnsPlanRow {
+            name: "@".into(),
+            record_type: "A".into(),
+            action: DnsPlanAction::Change,
+            current: vec!["9.9.9.9".into()],
+            desired: None,
+        }];
+        let plan = DnsPlanSnapshot::ready("x.test", &rows, "the new server");
+        m.set_dns_plan_for_test(plan.clone());
+        let els = app.page_elements();
+        let row = els
+            .iter()
+            .find(|e| e.id == "provisioning-dns-plan-row[@|A]")
+            .expect("keyed row");
+        assert_eq!(row.text, localized(&plan.rows[0].text));
+        assert!(
+            row.text.contains("9.9.9.9"),
+            "the old value is shown: {}",
+            row.text
+        );
+        assert!(els.iter().any(|e| e.id == ids::PROVISIONING_DNS_PLAN));
     }
 }

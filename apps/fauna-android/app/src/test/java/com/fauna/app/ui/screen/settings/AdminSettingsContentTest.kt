@@ -4,12 +4,15 @@ import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import com.fauna.ffi.FfiAdminMembershipTier
 import com.fauna.ffi.FfiAdminTier
+import uniffi.fauna_core.Possibility
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import com.fauna.app.testing.FaunaRobolectricTestRunner
+import com.fauna.app.R
+import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 
 /**
@@ -75,12 +78,17 @@ class AdminSettingsContentTest {
         onSaveTier: (String, Long, Long, Long, Long, Long) -> Unit = { _, _, _, _, _, _ -> },
         onDeleteTier: (String) -> Unit = {},
         onAddTier: (String, Long, Long, Long, Long, Long) -> Unit = { _, _, _, _, _, _ -> },
-        onAddRefused: (String) -> Unit = {},
+        onRefused: (String) -> Unit = {},
         onSaveMembershipTier: (String, String, String) -> Unit = { _, _, _ -> },
         onClearMembershipTier: (String) -> Unit = {},
         // FFI-free stub mirroring the shared `parse_cap` (trim, parse i64, clamp ≥0)
         // so Robolectric stays off the native path — no host JNA needed.
         parseCap: (String) -> Long? = { it.trim().toLongOrNull()?.coerceAtLeast(0) },
+        // FFI-free stub of `tier_delete_possibility`: absent on `free`.
+        tierDeletePossibility: (String) -> Possibility = {
+            if (it == "free") Possibility.Absent else Possibility.Possible
+        },
+        addTierAnswer: Possibility = Possibility.Possible,
     ) {
         composeTestRule.setContent {
             AdminSettingsContent(
@@ -91,10 +99,18 @@ class AdminSettingsContentTest {
                 onSaveTier = onSaveTier,
                 onDeleteTier = onDeleteTier,
                 onAddTier = onAddTier,
-                onAddRefused = onAddRefused,
+                onRefused = onRefused,
                 onSaveMembershipTier = onSaveMembershipTier,
                 onClearMembershipTier = onClearMembershipTier,
                 parseCap = parseCap,
+                tierDeletePossibility = tierDeletePossibility,
+                // FFI-free stand-ins for the shared draft answers.
+                drafts = AdminSettingsDrafts(
+                    tierCaps = AdminDraftFakes.tierCaps,
+                    tierCreate = AdminDraftFakes.tierCreate,
+                    membershipSave = AdminDraftFakes.membershipSave,
+                ),
+                addTierAnswer = addTierAnswer,
             )
         }
     }
@@ -118,15 +134,16 @@ class AdminSettingsContentTest {
     }
 
     @Test
-    fun everyTierRowCarriesADeleteButtonThatFiresWithItsName() {
+    fun aDeletableTierRowCarriesADeleteButtonThatFiresWithItsName() {
         val deleted = mutableListOf<String>()
         render(
             tiers = listOf(tier("free"), tier("personal")),
             onDeleteTier = { deleted += it },
         )
-        // One per row, `free`'s included — which tier is removable is the nest's call.
-        assertEquals(2, composeTestRule.onAllNodesWithTag("admin-settings-tier-delete-button").fetchSemanticsNodes().size)
-        composeTestRule.onAllNodesWithTag("admin-settings-tier-delete-button")[1].performScrollTo().performClick()
+        // `free` is never removable (`tier_delete_possibility` answers absent,
+        // admin.md § 3 → Removing a tier), so only `personal`'s row offers it.
+        assertEquals(1, composeTestRule.onAllNodesWithTag("admin-settings-tier-delete-button").fetchSemanticsNodes().size)
+        composeTestRule.onAllNodesWithTag("admin-settings-tier-delete-button")[0].performScrollTo().performClick()
         assertEquals(listOf("personal"), deleted)
     }
 
@@ -144,18 +161,26 @@ class AdminSettingsContentTest {
         assertEquals(listOf<Any>("free", 999L, 200L, 3L, 50L, 10L), saved)
     }
 
+    private fun string(id: Int) = RuntimeEnvironment.getApplication().getString(id)
+
     @Test
-    fun saveTierFallsBackToPersistedOnEmptyCap() {
+    fun aBlankCapBlocksTheTierSaveAndNeverSendsThePersistedValue() {
         var saved: List<Any>? = null
         render(
             tiers = listOf(tier("free", inbox = 100)),
             onSaveTier = { n, i, s, d, b, f -> saved = listOf(n, i, s, d, b, f) },
         )
-        // Clearing a cap must not silently zero it — parseCap falls back to 100.
+        // Clearing a cap blocks the save with the shared reason — it is
+        // neither zeroed nor silently replaced by the persisted 100.
         rowNode("admin-settings-tier-cap-inbox").performScrollTo()
             .performTextClearance()
+        composeTestRule.onNodeWithTag("admin-settings-tier-save-button").performScrollTo()
+            .assertIsNotEnabled().performClick()
+        composeTestRule.onNodeWithText(string(R.string.admin_settings_page_save_tier_error_invalid_cap)).assertExists()
+        assertEquals(null, saved)
+        rowNode("admin-settings-tier-cap-inbox").performScrollTo().performTextReplacement("5")
         composeTestRule.onNodeWithTag("admin-settings-tier-save-button").performScrollTo().performClick()
-        assertEquals(100L, (saved as List<*>)[1])
+        assertEquals(5L, (saved as List<*>)[1])
     }
     private fun fillAddForm(name: String, cap: String = "1") {
         addNode("admin-settings-tier-add-name-input").performScrollTo().performTextReplacement(name)
@@ -182,19 +207,19 @@ class AdminSettingsContentTest {
     }
 
     @Test
-    fun addTierRefusesEmptyNameAndBlankCapLocally() {
+    fun addTierIsBlockedWithTheSharedReasonForAnEmptyNameOrABlankCap() {
         var added = false
-        val refusals = mutableListOf<String>()
-        render(onAddTier = { _, _, _, _, _, _ -> added = true }, onAddRefused = { refusals += it })
+        render(onAddTier = { _, _, _, _, _, _ -> added = true })
         fillAddForm("")
-        addNode("admin-settings-tier-add-button").performScrollTo().performClick()
+        addNode("admin-settings-tier-add-button").performScrollTo().assertIsNotEnabled().performClick()
+        composeTestRule.onNodeWithText(string(R.string.admin_settings_page_add_tier_error_empty_name)).assertExists()
         fillAddForm("gold")
         addNode("admin-settings-tier-cap-feeds").performScrollTo().performTextClearance()
-        addNode("admin-settings-tier-add-button").performScrollTo().performClick()
-        assertFalse("a refused form must not reach the wire", added)
-        assertEquals(2, refusals.size)
-        assertEquals(true, refusals[0].contains("name"))
-        assertEquals(true, refusals[1].contains("whole number"))
+        addNode("admin-settings-tier-add-button").performScrollTo().assertIsNotEnabled().performClick()
+        composeTestRule.onNodeWithText(string(R.string.admin_settings_page_add_tier_error_invalid_cap)).assertExists()
+        assertFalse("a blocked form must not reach the wire", added)
+        // The drafts stay: the name is still there.
+        addNode("admin-settings-tier-add-name-input").assertTextContains("gold")
     }
 
     // The raw parse-and-clamp semantics now live in shared Rust
@@ -307,7 +332,10 @@ class AdminSettingsContentTest {
         // undesignated row) — Save must not fire a request the nest would
         // refuse with fauna.admin.invalid_params.
         composeTestRule.onNodeWithTag("admin-settings-membership-save-button")
-            .performScrollTo().performClick()
+            .performScrollTo().assertIsNotEnabled().performClick()
+        composeTestRule.onNodeWithText(
+            string(R.string.admin_settings_page_save_membership_tier_error_no_tier),
+        ).assertExists()
         assertFalse(saveCalled)
     }
 
@@ -323,5 +351,43 @@ class AdminSettingsContentTest {
         composeTestRule.onNodeWithTag("admin-settings-membership-clear-button")
             .performScrollTo().performClick()
         assertEquals("paid-a", cleared)
+    }
+
+
+    // ── Controls wait for their read (admin.md § Errors & edge cases) ──
+
+    @Test
+    fun tierAddFormWaitsForTheTiersRead() {
+        var added = false
+        render(addTierAnswer = ReadGateFakes.stillLoading, onAddTier = { _, _, _, _, _, _ -> added = true })
+        composeTestRule.onNodeWithTag("admin-settings-tier-add-name-input")
+            .performScrollTo()
+            .assertIsNotEnabled()
+            .assertPaintedReason(ReadGateFakes.stillLoadingText)
+        // The read's reason, not the empty-name draft complaint.
+        composeTestRule.onNodeWithTag("admin-settings-tier-add-button")
+            .performScrollTo()
+            .assertIsNotEnabled()
+            .assertPaintedReason(ReadGateFakes.stillLoadingText)
+            .performClick()
+        assertEquals(false, added)
+    }
+
+    @Test
+    fun tierAddFormSaysFailedAfterAFailedRead() {
+        render(addTierAnswer = ReadGateFakes.loadFailed)
+        composeTestRule.onNodeWithTag("admin-settings-tier-add-button")
+            .performScrollTo()
+            .assertIsNotEnabled()
+            .assertPaintedReason(ReadGateFakes.loadFailedText)
+    }
+
+    @Test
+    fun tierAddNameInputLiveOnceRead() {
+        render(addTierAnswer = Possibility.Possible)
+        composeTestRule.onNodeWithTag("admin-settings-tier-add-name-input")
+            .performScrollTo()
+            .assertIsEnabled()
+            .assertNoPaintedReason()
     }
 }

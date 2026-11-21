@@ -33,6 +33,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use fauna_core::localized::LocalizedText;
+use fauna_core::possibility::Possibility;
 use fauna_protocol::MaybeSendSync;
 use serde::{Deserialize, Serialize};
 
@@ -275,6 +276,81 @@ impl MailListsSnapshot {
             error: None,
         }
     }
+
+    /// Whether a new list can be created **now** — the one answer the page's
+    /// add affordance paints from and [`MailListsAction::Create`] asks
+    /// (`docs/goal/ui/README.md` § Offer only what is possible, rules 2 and 6;
+    /// `mail-mass-mailing.md`): a list is created on one of the user's own
+    /// domains ([`Self::local_domains`], [`derive_list_domains`]), so with
+    /// none it is blocked with `mail_lists.no_domain`. Mail being off is the
+    /// page's entry gate (`MailSettingsSnapshot::mail_usable`), not this one.
+    /// An app with no snapshot yet asks `Possibility::once_read(false)`.
+    pub fn create_possibility(&self) -> Possibility {
+        if self.local_domains.is_empty() {
+            Possibility::blocked(LocalizedText::key("mail_lists.no_domain"))
+        } else {
+            Possibility::Possible
+        }
+    }
+}
+
+/// `mail-lists-add-sheet-submit-button`'s draft validity
+/// (`docs/goal/ui/mail-settings.md` § Errors & edge cases; `ui/README.md`
+/// § Offer only what is possible, rules 4 and 6). Creating needs the posting
+/// address's local part and domain (an edit keeps the address it has); the
+/// optional recipients-per-send cap, when typed, must be a whole number —
+/// never silently dropped to "no cap". The cap's ceiling is the server's and
+/// no client reads it: an over-ceiling cap is the nest's refusal, shown on
+/// `error-message`, and the reason says the server sets it. Free-standing
+/// over the drafts' text, so every app asks it with what is typed.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn list_submit_possibility(
+    editing: bool,
+    local_part: String,
+    domain: String,
+    per_send_cap: String,
+) -> Possibility {
+    if !editing {
+        if local_part.trim().is_empty() {
+            return Possibility::blocked(LocalizedText::key("mail_lists.local_part_required"));
+        }
+        if domain.trim().is_empty() {
+            return Possibility::blocked(LocalizedText::key("mail_lists.domain_required"));
+        }
+    }
+    let cap = per_send_cap.trim();
+    if !cap.is_empty() && fauna_core::format::parse_count(cap).is_none() {
+        return Possibility::blocked(LocalizedText::key("mail_lists.per_send_invalid"));
+    }
+    Possibility::Possible
+}
+
+/// `mail-list-members-add-sheet-submit-button`: an address typed.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn member_add_possibility(address: String) -> Possibility {
+    if address.trim().is_empty() {
+        Possibility::blocked(LocalizedText::key("mail_lists.member_address_required"))
+    } else {
+        Possibility::Possible
+    }
+}
+
+/// `mail-list-members-import-sheet-submit-button`: at least one non-blank
+/// line pasted.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn member_import_possibility(paste: String) -> Possibility {
+    if paste.lines().all(|l| l.trim().is_empty()) {
+        Possibility::blocked(LocalizedText::key("mail_lists.member_import_required"))
+    } else {
+        Possibility::Possible
+    }
+}
+
+/// [`MailListsSnapshot::create_possibility`] over FFI (a UniFFI record carries
+/// no methods).
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn mail_lists_create_possibility(snapshot: MailListsSnapshot) -> Possibility {
+    snapshot.create_possibility()
 }
 
 /// Actions the `mail-lists` page dispatches.
@@ -350,6 +426,12 @@ impl MailListsMachine {
     }
 
     async fn create(&self, draft: ListDraft) -> Result<(), DispatchError> {
+        // The same answer the add affordance paints from (rule 6).
+        if !self.snapshot().create_possibility().is_possible() {
+            return Err(DispatchError::InvalidState(
+                fauna_i18n::strings::mail_lists::NO_DOMAIN.into(),
+            ));
+        }
         self.set_status(ListsStatus::Working);
         self.nest.create_account_list(draft).await?;
         self.refresh().await
@@ -666,6 +748,47 @@ mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
 
+    fn reason(p: Possibility) -> Option<String> {
+        p.reason().map(|r| r.key.clone())
+    }
+
+    /// The sheets' draft validity: create needs both address halves, a typed
+    /// cap must be a whole number, an edit needs no address; members need a
+    /// typed address or a non-blank paste.
+    #[test]
+    fn list_and_member_drafts_say_what_they_still_need() {
+        let s = String::from;
+        assert_eq!(
+            reason(list_submit_possibility(false, s(" "), s("a.test"), s(""))),
+            Some(s("mail_lists.local_part_required"))
+        );
+        assert_eq!(
+            reason(list_submit_possibility(false, s("news"), s(""), s(""))),
+            Some(s("mail_lists.domain_required"))
+        );
+        assert_eq!(
+            reason(list_submit_possibility(
+                false,
+                s("news"),
+                s("a.test"),
+                s("-3")
+            )),
+            Some(s("mail_lists.per_send_invalid"))
+        );
+        assert!(list_submit_possibility(false, s("news"), s("a.test"), s("40")).is_possible());
+        assert!(list_submit_possibility(true, s(""), s(""), s("")).is_possible());
+        assert_eq!(
+            reason(member_add_possibility(s("  "))),
+            Some(s("mail_lists.member_address_required"))
+        );
+        assert!(member_add_possibility(s("a@b.test")).is_possible());
+        assert_eq!(
+            reason(member_import_possibility(s("\n  \n"))),
+            Some(s("mail_lists.member_import_required"))
+        );
+        assert!(member_import_possibility(s("\na@b.test\n")).is_possible());
+    }
+
     // ── wire → view projections (shared by all 7 apps) ──────────────────
 
     fn wire_list_row() -> fauna_client_bridges::MailListRow {
@@ -920,6 +1043,29 @@ mod tests {
         assert!(snap.lists.is_empty());
         assert_eq!(snap.local_domains, vec!["example.org", "other.test"]);
         assert_eq!(snap.status, ListsStatus::Idle);
+    }
+
+    /// The add affordance's one answer: blocked with its reason while the user
+    /// owns no domain, possible once one is derived; Create asks it first.
+    #[tokio::test]
+    async fn list_create_is_blocked_without_a_domain_and_create_refuses() {
+        let m = lists_machine(&[]);
+        m.hydrate().await.unwrap();
+        assert_eq!(
+            mail_lists_create_possibility(m.snapshot()),
+            Possibility::blocked(LocalizedText::key("mail_lists.no_domain"))
+        );
+        let err = m
+            .dispatch(MailListsAction::Create {
+                draft: draft("A", "news", "example.org"),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DispatchError::InvalidState(_)), "got {err:?}");
+        assert!(m.snapshot().lists.is_empty());
+        let m = lists_machine(&["example.org"]);
+        m.hydrate().await.unwrap();
+        assert_eq!(m.snapshot().create_possibility(), Possibility::Possible);
     }
 
     #[tokio::test]

@@ -127,7 +127,13 @@ fn tools_list_carries_every_tool_with_truthful_annotations() {
     );
     let tools = listed["result"]["tools"].as_array().unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names.len(), fauna_cli::CATALOG.len());
+    // A shell with no conversations door lists every tool but the door's.
+    let doorless = fauna_cli::CATALOG
+        .iter()
+        .filter(|t| !fauna_cli::reach::needs_conversations_door(t))
+        .count();
+    assert_eq!(names.len(), doorless);
+    assert!(names.iter().all(|n| !n.starts_with("conversations_")));
     let by_name = |n: &str| tools.iter().find(|t| t["name"] == n).unwrap().clone();
     assert_eq!(by_name("feed_list")["annotations"]["readOnlyHint"], true);
     assert_eq!(by_name("post_create")["annotations"]["readOnlyHint"], false);

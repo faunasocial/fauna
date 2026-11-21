@@ -48,6 +48,7 @@ if _tests_dir not in sys.path:
     sys.path.insert(0, _tests_dir)
 
 from common.auth import register_user  # noqa: E402
+from helpers.use_case_walk import assert_use_case_walked
 
 pytestmark = pytest.mark.tier_3
 
@@ -193,6 +194,7 @@ def _safe_text(app, element_id: str):
         return f"<unreadable: {exc}>"
 
 
+@pytest.mark.use_case("save-recovery-kit")
 @pytest.mark.feature("recovery-kit-at-sign-up")
 def test_the_kit_minted_at_onboarding_is_registered_by_the_signed_in_handoff(
     app, self_signed_nest
@@ -317,6 +319,7 @@ def test_the_kit_minted_at_onboarding_is_registered_by_the_signed_in_handoff(
         "the kit was displayed once at onboarding; Settings must not be able "
         "to bring it back (§ The RecoveryKey — *Custody*)"
     )
+    assert_use_case_walked(app.driver, "save-recovery-kit")
 
 
 @pytest.mark.feature("recovery-kit-at-sign-up")

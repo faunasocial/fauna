@@ -9,7 +9,8 @@
   // parent mounts this only while the account is the nest's admin.
   import { afterNavigate } from '$app/navigation';
   import { connectionStatus, identity } from '#lib/store';
-  import { offlineAffordance } from '#lib/wasm';
+  import { offlinePossibility, bridgePluginInstallPossibility } from '#lib/wasm';
+  import { askPossibility, formGate, formRefusal } from '#lib/form-gate';
   import { makeOfflineGate } from '#lib/offline-gate';
   import { resolveLocalized } from '#lib/i18n/localized';
   import {
@@ -25,7 +26,7 @@
   let { error = $bindable('') } = $props();
 
   // Install and Uninstall are `OnlineOnly`: the offline gate greys them.
-  const offlineGate = makeOfflineGate(offlineAffordance, connectionStatus.subscribe);
+  const offlineGate = makeOfflineGate(offlinePossibility, connectionStatus.subscribe);
 
   // `null` until the read returned: nothing is painted, then rows or the empty line.
   let plugins = $state<InstalledPluginText[] | null>(null);
@@ -54,10 +55,20 @@
     void refresh();
   });
 
+  // `bridge-plugin-install-submit` paints from the shared
+  // `plugin_install_possibility`: disabled with its reason while the URL is blank.
+  const installGate = $derived(formGate(askPossibility(() => bridgePluginInstallPossibility(installUrl))));
   async function install() {
     const secret = $identity?.secretHex;
     const url = installUrl.trim();
-    if (!secret || !url) return;
+    // The submit asks the answer it was painted from and refuses with its
+    // reason on `error-message` (`behavior/bridges.md` § Errors & edge cases).
+    const refusal = formRefusal(askPossibility(() => bridgePluginInstallPossibility(url)));
+    if (refusal !== null) {
+      error = refusal;
+      return;
+    }
+    if (!secret) return;
     installOpened = false;
     error = '';
     try {
@@ -126,7 +137,8 @@
     <button
       class="btn btn-primary"
       data-testid={IDS.BRIDGE_PLUGIN_INSTALL_SUBMIT}
-      use:offlineGate={{ kind: 'fauna.plugins.install', disabled: !installUrl.trim() }}
+      title={installGate.reason || undefined}
+      use:offlineGate={{ kind: 'fauna.plugins.install', disabled: installGate.disabled }}
       onclick={install}
     >{t.bridges.plugin_install_submit}</button>
   </div>

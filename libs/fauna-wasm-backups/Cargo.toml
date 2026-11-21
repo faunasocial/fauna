@@ -26,6 +26,10 @@ test-helpers = ["fauna-backups-machine/test-helpers"]
 fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
 # `rpc-glue` for the wasm `build_backups_machine` (over `WsRpcClient`).
 fauna-backups-machine = { path = "../fauna-backups-machine", default-features = false, features = ["rpc-glue"] }
+# `offline_class::carve_out_affordance` — the offline half of the page's
+# carve-out fetches (`carveOutPossibilityJson`). Already in this chunk's graph
+# through fauna-backups-machine; the same feature line it takes there.
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
 # `seal_backfill::resolver_backed_custody` — the shared-set resolver + owner-key
 # `LabelCustody` constructor the page's snapshot custody now builds through
 # (`NestFolderKeyResolver` became transport-generic 2026-08-11).

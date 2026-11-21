@@ -37,6 +37,16 @@ pub enum OnboardingStep {
     /// a lock returns to `IdentityChoice`, a refusal stays here.
     EmergencyLockoutEntry,
     HandleEntry,
+    /// The choose-providers page (`onboarding-provisioning.md` § 3d): the
+    /// goals of the set-up and the providers that cover them, between the
+    /// handle check and [`Self::NestProvisioning`] in place of
+    /// [`Self::DnsConfig`] and [`Self::VpsConfig`] on the set-up path.
+    /// Entered from `submit_handle_check_continue` **only when the app
+    /// declared `set_renders_provider_choice(true)`** — apps whose page
+    /// hasn't landed keep going to `DnsConfig`, a per-app parity gap, not
+    /// drift. Continue (`continue_from_providers`) lands on
+    /// `NestProvisioning`; Back returns to `HandleEntry`.
+    ProviderChoice,
     DnsConfig,
     VpsConfig,
     NestProvisioning,
@@ -406,6 +416,166 @@ pub struct HostedAuthPrompt {
     pub user_code: String,
 }
 
+// ── The choose-providers page (`onboarding-provisioning.md` § 3d) ───────────
+
+/// One of the things a nest needs before the wizard builds it, in page order:
+/// registering the handle's domain (a goal of the run only while it is being
+/// bought), DNS for it, and a server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum ProviderGoal {
+    Domain,
+    Dns,
+    Vps,
+}
+
+/// What covers a goal: a connected provider, or — for the DNS goal only — the
+/// manual row (*I will set DNS up later*, today's deferred-DNS path).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum GoalCover {
+    Provider { provider_id: String },
+    Manual,
+}
+
+/// A provider credential a signed-in account on this device already holds in
+/// its DNS record, passed **into** the machine by the app (the machine never
+/// reads account state — `nest-retirement.md` § Credential stance (b)); the
+/// machine re-checks it before the provider reads connected.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct HeldProviderCredential {
+    pub provider_id: String,
+    pub fields: HashMap<String, SecretString>,
+}
+
+impl From<crate::retire::HeldDnsCredential> for HeldProviderCredential {
+    fn from(c: crate::retire::HeldDnsCredential) -> Self {
+        Self {
+            provider_id: c.provider_id,
+            fields: c.fields.into_iter().collect(),
+        }
+    }
+}
+
+/// One provider in the wizard's connected-provider set: the credential the
+/// person typed into its dialog (or a signed-in account held), and what its
+/// checks found. Not exported: the page reads it through
+/// `OnboardingMachine::provider_rows` / `goal_rows`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProviderConnection {
+    /// Field id → value, the same discipline as [`DnsConfigState::creds`].
+    pub creds: HashMap<String, SecretString>,
+    /// Per `hosted-auth` field id: its sign-in state in this dialog.
+    #[serde(default)]
+    pub hosted_auth: HashMap<String, HostedAuthState>,
+    /// Every check the connect ran passed with the current credential.
+    pub connected: bool,
+    /// The credential came from a signed-in account (seeded, re-checked),
+    /// not from this run's dialog.
+    pub held: bool,
+    /// The provider's own error from the last failed connect.
+    pub error: Option<String>,
+    /// The DNS check's zones (empty for a provider without DNS).
+    pub zones: Vec<DnsZone>,
+    /// The registrar's quote for the handle's domain, when it is unregistered.
+    pub availability: Option<RegistrarAvailability>,
+    /// The registrar's default WHOIS contact, when it asks for one.
+    pub contact: Option<ContactInfo>,
+    /// The server check ran and passed (a held credential without the server
+    /// fields skips it, and then covers only DNS).
+    pub server_checked: bool,
+    pub locations: Vec<VpsLocation>,
+    /// The offers of [`Self::listed_for_location`], as `verify_vps` lists them.
+    pub server_types: Vec<ServerTypeInfo>,
+    pub listed_for_location: Option<String>,
+    /// True while `connect_provider` runs. Not serialized.
+    #[serde(skip)]
+    pub connecting: bool,
+}
+
+/// The choose-providers page's state: the connected-provider set (keyed by
+/// provider id) and the person's explicit cover choices. A goal with no valid
+/// choice is assigned by the machine (`OnboardingMachine::goal_rows`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProvidersState {
+    pub providers: HashMap<String, ProviderConnection>,
+    pub domain_choice: Option<String>,
+    pub dns_choice: Option<GoalCover>,
+    pub vps_choice: Option<String>,
+    /// `nest_provisioning` was reached from this page's Continue (not from
+    /// `vps_config`, i.e. cloud recovery): the page then shows its choices
+    /// region, re-chooses a dropped server type and returns here on Back.
+    #[serde(default)]
+    pub provisioning_from_providers: bool,
+    /// The wizard-life memory (`onboarding-provisioning.md` § 3d): a
+    /// registration this wizard's run made. While it names the handle's domain,
+    /// the registration goal stays covered by its registrar, fixed, the buy box
+    /// is not offered, and a Retry does not register again.
+    #[serde(default)]
+    pub registered: Option<RegisteredDomain>,
+    /// The provider this wizard's run pointed the registered domain at (its
+    /// nameservers set to that provider's zone). While set, the DNS goal's
+    /// candidates are that provider and the manual row.
+    #[serde(default)]
+    pub pointed_at: Option<String>,
+    /// The registration goal's cover Continue wrote for the run: the
+    /// registrar that registers the domain, whose credential is its
+    /// connection's. Not the DNS cover when DNS runs at another provider or on
+    /// the manual row. `None` while nothing is bought.
+    #[serde(default)]
+    pub run_registrar: Option<String>,
+}
+
+/// A domain this wizard registered, and at which registrar.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisteredDomain {
+    pub domain: String,
+    pub registrar: String,
+}
+
+/// One row of the providers list: what the provider can do, whether it is
+/// connected, and — per goal — why it cannot cover it (`None` = it can, or
+/// could once connected).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ProviderRow {
+    pub provider_id: String,
+    pub capabilities: Vec<CapabilityPlain>,
+    pub connected: bool,
+    pub connecting: bool,
+    pub held: bool,
+    /// The provider's own error from the last failed *Connect*.
+    pub error: Option<String>,
+    /// `None` too while no domain is bought (the goal is not on the page).
+    pub domain_reason: Option<LocalizedText>,
+    pub dns_reason: Option<LocalizedText>,
+    pub vps_reason: Option<LocalizedText>,
+}
+
+/// One goal line at the top of the page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct GoalRow {
+    pub goal: ProviderGoal,
+    /// `None` = open.
+    pub cover: Option<GoalCover>,
+    /// The connected providers that can cover this goal, registry order; the
+    /// goal row offers the choice when there is more than one (never on DNS
+    /// while buying: it follows the registration goal's cover).
+    pub candidates: Vec<String>,
+    /// The registration row only: the covering registrar's quote, first year
+    /// and renewal, so a person choosing between two registrars chooses on
+    /// the price. `None` on the other rows and while the goal is open.
+    pub price_cents: Option<u64>,
+    pub renewal_cents: Option<u64>,
+    pub currency: Option<String>,
+    /// The DNS row only: a note on its cover — that the domain does not point
+    /// at the covering provider's zone yet (§ 3d → *A zone the domain does not
+    /// point at*). `None` otherwise.
+    pub note: Option<LocalizedText>,
+}
+
 /// i18n-aware text carrier returned by helpers like `dns_status_text_key()`
 /// and `format_price_key()`. Canonical definition lives in `fauna-core`
 /// (`fauna_core::localized::LocalizedText`) so every shared-Rust machine —
@@ -553,6 +723,10 @@ pub enum CapabilityPlain {
     Dns,
     Vps,
     Registrar,
+    /// A field kind only, never a provider capability: a field the zone door
+    /// needs (`docs/goal/architecture/provisioning/registry.md` § Delegation
+    /// doors).
+    Zone,
 }
 
 impl From<&fauna_provisioning::FieldMeta> for FieldMetaPlain {
@@ -574,6 +748,7 @@ impl From<&fauna_provisioning::FieldMeta> for FieldMetaPlain {
                     fauna_provisioning::Capability::Dns => CapabilityPlain::Dns,
                     fauna_provisioning::Capability::Vps => CapabilityPlain::Vps,
                     fauna_provisioning::Capability::Registrar => CapabilityPlain::Registrar,
+                    fauna_provisioning::Capability::Zone => CapabilityPlain::Zone,
                 })
                 .collect(),
         }
@@ -623,8 +798,18 @@ pub(crate) struct State {
     /// dns_config with `buy_domain` off when it is `Some`
     /// (`onboarding-provisioning.md` § 4).
     pub handle_enclosing_zone: Option<String>,
+    /// The handle domain's delegation as the handle check read it — the
+    /// nameservers its `NS` answer names, normalized
+    /// (`fauna_provisioning::probe::NsProbe::nameservers`); empty when it has
+    /// none. The choose-providers page prefers a DNS provider whose zone these
+    /// name (`onboarding-provisioning.md` § 3d).
+    pub handle_delegation: Vec<String>,
     pub dns: DnsConfigState,
     pub vps: VpsConfigState,
+    /// The choose-providers page (`onboarding-provisioning.md` § 3d): the
+    /// connected providers and the cover choices, written into [`Self::dns`] /
+    /// [`Self::vps`] by `continue_from_providers`.
+    pub providers: ProvidersState,
     /// Records to surface on the manual-DNS-setup page; populated when the
     /// orchestrator returns from the `provision_nest_no_dns` deferred path.
     /// Empty otherwise. Mirror of `fauna_provisioning::dns::DnsRecord` in
@@ -714,6 +899,12 @@ pub(crate) struct State {
     /// default `false` keeps every app that hasn't built the screen exiting
     /// the NAT step straight to `Done`.
     pub renders_trust_prompt: bool,
+    /// App capability: this app renders the `provider_choice` page
+    /// (`onboarding-provisioning.md` § 3d). Same contract as
+    /// `renders_recovery_kit` above, including surviving
+    /// [`crate::OnboardingMachine::reset`] — default `false` keeps every app
+    /// that hasn't built the page on the `dns_config` → `vps_config` path.
+    pub renders_provider_choice: bool,
     /// The `trust_prompt` answer, latched for the wizard's signed-in handoff
     /// (`onboarding.md` § 3b-ter). `true` only between
     /// `grant_default_trust()` and the handoff's consume-once
@@ -895,6 +1086,7 @@ impl State {
         self.node_mode_seed = None;
         self.content_scanners_seed = ContentScanners::Unknown;
         self.handle_enclosing_zone = None;
+        self.handle_delegation.clear();
     }
 
     /// Computes the domain part of the handle (`example.com` from

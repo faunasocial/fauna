@@ -1,5 +1,6 @@
 package com.fauna.app.ui.screen.events
 
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -47,20 +48,22 @@ class AgendaCardPartsTest {
     }
 
     /**
-     * Both agenda pan buttons are painted and both hand back the anchor
-     * unchanged — asserted on the date itself, the finest-grained render of
-     * the state, so a pan of any size would fail it.
+     * Both agenda pan buttons are painted, disabled (the shared
+     * `pan_possibility` blocks the pair in agenda) and move nothing: no click
+     * reaches the handler, so no date change is reported.
      */
     @Test
-    fun agendaPanLeavesTheAnchorUnchanged() {
+    fun agendaPanPairIsDisabledAndMovesNothing() {
         val anchor = LocalDate.of(2026, 8, 22)
         val moves = mutableListOf<LocalDate>()
         composeTestRule.setContent {
             AgendaPanHeader(date = anchor, onDateChange = { moves += it })
         }
         composeTestRule.onNodeWithTag(Ids.CALENDAR_DATE_LABEL).assertTextEquals("Upcoming")
+        composeTestRule.onNodeWithTag(Ids.EVENTS_NEXT_MONTH).assertIsNotEnabled()
+        composeTestRule.onNodeWithTag(Ids.EVENTS_PREV_MONTH).assertIsNotEnabled()
         composeTestRule.onNodeWithTag(Ids.EVENTS_NEXT_MONTH).performClick()
         composeTestRule.onNodeWithTag(Ids.EVENTS_PREV_MONTH).performClick()
-        assertEquals(listOf(anchor, anchor), moves)
+        assertEquals(emptyList<LocalDate>(), moves)
     }
 }

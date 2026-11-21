@@ -20,6 +20,7 @@ use adw::prelude::*;
 use fauna_client::NestClient;
 use fauna_client_admin::AdminClient;
 use fauna_client_web::WebClient;
+use fauna_core::possibility::{Possibility, ReadState};
 
 use crate::async_helper::spawn_with_snapshot;
 use crate::i18n::strings::admin;
@@ -37,6 +38,9 @@ struct AdminWebCtx {
     picker_box: gtk::Box,
     info_marker: gtk::Label,
     error_label: gtk::Label,
+    /// Where the apex read stands across reads (a failure after a success
+    /// keeps the earlier answer) — what the reconnect re-read asks.
+    read: std::cell::Cell<ReadState>,
 }
 
 /// One render's data: the current apex designation + the pickable actors + the
@@ -47,6 +51,11 @@ struct Snapshot {
     actors: Vec<(Vec<u8>, String)>,
     serving_domain: String,
     error: Option<String>,
+    /// Where the apex-designation read stands: `Failed` when
+    /// `fauna.web.get_apex_actor` itself failed (the picker then has nothing
+    /// true to offer), `Resolved` otherwise. Before the first snapshot lands
+    /// the picker is not built at all, so `Pending` never reaches `render`.
+    read: ReadState,
 }
 
 pub fn build_admin_web_page() -> adw::PreferencesPage {
@@ -127,6 +136,7 @@ fn wire(
         picker_box,
         info_marker,
         error_label,
+        read: std::cell::Cell::new(ReadState::Pending),
     });
     hydrate(&ctx);
     // The admin Stack builds this page once and keeps it, so re-entering it
@@ -135,6 +145,17 @@ fn wire(
     // Same refresh-on-show as `views::admin`'s dashboard and `mail_export`.
     let on_map = Rc::clone(&ctx);
     page.connect_map(move |_| hydrate(&on_map));
+    // ...and again when the nest connection comes back with the page on
+    // screen, while the apex read has not answered (`admin.md` § Errors &
+    // edge cases, *Controls wait for their read*).
+    let answered = Rc::clone(&ctx);
+    let reread = Rc::clone(&ctx);
+    crate::admin_reread::register_widget(
+        "admin-web",
+        page,
+        move || crate::admin_reread::resolved(answered.read.get()),
+        move || hydrate(&reread),
+    );
 }
 
 /// Fetch the current apex + the actor list (retrying while the WS comes up), then
@@ -152,19 +173,30 @@ fn hydrate(ctx: &Rc<AdminWebCtx>) {
                     // Every account on the nest (admin.md § 2 → *Which accounts a
                     // picker offers*), mapped by the shared
                     // `fauna_client_admin::actor_picker_options` (the two-halves
-                    // rule's display half).
+                    // rule's display half). The account list and the serving
+                    // domain degrade rather than blank the page — the
+                    // designation the admin came to set still shows — but
+                    // neither failure is silent: each reaches `error-message`
+                    // (`docs/goal/ui/README.md` § Offer only what is possible,
+                    // rule 7; `admin.md` § 7 Web).
+                    let mut failures: Vec<String> = Vec::new();
                     let actors = fauna_client_admin::users_list_all(admin.as_ref())
                         .await
                         .map(|users| fauna_client_admin::actor_picker_options(&users))
-                        .unwrap_or_default();
-                    // A failed read leaves the hint in its no-domain form
-                    // rather than failing the page.
-                    let serving_domain = web.serving_domain().await.unwrap_or_default();
+                        .unwrap_or_else(|e| {
+                            failures.push(format!("load accounts: {e}"));
+                            Vec::new()
+                        });
+                    let serving_domain = web.serving_domain().await.unwrap_or_else(|e| {
+                        failures.push(format!("load web serving domain: {e}"));
+                        String::new()
+                    });
                     Snapshot {
                         current,
                         actors,
                         serving_domain,
-                        error: None,
+                        error: (!failures.is_empty()).then(|| failures.join("; ")),
+                        read: ReadState::Resolved,
                     }
                 }
                 Err(e) => Snapshot {
@@ -172,6 +204,7 @@ fn hydrate(ctx: &Rc<AdminWebCtx>) {
                     actors: Vec::new(),
                     serving_domain: String::new(),
                     error: Some(e.to_string()),
+                    read: ReadState::Failed,
                 },
             }
         },
@@ -189,6 +222,8 @@ fn actor_not_loaded_fallback_label(id: &[u8]) -> String {
 }
 
 fn render(ctx: &Rc<AdminWebCtx>, snap: Snapshot) {
+    ctx.read
+        .set(ctx.read.get().after(snap.read == ReadState::Resolved));
     // Rebuild the picker from scratch (mirrors the catch-all picker).
     while let Some(child) = ctx.picker_box.first_child() {
         ctx.picker_box.remove(&child);
@@ -235,15 +270,31 @@ fn render(ctx: &Rc<AdminWebCtx>, snap: Snapshot) {
             }
         });
     }
+    // Not enabled after a failed apex read (rule 5, `admin.md` § 7 Web): the
+    // picker paints from the same answer tui's admin gate map declares.
+    crate::possible::paint(&picker, None, apex_picker_possibility(snap.read));
     ctx.picker_box.append(&picker);
 
     // Apex-URL explainer: the nest's own serving domain, never the account
-    // cache's sign-in/handle domain (admin.md § 7).
-    let apex_url = fauna_core::web::apex_url(&snap.serving_domain);
-    ctx.info_marker.set_text(&WP::apex_info(&apex_url));
+    // cache's sign-in/handle domain (admin.md § 7). The shared
+    // `apex_info_text` paints the no-address reason, never `https:///`.
+    ctx.info_marker.set_text(&apex_info(&snap.serving_domain));
     ctx.info_marker.set_visible(true);
 
     super::render_error_label(&ctx.error_label, snap.error.as_deref());
+}
+
+/// `admin-web-apex-actor-select`'s answer (`docs/goal/ui/README.md`
+/// § Offer only what is possible, rule 5): blocked after a failed apex read,
+/// possible once it resolved — the read alone decides.
+fn apex_picker_possibility(read: ReadState) -> Possibility {
+    Possibility::from_read(read)
+}
+
+/// The `admin-web-apex-info` line, resolved: where the apex serves, or why
+/// there is no address (`fauna_client_web::apex_info_text`).
+fn apex_info(serving_domain: &str) -> String {
+    fauna_client_web::apex_info_text(serving_domain).resolve(crate::i18n::strings::lookup)
 }
 
 /// Designate (`Some`) or clear (`None`) the apex actor, then re-render.
@@ -267,7 +318,38 @@ fn set_apex(ctx: &Rc<AdminWebCtx>, actor_id: Option<Vec<u8>>) {
 
 #[cfg(test)]
 mod tests {
-    use super::actor_not_loaded_fallback_label;
+    use super::{ReadState, actor_not_loaded_fallback_label, apex_info, apex_picker_possibility};
+    use fauna_core::localized::LocalizedText;
+    use fauna_core::possibility::Possibility;
+
+    /// A nest that serves no web content paints the reason, never `https:///`
+    /// (`admin.md` § 7 Web).
+    #[test]
+    fn apex_info_explains_an_empty_serving_domain_instead_of_composing_one() {
+        let info = apex_info("");
+        assert!(!info.contains("https:///"), "{info}");
+        assert_eq!(
+            info,
+            crate::i18n::strings::admin::web_page::APEX_NO_SERVING_DOMAIN
+        );
+        assert_eq!(
+            apex_info("web.test"),
+            crate::i18n::strings::admin::web_page::apex_info("https://web.test/")
+        );
+    }
+
+    /// The picker is blocked after a failed apex read and live once it resolved.
+    #[test]
+    fn apex_picker_waits_for_a_resolved_read() {
+        assert_eq!(
+            apex_picker_possibility(ReadState::Failed),
+            Possibility::blocked(LocalizedText::key("common.load_failed"))
+        );
+        assert_eq!(
+            apex_picker_possibility(ReadState::Resolved),
+            Possibility::Possible
+        );
+    }
 
     /// The apex picker's not-loaded fallback shows the **full** actor hex,
     /// not a 4-byte-truncated prefix (admin.md § 2's two-halves rule; row

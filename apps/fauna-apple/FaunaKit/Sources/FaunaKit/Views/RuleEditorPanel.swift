@@ -123,23 +123,41 @@ public struct RuleEditorPanel: View {
 
     /// The gate's kind is spelled out per host: `check-offline-gate-kinds.py`
     /// grades each literal against the shared table.
+    /// `rule-editor-save-button`'s answer: the shared `save_possibility`
+    /// (possible, or blocked by the sentence `rule-editor-status` already
+    /// shows — so no second copy of the reason is painted beside the button;
+    /// tui's `rule_editor_elements`). `model` is read so an edit repaints it.
+    private var saveAnswer: Possibility {
+        _ = model
+        return editor.savePossibility()
+    }
+
+    /// The press asks the answer again (`ui/README.md` § Offer only what is
+    /// possible, rule 7); a refusal's reason is already on `rule-editor-status`.
+    private func save() {
+        guard !saving, editor.savePossibility().isPossible else { return }
+        onSave()
+    }
+
     @ViewBuilder
     private func saveButton(editable: Bool) -> some View {
-        let enabled = !saving && model.canSave
+        let answer = saveAnswer
         switch write {
         case .adminContentPolicySet:
-            Button(saving ? L.ruleEditor.saving : L.ruleEditor.saveButton) { onSave() }
+            Button(saving ? L.ruleEditor.saving : L.ruleEditor.saveButton) { save() }
                 .buttonStyle(.borderedProminent)
-                .disabled(!enabled)
+                .disabled(saving)
                 .accessibilityIdentifier(Ids.ruleEditorSaveButton)
-                .automationActivate(Ids.ruleEditorSaveButton, isEnabled: { enabled }) { onSave() }
+                .automationActivate(Ids.ruleEditorSaveButton, isEnabled: { !saving }) { save() }
+                .faunaPossible(answer)
                 .faunaGate("fauna.admin.content_policy.set")
         case .familyPolicyUpdate:
-            Button(saving ? L.ruleEditor.saving : L.ruleEditor.saveButton) { onSave() }
+            Button(saving ? L.ruleEditor.saving : L.ruleEditor.saveButton) { save() }
                 .buttonStyle(.borderedProminent)
-                .disabled(!enabled)
+                .disabled(saving)
                 .accessibilityIdentifier(Ids.ruleEditorSaveButton)
-                .automationActivate(Ids.ruleEditorSaveButton, isEnabled: { enabled }) { onSave() }
+                .automationActivate(Ids.ruleEditorSaveButton, isEnabled: { !saving }) { save() }
+                .faunaPossible(answer)
                 .faunaGate("fauna.family.policy.update")
         }
     }

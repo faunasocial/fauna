@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import uniffi.fauna_core.Possibility
 import uniffi.fauna_media_machine.FileVersionSummary
 import uniffi.fauna_media_machine.MediaItemSummary
 import uniffi.fauna_media_machine.MediaMachine
@@ -178,8 +179,8 @@ class MediaVM @Inject constructor(
      * "which set" policy lives in shared Rust). Reads the content bytes + display
      * name off the main thread; the member path is the picked file's display name.
      * Silently no-ops when there is no identity/device yet (a logged-in user always
-     * has both); a missing selected set surfaces `media.error_no_set` from the
-     * machine (the page `error-message` banner).
+     * has both); a folderless account's first upload makes its first folder in the
+     * machine; any refusal surfaces on the page `error-message` banner.
      */
     fun upload(uri: Uri) {
         val m = machine ?: return
@@ -231,6 +232,16 @@ class MediaVM @Inject constructor(
         runCatching { api.readDepositorRoster(versions.mapNotNull { it.depositedBy }) }
         return versions
     }
+
+    /** `file-upload` / `upload-button`'s answer — the shared
+     *  `MediaMachine::upload_possibility` (media.md § Errors & edge cases →
+     *  *What this person may write*); absent with no machine, as tui paints. */
+    fun uploadPossibility(): Possibility = machine?.uploadPossibility() ?: Possibility.Absent
+
+    /** Delete and restore's answer on an item of the set `filterValue` names —
+     *  the shared `MediaMachine::write_possibility`; absent with no machine. */
+    fun writePossibility(filterValue: String): Possibility =
+        machine?.writePossibility(filterValue) ?: Possibility.Absent
 
     /** A version row's author line, composed by the shared connected-apps
      *  machine (`folder-deposit.md` ruling 3); `null` without a connection. */

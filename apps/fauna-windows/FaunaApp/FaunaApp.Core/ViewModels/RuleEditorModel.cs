@@ -61,6 +61,16 @@ internal sealed class RuleEditorModel
         Status = null;
     }
 
+    /// <summary><c>rule-editor-save-button</c>'s answer — the shared
+    /// <c>FfiRuleEditor.SavePossibility</c> (possible, or blocked by the sentence
+    /// <c>rule-editor-status</c> already shows; absent-equivalent while unloaded). The
+    /// button paints from it and the save asks it again; the view's <c>canSave</c>
+    /// bool is not read here.</summary>
+    internal FaunaApp.Core.Helpers.PossibilityPaint SaveAnswer() =>
+        Editor is { } editor
+            ? FaunaApp.Core.Helpers.PossibilityPaint.Of(editor.SavePossibility())
+            : new FaunaApp.Core.Helpers.PossibilityPaint(Shown: true, Enabled: false, Reason: Strings.Get("rule_editor/loading"));
+
     /// <summary>Whether any rule is a labeler rule — the one paint the subscribed
     /// labelers' late arrival changes.</summary>
     internal bool HasLabelerRow =>
@@ -281,7 +291,7 @@ internal sealed class RuleEditorModel
             Editable: view.editable,
             Rows: rows,
             AddEnabled: view.editable,
-            SaveEnabled: view.canSave && !Saving,
+            SaveEnabled: SaveAnswer().IsPossible && !Saving,
             SaveLabel: Strings.Get(Saving ? "rule_editor/saving" : "rule_editor/save_button"),
             Status: status);
     }

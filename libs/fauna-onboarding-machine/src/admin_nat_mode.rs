@@ -21,6 +21,14 @@
 //! the wizard, a successful save keeps `submit_enabled == true`: the set is
 //! mutable and the page persists, so the admin may flip again immediately.
 //!
+//! Unknown is not possible (`docs/goal/ui/README.md` § Offer only what is
+//! possible, rule 5): until `hydrate()` has read the nest's current mode, the
+//! radios and save answer *blocked* through [`AdminNatModeMachine::select_possibility`]
+//! and [`AdminNatModeMachine::save_possibility`], and `select()` / `submit()`
+//! refuse. A failed read leaves them blocked with the load failure: saving the
+//! pre-selected default `public` over a mode the page never read would be a
+//! guess written to the nest.
+//!
 //! Status message keys are the `admin.nest_page.nat_mode_*` i18n group; the
 //! idle/saved texts carry the live-vs-restart-applied caveat (a flip
 //! live-re-evaluates the MTA supervisor + MDA bind; ACME/STUN re-gate at the
@@ -29,6 +37,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use fauna_core::possibility::{Possibility, ReadState};
 use fauna_core::secret::SecretString;
 
 use crate::nest_api::{NatModeError, NestApi, ProbeError};
@@ -60,6 +69,9 @@ pub struct AdminNatModeMachine {
     nest_url: String,
     secret_hex: SecretString,
     snap: Mutex<NatModeSnapshot>,
+    /// Where `hydrate()`'s read of the current mode stands. Only a resolved
+    /// read makes the radios and save possible (rule 5).
+    read: Mutex<ReadState>,
 }
 
 impl AdminNatModeMachine {
@@ -77,7 +89,16 @@ impl AdminNatModeMachine {
                 message: text("admin.nest_page.nat_mode_loading"),
                 ..NatModeSnapshot::idle()
             }),
+            read: Mutex::new(ReadState::Pending),
         })
+    }
+
+    fn read_state(&self) -> ReadState {
+        *self.read.lock().expect("read mutex")
+    }
+
+    fn set_read(&self, read: ReadState) {
+        *self.read.lock().expect("read mutex") = read;
     }
 
     fn set_snap(&self, f: impl FnOnce(&mut NatModeSnapshot)) {
@@ -106,9 +127,32 @@ impl AdminNatModeMachine {
         self.snap.lock().expect("snapshot mutex").clone()
     }
 
+    /// Whether the radios (`admin-nest-nat-mode-{public,private}-radio`) are
+    /// live: only once the current mode has been read (rule 5) — pending says
+    /// still loading, a failed read says it failed.
+    pub fn select_possibility(&self) -> Possibility {
+        Possibility::from_read(self.read_state())
+    }
+
+    /// Whether `admin-nest-nat-mode-save-button` is live: the read resolved
+    /// (rule 5) and no save is on its way (`submit_enabled`, cleared while
+    /// one is in flight). `submit()` asks the same answer.
+    pub fn save_possibility(&self) -> Possibility {
+        let in_flight = !self.snap.lock().expect("snapshot mutex").submit_enabled;
+        Possibility::from_read(self.read_state()).and(if in_flight {
+            Possibility::blocked(LocalizedText::key("common.in_flight"))
+        } else {
+            Possibility::Possible
+        })
+    }
+
     /// Radio click (`admin-nest-nat-mode-{public,private}-radio`). Recovers
-    /// from `Error`/`Done` back to `Choosing`; save stays enabled.
+    /// from `Error`/`Done` back to `Choosing`; save stays enabled. Refused
+    /// (nothing changes) while [`Self::select_possibility`] is blocked.
     pub fn select(&self, mode: NodeMode) {
+        if !self.select_possibility().is_possible() {
+            return;
+        }
         self.set_snap(|s| {
             s.selected_mode = mode;
             s.state = NatModeState::Choosing;
@@ -121,22 +165,30 @@ impl AdminNatModeMachine {
 #[cfg_attr(feature = "uniffi", fauna_uniffi_async::export)]
 impl AdminNatModeMachine {
     /// Page load: read `fauna.setup.status` and pre-select the current
-    /// `node_mode` (an unknown spelling ⇒ `public`). A read failure surfaces as a
-    /// transient error but leaves save enabled — the set is safe to submit
-    /// without a successful read (mutable upsert).
+    /// `node_mode` (an unknown spelling ⇒ `public`). A read failure surfaces on
+    /// the status line and leaves the radios and save BLOCKED: the page does
+    /// not know the nest's mode, and the pre-selected default is a guess
+    /// (`docs/goal/ui/README.md` § Offer only what is possible, rule 5). A
+    /// later `hydrate()` (the page revisited) can still resolve it.
     pub async fn hydrate(&self) {
+        if self.read_state() != ReadState::Resolved {
+            self.set_read(ReadState::Pending);
+        }
         self.set_snap(|s| {
             s.state = NatModeState::Submitting; // renders as "loading"; save disabled
             s.message = text("admin.nest_page.nat_mode_loading");
             s.submit_enabled = false;
         });
         match self.nest_api.probe_setup_status(&self.nest_url).await {
-            Ok(status) => self.set_snap(|s| {
-                s.selected_mode = status.node_mode.unwrap_or(NodeMode::Public);
-                s.state = NatModeState::Choosing;
-                s.message = text("admin.nest_page.nat_mode_choosing");
-                s.submit_enabled = true;
-            }),
+            Ok(status) => {
+                self.set_read(ReadState::Resolved);
+                self.set_snap(|s| {
+                    s.selected_mode = status.node_mode.unwrap_or(NodeMode::Public);
+                    s.state = NatModeState::Choosing;
+                    s.message = text("admin.nest_page.nat_mode_choosing");
+                    s.submit_enabled = true;
+                })
+            }
             Err(e) => {
                 // A nest too new for this app (its 426) is the one probe
                 // failure no retry clears (version-compatibility.md Dim 4).
@@ -145,13 +197,19 @@ impl AdminNatModeMachine {
                     ProbeError::Transient { reason } | ProbeError::AppOutdated { reason } => reason,
                     other => format!("{other:?}"),
                 };
+                // A re-read that fails after an earlier one resolved keeps the
+                // mode that read gave; only a page that never read stays blocked.
+                let resolved = self.read_state() == ReadState::Resolved;
+                if !resolved {
+                    self.set_read(ReadState::Failed);
+                }
                 self.set_snap(|s| {
                     s.state = NatModeState::Error {
                         transient,
                         cause: cause.clone(),
                     };
                     s.message = text_with_cause("admin.nest_page.nat_mode_error_load", cause);
-                    s.submit_enabled = true;
+                    s.submit_enabled = resolved;
                 });
             }
         }
@@ -162,7 +220,11 @@ impl AdminNatModeMachine {
     /// Success lands `Done` with save **re-enabled** (the admin may flip
     /// again); failures land `Error` with save enabled (resubmit is always
     /// allowed).
+    /// Refused (nothing is sent) while [`Self::save_possibility`] is blocked.
     pub async fn submit(&self) {
+        if !self.save_possibility().is_possible() {
+            return;
+        }
         let selected_mode = {
             let mut s = self.snap.lock().expect("snapshot mutex");
             s.state = NatModeState::Submitting;

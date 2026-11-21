@@ -254,10 +254,20 @@ def test_a_contact_row_opens_the_profile_their_own_nest_serves(
             f"the row tap should open Bob's profile; error={app.error_text()!r}"
         )
         home = app.profile.wait_for_home_nest_url(foreign_peer_url)
+        if home != foreign_peer_url:
+            # The app log's `[profile]` lines say which opener set the home and
+            # whether a navigation dropped it; quoted here because the app's
+            # relocated home is gone once the module tears down (convention 6).
+            log_reader = getattr(app.driver, "app_log_text", None)
+            log_text = (log_reader() if callable(log_reader) else None) or ""
+            profile_lines = [ln for ln in log_text.splitlines() if "[profile]" in ln]
         assert home == foreign_peer_url, (
             f"the profile should carry Bob's own nest {foreign_peer_url!r} "
             f"(resolved from the knock's verified origin); it reads {home!r}; "
-            f"error={app.error_text()!r}"
+            f"error={app.error_text()!r}; the whole profile state now: "
+            f"{app.driver.get_state('data.profile')!r}; the roster's homes: "
+            f"{app.driver.get_state('data.contacts')!r}; the app log's [profile] "
+            f"lines: {profile_lines[-12:]!r}"
         )
     finally:
         if prior_mode != "allow_knock":

@@ -17,8 +17,6 @@ struct MacClaimCodeView: View {
     @State private var code: String = ""
 
     var body: some View {
-        let snap = vm.machine.claimCodeSnapshot()
-
         VStack(alignment: .leading, spacing: 12) {
             automationText(Ids.pageHeading, L.onboarding.claimCode.title)
                 .font(.title2)
@@ -35,20 +33,15 @@ struct MacClaimCodeView: View {
                     .automationField(Ids.claimCodeInput, text: $code)
                     .disableAutocorrection(true)
 
-                Button(L.onboarding.claimCode.submitButton) {
-                    Task { _ = await vm.machine.wizardSubmitClaimCode(code: code) }
-                }
-                // The machine's `submit_enabled` covers the in-flight /
-                // result states; the view additionally gates on input
-                // emptiness (a pure UI concern, per the snapshot doc).
+                Button(L.onboarding.claimCode.submitButton) { vm.submitClaimCode(code) }
                 .keyboardShortcut(.defaultAction)
-                .disabled(!snap.submitEnabled || code.isEmpty)
                 .accessibilityIdentifier(Ids.claimCodeSubmitButton)
-                .automationActivate(Ids.claimCodeSubmitButton,
-                                    isEnabled: { vm.machine.claimCodeSnapshot().submitEnabled && !code.isEmpty }) {
-                    Task { _ = await vm.machine.wizardSubmitClaimCode(code: code) }
-                }
+                .automationActivate(Ids.claimCodeSubmitButton) { vm.submitClaimCode(code) }
+                // One shared answer — a code typed, no claim on its way
+                // (`claim_code_submit_possibility`); `submitClaimCode` re-asks it.
+                .faunaPossible(vm.claimCodePossibility(code))
             }
+            FaunaPossibilityReason(vm.claimCodePossibility(code))
 
             automationText(Ids.claimCodeStatus, renderLocalizedText(vm.machine.claimCodeSnapshot().message))
                 .font(.callout)

@@ -82,7 +82,7 @@ async fn an_owner_sealed_write_with_the_nest_down_mints_a_signed_serveable_pendi
         fauna_core::encoding::canonical_decode(&retained.bytes).unwrap();
 
     // Every chunk the manifest lists is serveable through the one serve core.
-    let keys = manifest.store_keys();
+    let keys = manifest.store_keys().unwrap();
     assert!(!keys.is_empty());
     for key in keys {
         let body = engine

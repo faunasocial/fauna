@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
+using FaunaApp.Core.Helpers;
 using FaunaApp.Core.Logs;
 using FaunaApp.Core.Services;
 using uniffi.fauna_log;
@@ -55,6 +56,16 @@ public partial class AdminLogsViewModel : ObservableObject
     [ObservableProperty] private bool _isLoading;
     [ObservableProperty] private string? _error;
 
+    /// <summary>The text the last confirmed copy put on the clipboard — paints
+    /// <c>log-copy-button</c> as "Copied!" with this as its <c>copied</c> attr (the
+    /// <c>account-actor-id-copy-btn</c> contract); <c>null</c> before a copy, after a
+    /// failed one, and after the filter moves.</summary>
+    [ObservableProperty] private string? _copied;
+
+    /// <summary>The i18n key of the page's own empty line — the reason
+    /// <c>log-copy-button</c> is blocked on an empty ring.</summary>
+    internal const string EmptyReasonKey = "admin.logs_page.empty";
+
     /// <summary>The selected severity-filter index (0 = "All"; 1..5 = Error..Trace).</summary>
     public int FilterIndex { get; private set; }
 
@@ -94,6 +105,7 @@ public partial class AdminLogsViewModel : ObservableObject
     public void SetFilter(int index)
     {
         FilterIndex = index;
+        Copied = null;
         RenderEntries();
     }
 
@@ -101,6 +113,34 @@ public partial class AdminLogsViewModel : ObservableObject
     /// clipboard payload for <c>log-copy-button</c>.</summary>
     public string CopyText()
         => LogsFormat.RenderedText(LogsFormat.FilterEntries(_source, LogsFormat.LevelForIndex(FilterIndex)));
+
+    /// <summary>Whether <c>log-copy-button</c> can copy anything with the entries the
+    /// active filter shows — the shared <c>fauna_log::format::ring_action_possibility</c>
+    /// (blocked by the page's own empty line, <c>admin.logs_page.empty</c>, when none
+    /// are). The button paints from it and the copy asks it again.</summary>
+    internal PossibilityPaint RingAction() =>
+        PossibilityPaint.Of(uniffi.fauna_ffi.FaunaFfiMethods.LogRingActionPossibility((uint)Entries.Count, EmptyReasonKey));
+
+    /// <summary>The clipboard payload for a copy the answer allows, or <c>null</c>
+    /// when <see cref="RingAction"/> refuses it.</summary>
+    internal string? CopyPayload() => RingAction().IsPossible ? CopyText() : null;
+
+    /// <summary>Record a copy's outcome (<c>docs/goal/ui/README.md</c> § Offer only what
+    /// is possible, rule 7): a write that reached the clipboard confirms on
+    /// <c>log-copy-button</c> (<see cref="Copied"/>); one that threw says so on
+    /// <c>error-message</c> (<c>common.copy_failed</c>), leading any read failure.</summary>
+    internal void RecordCopyOutcome(string text, Exception? failure)
+    {
+        if (failure is null)
+        {
+            Copied = text;
+        }
+        else
+        {
+            Copied = null;
+            Error = Strings.Format("common/copy_failed", failure.Message);
+        }
+    }
 
     /// <summary>Read the audit section's newest page — a fresh section on every
     /// entry to the page, replacing what was held.</summary>

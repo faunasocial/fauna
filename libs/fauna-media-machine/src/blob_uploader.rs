@@ -68,6 +68,33 @@ pub trait MediaBlobUploader: fauna_core::MaybeSendSync {
         manifest_hash: [u8; 32],
         manifest_bytes: Vec<u8>,
     ) -> Result<(), MediaApiError>;
+
+    /// `POST /api/v1/manifest-pages` — store one page of a paged manifest
+    /// (`file-sync.md` § Paged manifests → *Transport and order*), keyed by
+    /// `blake3(page_bytes)`; the impl verifies the reply names `page_hash`.
+    /// Called after the chunks and before the root that names the page. The
+    /// default refuses: a door that does not carry pages never posts a root
+    /// (its [`Self::supports_paged_manifests`] answers `false` first).
+    async fn post_manifest_page(
+        &self,
+        page_hash: [u8; 32],
+        page_bytes: Vec<u8>,
+    ) -> Result<(), MediaApiError> {
+        let _ = (page_hash, page_bytes);
+        Err(MediaApiError::BadRequest {
+            detail: "this upload door does not carry manifest pages".to_string(),
+        })
+    }
+
+    /// Whether the nest this door writes to advertises `paged-manifests` on
+    /// `fauna.nest.info` (`file-sync.md` § Paged manifests →
+    /// *Compatibility*) — asked before any chunk of a paged file is sent. The
+    /// default answers `false`: a door that cannot read its nest's
+    /// capabilities refuses a paged file rather than risk a nest that would
+    /// reclaim its chunks.
+    async fn supports_paged_manifests(&self) -> Result<bool, MediaApiError> {
+        Ok(false)
+    }
 }
 
 /// The Media upload seam as the shared re-seal's write seam: chunks then the
@@ -97,11 +124,38 @@ impl fauna_core::nest_reseal::ChunkStoreSink for UploaderSink<'_> {
         &self,
         manifest_hash: fauna_core::data::ContentHash,
         manifest_bytes: Vec<u8>,
+        pages: Vec<Vec<u8>>,
     ) -> anyhow::Result<()> {
+        // Pages before the root (the nest admits a root only once every page
+        // it names is at rest); each put is idempotent, as a chunk's is.
+        for page in pages {
+            let page_hash = fauna_core::data::ContentHash::of_raw(&page);
+            self.0
+                .post_manifest_page(page_hash.digest(), page)
+                .await
+                .map_err(|e| anyhow::anyhow!("manifest page upload: {e}"))?;
+        }
         self.0
             .post_manifest(manifest_hash.digest(), manifest_bytes)
             .await
             .map_err(|e| anyhow::anyhow!("manifest upload: {e}"))
+    }
+
+    async fn admit_paged_manifest(&self, chunks: usize) -> anyhow::Result<()> {
+        let supported = self
+            .0
+            .supports_paged_manifests()
+            .await
+            .map_err(|e| anyhow::anyhow!("reading the nest's capabilities: {e}"))?;
+        if supported {
+            Ok(())
+        } else {
+            Err(anyhow::Error::new(
+                fauna_core::nest_reseal::FileTooLargeForNest {
+                    chunks: Some(chunks),
+                },
+            ))
+        }
     }
 }
 
@@ -124,6 +178,13 @@ pub struct FakeMediaBlobUploader {
     chunks: Mutex<Vec<([u8; 32], Vec<u8>)>>,
     /// Each `(manifest_hash, manifest_bytes)` received, in order.
     manifests: Mutex<Vec<([u8; 32], Vec<u8>)>>,
+    /// Each `(page_hash, page_bytes)` manifest page received, in order.
+    manifest_pages: Mutex<Vec<([u8; 32], Vec<u8>)>>,
+    /// What `supports_paged_manifests` answers (a current nest: `true`).
+    paged_manifests: Mutex<bool>,
+    /// Every leg in the order it was called: `"chunk"`, `"page"`,
+    /// `"manifest"`.
+    order: Mutex<Vec<&'static str>>,
 }
 
 #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
@@ -136,7 +197,27 @@ impl FakeMediaBlobUploader {
             posts: Mutex::new(Vec::new()),
             chunks: Mutex::new(Vec::new()),
             manifests: Mutex::new(Vec::new()),
+            manifest_pages: Mutex::new(Vec::new()),
+            paged_manifests: Mutex::new(true),
+            order: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Answer `supports_paged_manifests` as a nest without the token would.
+    pub fn without_paged_manifests(self) -> Self {
+        *self.paged_manifests.lock().unwrap() = false;
+        self
+    }
+
+    /// All recorded `(page_hash, page_bytes)` manifest page posts, in order.
+    pub fn manifest_pages(&self) -> Vec<([u8; 32], Vec<u8>)> {
+        self.manifest_pages.lock().unwrap().clone()
+    }
+
+    /// Every chunk-store leg in call order (`"chunk"`, `"page"`,
+    /// `"manifest"`).
+    pub fn order(&self) -> Vec<&'static str> {
+        self.order.lock().unwrap().clone()
     }
 
     /// Make every leg fail with `err`.
@@ -185,6 +266,7 @@ impl MediaBlobUploader for FakeMediaBlobUploader {
 
     async fn post_chunk(&self, store_key: [u8; 32], body: Vec<u8>) -> Result<(), MediaApiError> {
         self.chunks.lock().unwrap().push((store_key, body));
+        self.order.lock().unwrap().push("chunk");
         self.outcome()
     }
 
@@ -197,7 +279,25 @@ impl MediaBlobUploader for FakeMediaBlobUploader {
             .lock()
             .unwrap()
             .push((manifest_hash, manifest_bytes));
+        self.order.lock().unwrap().push("manifest");
         self.outcome()
+    }
+
+    async fn post_manifest_page(
+        &self,
+        page_hash: [u8; 32],
+        page_bytes: Vec<u8>,
+    ) -> Result<(), MediaApiError> {
+        self.manifest_pages
+            .lock()
+            .unwrap()
+            .push((page_hash, page_bytes));
+        self.order.lock().unwrap().push("page");
+        self.outcome()
+    }
+
+    async fn supports_paged_manifests(&self) -> Result<bool, MediaApiError> {
+        Ok(*self.paged_manifests.lock().unwrap())
     }
 }
 
@@ -281,6 +381,8 @@ mod native {
     /// `NestClient`, retiring the per-app app-code blob POST (priority #2).
     pub struct NativeBlobUploader {
         content: ReqwestNestContentApi<Arc<dyn BearerSource>>,
+        /// The session, for `fauna.nest.info` (the `paged-manifests` token).
+        nest: Arc<NestClient>,
     }
 
     impl NativeBlobUploader {
@@ -289,6 +391,7 @@ mod native {
         pub fn new(nest: &Arc<NestClient>) -> Self {
             Self {
                 content: nest.auth().content_api(),
+                nest: Arc::clone(nest),
             }
         }
     }
@@ -340,6 +443,36 @@ mod native {
                 .await
                 .map_err(|e| crate::nest_api::map_content_api_err(e, "manifest upload"))?;
             super::verify_stored_under(&reply, manifest_hash, "manifest")
+        }
+
+        async fn post_manifest_page(
+            &self,
+            page_hash: [u8; 32],
+            page_bytes: Vec<u8>,
+        ) -> Result<(), MediaApiError> {
+            let reply = self
+                .content
+                .post_bytes(
+                    fauna_nest_http::paths::chunk_store::MANIFEST_PAGES_UPLOAD,
+                    "application/octet-stream",
+                    page_bytes,
+                )
+                .await
+                .map_err(|e| crate::nest_api::map_content_api_err(e, "manifest page upload"))?;
+            super::verify_stored_under(&reply, page_hash, "manifest page")
+        }
+
+        async fn supports_paged_manifests(&self) -> Result<bool, MediaApiError> {
+            let info = fauna_protocol::read_nest_info(&self.nest)
+                .await
+                .map_err(|e| MediaApiError::Transient {
+                    detail: format!("nest info read failed: {e}"),
+                })?;
+            use fauna_protocol::discovery::capability;
+            Ok(capability::supports(
+                &info.capabilities,
+                capability::PAGED_MANIFESTS,
+            ))
         }
     }
 
@@ -593,6 +726,35 @@ mod wasm {
             .await
             .map_err(|e| crate::nest_api::map_blob_http_err(e, "manifest upload"))?;
             super::verify_stored_under(reply.as_bytes(), manifest_hash, "manifest")
+        }
+
+        async fn post_manifest_page(
+            &self,
+            page_hash: [u8; 32],
+            page_bytes: Vec<u8>,
+        ) -> Result<(), MediaApiError> {
+            let reply = fauna_rpc_wasm::post_octets_keyed(
+                &self.nest,
+                fauna_rpc_wasm::MANIFEST_PAGES_UPLOAD_PATH,
+                None,
+                &page_bytes,
+            )
+            .await
+            .map_err(|e| crate::nest_api::map_blob_http_err(e, "manifest page upload"))?;
+            super::verify_stored_under(reply.as_bytes(), page_hash, "manifest page")
+        }
+
+        async fn supports_paged_manifests(&self) -> Result<bool, MediaApiError> {
+            let info = fauna_protocol::read_nest_info(&self.nest)
+                .await
+                .map_err(|e| MediaApiError::Transient {
+                    detail: format!("nest info read failed: {e}"),
+                })?;
+            use fauna_protocol::discovery::capability;
+            Ok(capability::supports(
+                &info.capabilities,
+                capability::PAGED_MANIFESTS,
+            ))
         }
     }
 

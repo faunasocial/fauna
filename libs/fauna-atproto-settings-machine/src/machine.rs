@@ -52,6 +52,7 @@ use fauna_core::control_chars::strip_control_chars;
 use fauna_core::data::{AtprotoAppCredential, Timestamp};
 use fauna_core::identity::ActorKeypair;
 use fauna_core::localized::LocalizedText;
+use fauna_core::possibility::{Possibility, ReadState};
 use fauna_core::secret::{SecretByteBuf, SecretString};
 use fauna_protocol::atproto::{IntegrationLevel, LevelContext, TransitionPlan};
 
@@ -192,6 +193,11 @@ const CARD_SUSPEND_PLANE_KEY: &str = "atproto_settings.card_suspend_plane";
 struct State {
     // ── depth selector ──────────────────────────────────────────────────
     level: IntegrationLevel,
+    /// Where the integration-status read that decides `level` and
+    /// `hosted_allowed` stands (`ui/README.md` § Offer only what is possible,
+    /// rule 5): until it resolves the level is a default, not a fact, and no
+    /// rung is offered on it.
+    status_read: ReadState,
     hosted_allowed: bool,
     handle_domain: String,
     handle_preview: String,
@@ -337,6 +343,7 @@ impl State {
             // fetch proves the gate passes: a first paint must not offer a
             // hosted entry the nest would grey.
             level: IntegrationLevel::Off,
+            status_read: ReadState::Pending,
             hosted_allowed: false,
             handle_domain: String::new(),
             handle_preview: String::new(),
@@ -867,6 +874,54 @@ impl AtprotoSettingsMachine {
 
 #[cfg_attr(feature = "uniffi", fauna_uniffi_async::export)]
 impl AtprotoSettingsMachine {
+    // ── Possibility: what the page may offer now ────────────────────────
+    //
+    // `ui/README.md` § Offer only what is possible, rule 6: one predicate in
+    // shared Rust answers each gated affordance, and the action asks the same
+    // one. Pages paint from these; they never re-derive the gate from the
+    // snapshot's `hosted_allowed` / `show_contest` / `retire_identity` fields.
+
+    /// Whether the depth rung for `target_level` can be selected now: blocked
+    /// `common.still_loading` / `common.load_failed` until the status read
+    /// resolves (rule 5), blocked by the hosted gate's reason when entering a
+    /// hosted level the box refuses, absent for a level this build does not
+    /// know. [`Self::select_level`] refuses with the same reason.
+    pub fn rung_possibility(&self, target_level: String) -> Possibility {
+        let s = self.state.lock().unwrap();
+        match IntegrationLevel::from_wire(&target_level) {
+            Some(target) => rung_possibility_in(&s, target),
+            None => Possibility::Absent,
+        }
+    }
+
+    /// Whether `atproto-delegation-authorize` can succeed: blocked with
+    /// `error_no_identity` when this app holds no signing identity (known at
+    /// construction), so the form is not opened to fail at its submit (rule
+    /// 4). Blocked, not absent: the reason points the person to another
+    /// device where it can be done. [`Self::authorize_external_apps`] asks
+    /// the same predicate.
+    pub fn authorize_possibility(&self) -> Possibility {
+        if self.identity.is_none() {
+            Possibility::blocked(LocalizedText::key(NO_IDENTITY_ERROR_KEY))
+        } else {
+            Possibility::Possible
+        }
+    }
+
+    /// Whether `atproto-contest` is offered: possible only on a contestable
+    /// violation, absent otherwise ("no dead button on a hopeless state").
+    /// [`Self::open_contest_confirm`] asks the same predicate.
+    pub fn contest_possibility(&self) -> Possibility {
+        contest_possibility_in(&self.state.lock().unwrap())
+    }
+
+    /// Whether the delete card's `atproto-delete-tombstone` tick can be set:
+    /// blocked with the reason this identity cannot be retired.
+    /// [`Self::set_delete_retire_identity`] asks the same predicate.
+    pub fn retire_identity_possibility(&self) -> Possibility {
+        Possibility::from_blocked_reason(retire_unavailable_reason(&self.state.lock().unwrap()))
+    }
+
     // ── Read surface ────────────────────────────────────────────────────
 
     /// The whole renderable ATProto settings surface in one record. Never
@@ -1120,6 +1175,11 @@ impl AtprotoSettingsMachine {
                     let mut s = self.state.lock().unwrap();
                     if let Some(level) = level {
                         s.level = level;
+                        s.status_read = ReadState::Resolved;
+                    } else if s.status_read != ReadState::Resolved {
+                        // A newer nest's unknown level is not a read this
+                        // build can decide from.
+                        s.status_read = ReadState::Failed;
                     }
                     s.hosted_allowed = status.hosted_allowed;
                     s.handle_domain = status.handle_domain;
@@ -1179,7 +1239,17 @@ impl AtprotoSettingsMachine {
                     );
                 }
             }
-            Err(e) => self.set_error(REFRESH_ERROR_KEY, e.detail()),
+            Err(e) => {
+                {
+                    // A failure after an earlier success keeps the last good
+                    // read; before one, the page is told the read failed.
+                    let mut s = self.state.lock().unwrap();
+                    if s.status_read != ReadState::Resolved {
+                        s.status_read = ReadState::Failed;
+                    }
+                }
+                self.set_error(REFRESH_ERROR_KEY, e.detail())
+            }
         }
 
         match self.nest_api.bluesky_link_status().await {
@@ -1379,15 +1449,18 @@ impl AtprotoSettingsMachine {
                 // resolves (the refresh that follows repaints the truth).
                 return;
             }
+            // The action asks the page's own predicate (rule 6): a gesture
+            // that arrives before the status read resolved, or into a gated
+            // hosted level, is refused with the reason the page shows.
+            if let Possibility::Blocked { reason } = rung_possibility_in(&s, target) {
+                drop(s);
+                self.set_error_localized(reason);
+                self.observer.on_changed();
+                return;
+            }
             if target == s.level {
                 s.pending = None;
                 None
-            } else if target.is_hosted() && !s.hosted_allowed {
-                let domain = s.handle_domain.clone();
-                drop(s);
-                self.set_error_localized(LocalizedText::key_arg(GATE_REASON_KEY, "domain", domain));
-                self.observer.on_changed();
-                return;
             } else {
                 let plan = TransitionPlan::for_move(s.level, target, s.level_context());
                 let apply_now = plan.is_effect_free();
@@ -1933,8 +2006,8 @@ impl AtprotoSettingsMachine {
     pub fn open_contest_confirm(&self) {
         {
             let mut s = self.state.lock().unwrap();
-            match s.contest.as_ref() {
-                Some((_, card)) if card.show_contest => {
+            match contest_possibility_in(&s) {
+                Possibility::Possible => {
                     s.contest_confirm = Some(ContestConfirm { in_progress: false });
                 }
                 _ => {
@@ -2188,7 +2261,7 @@ impl AtprotoSettingsMachine {
     pub fn set_delete_retire_identity(&self, enabled: bool) {
         let refused = {
             let mut s = self.state.lock().unwrap();
-            let available = retire_unavailable_reason(&s).is_none();
+            let available = retire_unavailable_reason(&s).is_none(); // = `retire_identity_possibility()`
             match s.delete_confirm.as_mut() {
                 None => return,
                 Some(d) if d.in_progress => return,
@@ -2243,8 +2316,8 @@ impl AtprotoSettingsMachine {
         // Checked BEFORE the fetch, which mints `K`: a client that cannot sign
         // must not leave a sub-key behind it will never authorize. An honest
         // refusal rather than a silent no-op, per testing.md rule 11.
-        if self.identity.is_none() {
-            self.set_error_localized(LocalizedText::key(NO_IDENTITY_ERROR_KEY));
+        if let Possibility::Blocked { reason } = self.authorize_possibility() {
+            self.set_error_localized(reason);
             self.observer.on_changed();
             return;
         }
@@ -3045,6 +3118,32 @@ fn compose_delete_confirm_lines(s: &State, retire: bool) -> Vec<LocalizedText> {
         LocalizedText::key(DELETE_CONFIRM_LEVEL_OFF_KEY),
         LocalizedText::key(CARD_NO_RECALL_KEY),
     ]
+}
+
+/// The rung predicate behind [`AtprotoSettingsMachine::rung_possibility`].
+/// Staying at (or leaving to) a hosted level is never gated; only ENTERING one
+/// the box refuses is (mirrors `select_level`'s refusal and linux's
+/// `!gated || active`).
+fn rung_possibility_in(s: &State, target: IntegrationLevel) -> Possibility {
+    Possibility::from_read(s.status_read).and(
+        if target.is_hosted() && target != s.level && !s.hosted_allowed {
+            Possibility::blocked(LocalizedText::key_arg(
+                GATE_REASON_KEY,
+                "domain",
+                s.handle_domain.clone(),
+            ))
+        } else {
+            Possibility::Possible
+        },
+    )
+}
+
+/// The contest predicate behind [`AtprotoSettingsMachine::contest_possibility`].
+fn contest_possibility_in(s: &State) -> Possibility {
+    match s.contest.as_ref() {
+        Some((_, card)) if card.show_contest => Possibility::Possible,
+        _ => Possibility::Absent,
+    }
 }
 
 /// Why this identity cannot be retired, or `None` when it can: a **published
@@ -4319,6 +4418,113 @@ mod selector_tests {
         assert!(
             format!("{reason:?}").contains("localhost"),
             "the reason names the domain: {reason:?}"
+        );
+    }
+
+    fn blocked_key(p: &Possibility) -> Option<&str> {
+        p.reason().map(|r| r.key.as_str())
+    }
+
+    #[tokio::test]
+    async fn no_rung_is_possible_before_the_status_read_resolves() {
+        // rule 5: unknown is not possible — Off and Linked included, since
+        // Off → Linked would apply at once as a nest write.
+        let (m, api, _cfg, _o) = machine();
+        for level in ["off", "linked", "hosted_visible", "hosted_full"] {
+            assert_eq!(
+                blocked_key(&m.rung_possibility(level.to_string())),
+                Some("common.still_loading"),
+                "{level} before the read"
+            );
+        }
+        // The action asks the same predicate: a gesture that arrives anyway is
+        // refused with that reason, and nothing is written.
+        m.select_level("linked".to_string()).await;
+        assert_eq!(
+            m.snapshot().error.map(|e| e.key),
+            Some("common.still_loading".to_string())
+        );
+        assert_eq!(m.snapshot().level, "off");
+        assert!(m.snapshot().pending_transition.is_none());
+
+        api.set_status("off", true, "example.com", "", None);
+        m.refresh().await;
+        assert_eq!(m.rung_possibility("linked".into()), Possibility::Possible);
+        assert_eq!(m.rung_possibility("off".into()), Possibility::Possible);
+    }
+
+    #[tokio::test]
+    async fn a_failed_status_read_says_it_failed_not_that_it_loads() {
+        let (m, api, _cfg, _o) = machine();
+        api.fail_status(AtprotoSettingsApiError::Transient {
+            detail: "status read down".into(),
+        });
+        m.refresh().await;
+        assert_eq!(
+            blocked_key(&m.rung_possibility("linked".into())),
+            Some("common.load_failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_gated_hosted_rung_is_blocked_with_the_domain_reason_but_the_active_one_is_not() {
+        let (m, api, _cfg, _o) = machine();
+        api.set_status("off", false, "localhost", "", None);
+        m.refresh().await;
+        let p = m.rung_possibility("hosted_visible".into());
+        assert_eq!(blocked_key(&p), Some(GATE_REASON_KEY));
+        assert!(format!("{p:?}").contains("localhost"));
+        assert_eq!(m.rung_possibility("linked".into()), Possibility::Possible);
+        // The action refuses with the same reason.
+        m.select_level("hosted_visible".to_string()).await;
+        assert_eq!(
+            m.snapshot().error.map(|e| e.key),
+            Some(GATE_REASON_KEY.to_string())
+        );
+        // A hosted level the person is already AT stays selectable, so a
+        // step-down stays reachable when the domain later stops being public.
+        api.set_status("hosted_visible", false, "localhost", "", None);
+        m.refresh().await;
+        assert_eq!(
+            m.rung_possibility("hosted_visible".into()),
+            Possibility::Possible
+        );
+    }
+
+    #[tokio::test]
+    async fn authorize_is_blocked_at_the_entry_when_no_identity_is_held() {
+        let (m, _api, _cfg, _o) = machine();
+        assert_eq!(
+            blocked_key(&m.authorize_possibility()),
+            Some(NO_IDENTITY_ERROR_KEY)
+        );
+        // The action asks the same predicate and still refuses loudly.
+        m.authorize_external_apps().await;
+        assert_eq!(
+            m.snapshot().error.map(|e| e.key),
+            Some(NO_IDENTITY_ERROR_KEY.to_string())
+        );
+
+        let verifier = crate::custody::FakeGenesisVerifier::new(Err(
+            crate::custody::VerifyFailure::Fetch("test default: directory unreachable".into()),
+        ));
+        let m = AtprotoSettingsMachine::new_with_identity(
+            CountingObserver::new(),
+            Arc::new(FakeAtprotoSettingsNestApi::new()),
+            verifier,
+            None,
+            Some(ActorKeypair::from_secret([11u8; 32])),
+        );
+        assert_eq!(m.authorize_possibility(), Possibility::Possible);
+    }
+
+    #[tokio::test]
+    async fn contest_is_absent_and_retire_blocked_with_no_standing_violation_or_identity() {
+        let (m, _api, _cfg, _o) = machine();
+        assert_eq!(m.contest_possibility(), Possibility::Absent);
+        assert_eq!(
+            blocked_key(&m.retire_identity_possibility()),
+            Some(DELETE_RETIRE_UNAVAILABLE_UNPUBLISHED_KEY)
         );
     }
 

@@ -17,7 +17,7 @@ use std::rc::Rc;
 use gtk::prelude::*;
 
 use fauna_conversations::{
-    Rail, ThreadCapabilities, TypedAddress,
+    NewThreadControl, Rail, ThreadCapabilities, ThreadControl, TypedAddress,
     compose::{AttachmentDraft, ComposeState},
 };
 
@@ -466,14 +466,26 @@ impl ComposeBar {
         }
 
         if let Some(caps) = caps {
-            // `can_send` (shared Rust): false on a bridged room no bridge serves.
-            // The body and send button stay in view, readable and never writable
-            // (the e2e driver reads `disabled == "true"` off the insensitive widget).
-            self.text_view.set_sensitive(caps.can_send);
-            self.text_view.set_editable(caps.can_send);
-            self.send_btn.set_sensitive(caps.can_send);
+            // The reply bar's shared answer (`ThreadCapabilities::send_possibility`):
+            // blocked on a bridged room no bridge serves, by the sentence
+            // `thread-room-notice` already states (so the reason rides the
+            // tooltips, not a second line). The body and send button stay in
+            // view, readable and never writable (the e2e driver reads
+            // `disabled == "true"` off the insensitive widget).
+            let send = caps.send_possibility();
+            crate::possible::paint(&self.text_view, None, send.clone());
+            self.text_view.set_editable(send.is_possible());
+            crate::possible::paint(&self.send_btn, None, send);
             self.attach_btn.set_sensitive(caps.supports_attachments);
-            self.topic_btn.set_sensitive(caps.supports_subject);
+            // A rail with no subject has no topic toggle at all: the shared
+            // `Subject` answer is a rail absence, never a disabled control
+            // (`ui/conversations.md` § Errors & edge cases → *Controls this
+            // person can never use*).
+            crate::possible::paint(
+                &self.topic_btn,
+                None,
+                caps.possibility(ThreadControl::Subject, None),
+            );
             // Gate the markdown toolbar Box (so the whole row greys out and
             // the e2e `get_attr("markdown-toolbar", "disabled")` reads
             // "true"), and each markdown button individually (so
@@ -523,6 +535,22 @@ impl ComposeBar {
         );
 
         *self.refreshing.borrow_mut() = false;
+    }
+
+    /// The new-thread composer's gated controls — Send, attach and topic —
+    /// painted from the shared answer (`fauna_conversations::new_thread_controls`;
+    /// `ui/conversations.md` § Errors & edge cases → *The new-thread composer
+    /// offers only what it can send*). A thread not yet created has no
+    /// capabilities, so the reply bar's `caps` gating in [`Self::render`] does
+    /// not apply: Send waits for anyone to send to, attach and topic take a
+    /// draft not yet addressed and then follow the recipient's rail. Call it
+    /// after `render` on every tick of the new-thread composer; the handlers
+    /// ask the same answer (`super::new_thread_control`).
+    pub fn paint_new_thread_controls(&self, compose: Option<&ComposeState>) {
+        let answer = |control| fauna_conversations::new_thread_possibility(compose, control);
+        crate::possible::paint(&self.send_btn, None, answer(NewThreadControl::Send));
+        crate::possible::paint(&self.attach_btn, None, answer(NewThreadControl::Attach));
+        crate::possible::paint(&self.topic_btn, None, answer(NewThreadControl::Topic));
     }
 
     pub fn on_body_change(&self, f: impl Fn(String) + 'static) {
@@ -650,4 +678,122 @@ fn build_attachment_chip(
     chip.append(&remove);
 
     chip
+}
+
+#[cfg(test)]
+mod tests {
+    //! The new-thread composer offers only what it can send
+    //! (`ui/conversations.md` § Errors & edge cases), painted through the
+    //! possibility seam — the twin of tui's
+    //! `the_new_thread_composer_offers_send_only_with_a_recipient_and_attach_and_topic_by_rail`.
+    use super::*;
+    use fauna_conversations::compose::RecipientPickerState;
+
+    fn compose_to(chips: Vec<TypedAddress>, raw_input: &str) -> ComposeState {
+        ComposeState {
+            recipient_picker: Some(RecipientPickerState {
+                raw_input: raw_input.to_string(),
+                chips,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn painted(bar: &ComposeBar, compose: &ComposeState) {
+        bar.render(compose, None, None, None, false);
+        bar.paint_new_thread_controls(Some(compose));
+    }
+
+    #[test]
+    fn new_thread_send_waits_for_a_recipient_with_the_reason() {
+        crate::testid::run_on_gtk_thread(|| {
+            let bar = ComposeBar::new();
+            painted(&bar, &compose_to(Vec::new(), ""));
+            assert!(
+                !bar.send_btn.is_sensitive(),
+                "Send is blocked with no recipient"
+            );
+            assert_eq!(
+                bar.send_btn.tooltip_text().as_deref(),
+                Some(crate::i18n::strings::conversations::compose::NEEDS_RECIPIENT),
+                "and says why"
+            );
+            assert!(
+                bar.attach_btn.is_sensitive(),
+                "attach takes an unaddressed draft"
+            );
+            assert!(
+                bar.topic_btn.is_sensitive(),
+                "topic takes an unaddressed draft"
+            );
+
+            painted(&bar, &compose_to(Vec::new(), "someone@example.org"));
+            assert!(
+                bar.send_btn.is_sensitive(),
+                "a typed recipient makes Send possible — Send flushes it"
+            );
+        });
+    }
+
+    #[test]
+    fn new_thread_attach_and_topic_follow_a_bridged_recipients_rail() {
+        crate::testid::run_on_gtk_thread(|| {
+            let bar = ComposeBar::new();
+            painted(
+                &bar,
+                &compose_to(
+                    vec![TypedAddress::Bridged {
+                        bridge_id: "bridge".to_string(),
+                        address: "far".to_string(),
+                    }],
+                    "",
+                ),
+            );
+            assert!(bar.send_btn.is_sensitive());
+            assert!(!bar.attach_btn.is_sensitive());
+            assert_eq!(
+                bar.attach_btn.tooltip_text().as_deref(),
+                Some(crate::i18n::strings::conversations::compose::NO_ATTACHMENTS_HERE)
+            );
+            assert!(!bar.topic_btn.is_sensitive());
+            assert_eq!(
+                bar.topic_btn.tooltip_text().as_deref(),
+                Some(crate::i18n::strings::conversations::compose::NO_TOPIC_HERE)
+            );
+        });
+    }
+
+    /// The reply bar paints from the shared `send_possibility`: a room no
+    /// bridge serves blocks the body and Send with the room notice's sentence;
+    /// a sendable thread leaves both live — the twin of tui's reply-bar gate.
+    #[test]
+    fn reply_bar_follows_the_shared_send_answer() {
+        crate::testid::run_on_gtk_thread(|| {
+            let bar = ComposeBar::new();
+            let mut caps = fauna_conversations::capabilities::derive_capabilities(
+                Rail::FaunaMls,
+                fauna_conversations::ThreadFlavor::OneToOne,
+            );
+            caps.can_send = false;
+            bar.render(&ComposeState::default(), Some(&caps), None, None, false);
+            let reason = crate::i18n::strings::lookup(
+                fauna_conversations::thread_controls::SEND_BLOCKED_REASON_KEY,
+            )
+            .unwrap();
+            assert!(!bar.send_btn.is_sensitive());
+            assert!(!bar.text_view.is_sensitive() && !bar.text_view.is_editable());
+            assert_eq!(bar.send_btn.tooltip_text().as_deref(), Some(reason));
+            assert_eq!(
+                crate::possible::painted_answer(&bar.send_btn),
+                Some(caps.send_possibility())
+            );
+
+            caps.can_send = true;
+            bar.render(&ComposeState::default(), Some(&caps), None, None, false);
+            assert!(bar.send_btn.is_sensitive());
+            assert!(bar.text_view.is_sensitive() && bar.text_view.is_editable());
+            assert!(crate::possible::painted_possible(&bar.send_btn));
+        });
+    }
 }

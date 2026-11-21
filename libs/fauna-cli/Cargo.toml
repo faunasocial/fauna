@@ -37,6 +37,14 @@ fauna-client-web = { path = "../fauna-client-web" }
 # mail, mail-reports, aliases, calendar, contacts, files and pending-bridge
 # tools are its verbs. wasm-safe as declared by the crate itself.
 fauna-client-bridges = { path = "../fauna-client-bridges" }
+# The mail-side admin pages' draft predicates — the domain forms, the
+# forwarder and CalDAV-port drafts, the mail-policy knob parser — which every
+# tool asks before it sends (`apps/cli.md` § A tool that cannot run, rule 5).
+# wasm-safe as declared by the crate itself; default features off.
+fauna-client-mail-settings = { path = "../fauna-client-mail-settings" }
+# The shared string table: a predicate's blocked reason is a key, and the
+# tool's refusal is its English sentence.
+fauna-i18n = { path = "../fauna-i18n" }
 # The mail-reports page's raw view: the bounded gunzip the apps' report view
 # decodes an archived report with (`dmarc-report-view`, declared WASM-safe by
 # the crate; the receive half's MIME parser and zip reader stay out).

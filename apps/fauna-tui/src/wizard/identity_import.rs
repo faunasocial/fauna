@@ -38,12 +38,16 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
             Field::Wizard(WizardField::ImportSecret),
         )
         .labelled(t::PASTE_LABEL),
+        // Painted from the shared draft predicate (`ui/README.md` § Offer only
+        // what is possible, rule 4's form case): blank and malformed pastes
+        // block it with the same line the submit refuses with.
         Element::button(
             ids::IMPORT_SUBMIT_BUTTON,
             t::IMPORT,
-            !typed.is_empty(),
+            true,
             Action::ConfirmImportedIdentity,
-        ),
+        )
+        .possible(fauna_onboarding_machine::identity_import_possibility(typed)),
         Element::button(
             ids::IDENTITY_IMPORT_BACK_BUTTON,
             common::BACK,

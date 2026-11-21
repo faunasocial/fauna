@@ -1191,6 +1191,28 @@ impl DevicesMachine {
         })
     }
 
+    /// [`Self::rename_device`], resolving whether the editor may close
+    /// (`ui/devices.md` § Errors & edge cases): `true` once the name is saved
+    /// or there was nothing to send; `false` on every refusal and failure,
+    /// each already on `error-message`, so the editor stays open.
+    #[wasm_bindgen(js_name = saveDeviceName)]
+    pub fn save_device_name(&self, device_id: String, label: String) -> js_sys::Promise {
+        let inner = Arc::clone(&self.0);
+        wasm_bindgen_futures::future_to_promise(async move {
+            Ok(JsValue::from_bool(
+                inner.save_device_name(device_id, label).await,
+            ))
+        })
+    }
+
+    /// `device-rename-confirm-button`'s answer over the typed `draft`
+    /// (`DevicesMachine::rename_possibility`): the `Possibility` JSON the
+    /// SPA's `paintPossibility` reads.
+    #[wasm_bindgen(js_name = renamePossibility)]
+    pub fn rename_possibility(&self, device_id: String, draft: String) -> Result<JsValue, JsValue> {
+        to_js(&self.0.rename_possibility(&device_id, &draft)).map_err(err_to_js)
+    }
+
     /// The opened name of the listed device `deviceId` (`devices.md` §
     /// Device names) — what `device-rename-input` opens prefilled with
     /// (`ui/devices.md` § Device names), without the ` · code` rule (c)

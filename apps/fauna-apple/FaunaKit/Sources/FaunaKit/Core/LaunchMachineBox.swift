@@ -86,6 +86,29 @@ public final class LaunchMachineBox {
         return generation
     }
 
+    /// A launch's claim at its entry: a fresh ``beginLaunch()`` claim, or — for a
+    /// RE-ENTRY that a gate deferred — the claim it was deferred with, while that is
+    /// still current. `nil` means a superseding path ran in between: drop the
+    /// re-entry before it touches anything.
+    ///
+    /// ⚠ **The second window, which both apple targets fell in after the first was
+    /// closed.** The sign-out gate (`OnboardingVM.launchMayProceed`) defers the
+    /// FIRST launch of every process across a detached finish and re-enters through
+    /// its `relaunch` closure. A launch that claimed only after that gate held no
+    /// claim across the finish, so an e2e session patch landing then cleared an empty
+    /// box and retired nothing. The re-entry then read the patched-in actor, entered
+    /// optimistically with a second `FaunaClient` and built the production
+    /// conversations session over the patch's: one process, two sessions, the
+    /// patch's MLS engine retired under the send that was using it. Measured on ios
+    /// as `conversations_real_resolve_send_new: send failed: … handed over to a newer
+    /// engine` in the at-rest upgrade cell, and as both
+    /// rail stamps in one seat's log. So a launch claims
+    /// at entry, BEFORE the gate, and the deferred re-entry carries that claim.
+    public func claim(resuming claim: UInt64?) -> UInt64? {
+        guard let claim else { return beginLaunch() }
+        return isCurrent(launch: claim) ? claim : nil
+    }
+
     /// Whether the launch that ``beginLaunch()`` returned `launch` to is still the
     /// current one — nothing has cleared the box or begun a newer launch since.
     public func isCurrent(launch: UInt64) -> Bool {
@@ -107,6 +130,36 @@ public final class LaunchMachineBox {
         let current = self.machine === machine
         LaunchVerdicts.record(current: current)
         return current
+    }
+
+    /// The finished wizard's hold (`onboarding.md` § Wizard exit handling → *The
+    /// finished wizard holds until the session is signed in*): set when the
+    /// wizard's `LoggedIn` handoff, or an append finish, starts the launch;
+    /// released by that launch's `Online` verdict, or by a plain account switch.
+    ///
+    /// iOS enters a launch optimistically off the cached session of an account
+    /// this device entered before; a just-finished wizard has no such session, so
+    /// while the hold stands the launch gates as macOS's always does — the
+    /// `launch_progress` spinner, the tabs only on `Online`, `launch_retry` on a
+    /// transient failure. **It lives here, apart from ``machine``, on purpose:**
+    /// every clear of the box (the append finish's switch teardown, Retry's fresh
+    /// launch) leaves it standing, so the hold — and with it the wizard's deferred
+    /// first-setup work, which runs only in the `Online` glue — survives every
+    /// Retry and is spent once.
+    public private(set) var heldUntilOnline = false
+
+    /// Hold the next launches until one of them lands `Online`.
+    public func holdUntilOnline() { heldUntilOnline = true }
+
+    /// Release the hold: the held launch is `Online`, or a plain switch to an
+    /// account already signed in on this device (which keeps the optimistic entry).
+    public func releaseHold() { heldUntilOnline = false }
+
+    /// iOS's optimistic-entry decision for a launch about to start. Withheld for a
+    /// pending-factory-reset slot (the box may be gone — the machine's boot
+    /// reconcile decides) and while the finished wizard's hold stands.
+    public func entersOptimistically(pendingFactoryReset: Bool) -> Bool {
+        !pendingFactoryReset && !heldUntilOnline
     }
 
     public init() {}

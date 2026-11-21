@@ -9,7 +9,7 @@
   // here: the shared `LaunchMachine` classifies the launch row and owns the
   // pin-forget seam. They stay exported from `#lib/wasm` for the SPA's own
   // `challengeVerify` path (`lib/store.ts`'s background identity refresh).
-  import { ensureWasm, parseIdentityImport, logMessage, recoveryBoxesLocal, recoverSelfhostedCommandLocal, shortNestId, actorIdFromSecret, resolveVerifiedSuccessor, adoptHeldSuccessor, termsUrl } from '#lib/wasm';
+  import { ensureWasm, parseIdentityImport, logMessage, retireHeldDns, recoveryBoxesLocal, recoverSelfhostedCommandLocal, shortNestId, actorIdFromSecret, resolveVerifiedSuccessor, adoptHeldSuccessor, termsUrl, stolenEntryPossibility } from '#lib/wasm';
   import { resolve } from '$app/paths';
   import {
     dnsManagementMachineWithCredentials,
@@ -22,7 +22,9 @@
     succeedStolenIdentityLocked,
   } from '#lib/rpc';
   import { qrDisplayFromUri } from '#lib/qr-display';
+  import { surfaceServingEnablementRefusal } from '#lib/serving-enablement-refusal';
   import NestRetirePage from '#lib/components/NestRetirePage.svelte';
+  import ProvisioningStepGlyph from '#lib/components/ProvisioningStepGlyph.svelte';
   import { primeTokenCache, storedNestUrlOrNull, latchAccountLocked } from '#lib/api';
   import { setTabNestUrl } from '#lib/tabPin';
   import {
@@ -44,8 +46,13 @@
     type NodeMode,
     type AwaitingManualDnsSnapshot,
     type BillOfMaterialsItem,
+    type DnsPlanSnapshot,
     type CredentialForm,
     type HostedAuthState,
+    type GoalRow,
+    type GoalCover,
+    type ProviderGoal,
+    type ProviderRow,
   } from '#lib/onboarding/machine.svelte';
   import {
     savePendingInvite,
@@ -87,8 +94,18 @@
     accountsPersistLoggedIn,
     accountsPersistRestoredPredecessors,
     accountsSwitch,
+    accountsList,
     accountIdentityLine,
   } from '#lib/accounts';
+  import {
+    performAccountSwitch,
+    switchReauthTarget,
+    switchRefusalText,
+    switcherRows,
+    type ReauthTarget,
+    type SwitcherRow,
+  } from '#lib/account-switch';
+  import AccountReauthPrompt from '#lib/components/AccountReauthPrompt.svelte';
   import { localizedRejectionText } from '#lib/rejection';
   import { PROVIDERS, type ProviderMeta } from '#lib/generated/providers';
   import {
@@ -96,16 +113,39 @@
     serverTypeLabel,
     serverTypeAllowedForMail,
     provisioningElapsedRaw,
-    provisioningStatusGlyph,
     provisioningStepLabelRaw,
     provisioningSubstepLabelRaw,
     inviteRecheckPollMs,
     awaitingDnsPollMs,
     handleTld as handleTldShared,
     emergencyLockoutLockedMessage,
+    identityImportPossibility,
+    recoveryEntryPossibility,
+    emergencyLockoutPossibility,
+    inviteCodeDraftPossibility,
   } from '#lib/wasm-onboarding';
+  import { askPossibility, formGate, formRefusal } from '#lib/form-gate';
   import { t } from '#lib/i18n/strings';
   import { resolveLocalized, resolveLocalizedNested, resolveKey, type LocalizedText } from '#lib/i18n/localized';
+  import { paintPossibility, type Possibility } from '#lib/possibility';
+  import {
+    connectProviderPaint,
+    hostedAuthPaint,
+    providerHostedAuthPaint,
+    verifyDnsPaint,
+    verifyVpsPaint,
+    type Paint as CredentialPaint,
+  } from '#lib/onboarding/credential-possibility';
+  import {
+    dnsContinuePaint,
+    handleContinuePaint,
+    inviteContinuePaint,
+    inviteSubmitPaint,
+    manualDnsCoverPaint,
+    natModeConfirmPaint,
+    providersContinuePaint,
+    provisioningStartPaint,
+  } from '#lib/onboarding/wizard-possibility';
   import { IDS } from '#lib/generated/uiIds';
   import NestRulesJoining from '#lib/components/NestRulesJoining.svelte';
   import { NEST_RULES_LANG } from '#lib/nestRulesPaint';
@@ -126,6 +166,7 @@
     | 'recovery_entry'
     | 'emergency_lockout_entry'
     | 'handle_entry'
+    | 'provider_choice'
     | 'dns_config'
     | 'vps_config'
     | 'dns_post_instructions'
@@ -258,17 +299,17 @@
     return m?.visibleDnsFields() ?? [];
   });
   // A `hosted-auth` field's button label source (`onboarding.md` § 4) —
-  // per-field id -> { label, enabled }, re-derived every observer tick.
-  // Mirrors tui's `hosted_auth_button`; nothing here is re-derived beyond
-  // resolving the machine's own state/can-begin getters to display strings.
-  const hostedAuthDnsValue: Record<string, { label: string; enabled: boolean }> = $derived.by(() => {
+  // per-field id -> { label, paint }, re-derived every observer tick.
+  // Mirrors tui's `hosted_auth_button`; the label resolves the machine's own
+  // state, the paint its `hosted_auth_possibility` answer.
+  const hostedAuthDnsValue: Record<string, { label: string; paint: CredentialPaint }> = $derived.by(() => {
     void machineTick.value;
-    const out: Record<string, { label: string; enabled: boolean }> = {};
+    const out: Record<string, { label: string; paint: CredentialPaint }> = {};
     for (const field of visibleDnsFieldsValue) {
       if (field.field_type !== 'HostedAuth') continue;
       out[field.id] = {
         label: hostedAuthButtonLabel(m?.hostedAuthState('dns', field.id) ?? 'Idle'),
-        enabled: m?.hostedAuthCanBegin('dns', field.id) ?? false,
+        paint: hostedAuthPaint(m, 'dns', field.id),
       };
     }
     return out;
@@ -281,13 +322,40 @@
     // Resolve the LocalizedText through the shared i18n resolver instead.
     return resolveLocalized(m?.dnsStatusTextKey());
   });
-  const canVerifyDnsValue: boolean = $derived.by(() => {
+  // `dns-verify-button`'s paint from the machine's `verify_dns_possibility`.
+  const verifyDnsPaintValue: CredentialPaint = $derived.by(() => {
     void machineTick.value;
-    return m?.canVerifyDns() ?? false;
+    return verifyDnsPaint(m);
   });
-  const canContinueDnsValue: boolean = $derived.by(() => {
+  // The wizard's remaining gates paint from the machine's answers
+  // (`wizard-possibility.ts`; `ui/README.md` § Offer only what is possible).
+  const dnsContinuePaintValue: CredentialPaint = $derived.by(() => {
     void machineTick.value;
-    return m?.canContinueDns() ?? false;
+    return dnsContinuePaint(m);
+  });
+  const handleContinuePaintValue: CredentialPaint = $derived.by(() => {
+    void machineTick.value;
+    return handleContinuePaint(m);
+  });
+  const inviteContinuePaintValue: CredentialPaint = $derived.by(() => {
+    void machineTick.value;
+    return inviteContinuePaint(m);
+  });
+  const inviteSubmitPaintValue: CredentialPaint = $derived.by(() => {
+    void machineTick.value;
+    return inviteSubmitPaint(m);
+  });
+  const natModeConfirmPaintValue: CredentialPaint = $derived.by(() => {
+    void machineTick.value;
+    return natModeConfirmPaint(m);
+  });
+  const manualDnsCoverPaintValue: CredentialPaint = $derived.by(() => {
+    void machineTick.value;
+    return manualDnsCoverPaint(m);
+  });
+  const provisioningStartPaintValue: CredentialPaint = $derived.by(() => {
+    void machineTick.value;
+    return provisioningStartPaint(m);
   });
   const providerStatusValue: ProviderStatus | undefined = $derived.by(() => {
     void machineTick.value;
@@ -345,22 +413,23 @@
     void machineTick.value;
     return m?.vpsConfig() ?? null;
   });
-  const canVerifyVpsValue: boolean = $derived.by(() => {
+  // `vps-verify-button`'s paint from the machine's `verify_vps_possibility`.
+  const verifyVpsPaintValue: CredentialPaint = $derived.by(() => {
     void machineTick.value;
-    return m?.canVerifyVps() ?? false;
+    return verifyVpsPaint(m);
   });
   // Twin of hostedAuthDnsValue above, keyed the same way, for the VPS
   // credentials form (whose fields come from the generated providers.ts
   // list, not visibleVpsFields() — see the {#each} below).
-  const hostedAuthVpsValue: Record<string, { label: string; enabled: boolean }> = $derived.by(() => {
+  const hostedAuthVpsValue: Record<string, { label: string; paint: CredentialPaint }> = $derived.by(() => {
     void machineTick.value;
-    const out: Record<string, { label: string; enabled: boolean }> = {};
+    const out: Record<string, { label: string; paint: CredentialPaint }> = {};
     for (const p of PROVIDERS) {
       for (const field of p.fields) {
         if (field.type !== 'hosted-auth' || !field.kinds.includes('vps')) continue;
         out[field.id] = {
           label: hostedAuthButtonLabel(m?.hostedAuthState('vps', field.id) ?? 'Idle'),
-          enabled: m?.hostedAuthCanBegin('vps', field.id) ?? false,
+          paint: hostedAuthPaint(m, 'vps', field.id),
         };
       }
     }
@@ -408,16 +477,245 @@
       case 'dev': return { label: v.update_channel_dev_label, desc: desc || v.update_channel_dev_desc };
     }
   }
-  const canContinueVpsValue: boolean = $derived.by(() => {
+  // `vps-config-continue-button` paints from the machine's one answer
+  // (`ui/README.md` § Offer only what is possible, rule 6): disabled exactly
+  // while it is not possible, with the answer's reason beside it (rule 5).
+  // Before the machine exists the button is dead and says nothing.
+  const vpsContinuePaint = $derived.by(() => {
     void machineTick.value;
-    return m?.canContinueVps() ?? false;
+    const answer = m?.vpsContinuePossibility();
+    return answer ? paintPossibility(answer) : { shown: true, disabled: true, reason: null };
   });
-  // The reason `vps-config-continue-button` is disabled, or `''` when it's
-  // live (`ui/README.md` § Copy comprehensibility rule 5).
-  const vpsContinueBlockedReasonValue: string = $derived.by(() => {
+  const vpsContinueBlockedReasonValue: string = $derived(resolveLocalized(vpsContinuePaint.reason));
+
+  // ── The choose-providers page (`onboarding-provisioning.md` § 3d) ──
+  // Every rule is the machine's (§ 3d *Where logic lives*): the page renders
+  // goal lines, provider rows and one dialog from its getters and forwards
+  // presses. Which dialog is open is the one piece of state the page keeps —
+  // presentation, like tui's `Wizard::provider_dialog`; it decides nothing.
+  let providerDialog = $state<string | null>(null);
+  const goalRowsValue: GoalRow[] = $derived.by(() => {
     void machineTick.value;
-    return resolveLocalized(m?.vpsContinueBlockedReason());
+    return m?.goalRows() ?? [];
   });
+  const providerRowsValue: ProviderRow[] = $derived.by(() => {
+    void machineTick.value;
+    return m?.providerRows() ?? [];
+  });
+  const canOfferBuyDomainValue: boolean = $derived.by(() => {
+    void machineTick.value;
+    return m?.canOfferBuyDomain() ?? false;
+  });
+  const providerGoalDomainValue: string = $derived.by(() => {
+    void machineTick.value;
+    return m?.providerGoalDomain() ?? '';
+  });
+  const providersContinuePaintValue: CredentialPaint = $derived.by(() => {
+    void machineTick.value;
+    return providersContinuePaint(m);
+  });
+  // Nested: `status_contact_missing`'s `{provider}` is the registrar's
+  // display-name key (onboarding-provisioning.md § 3d).
+  const providersContinueBlockedValue: string = $derived(
+    resolveLocalizedNested(providersContinuePaintValue.reason),
+  );
+  const providerDnsCoverValue: GoalCover | null = $derived(
+    goalRowsValue.find((g) => g.goal === 'Dns')?.cover ?? null,
+  );
+  /** The open dialog's per-provider reads, re-derived every observer tick. */
+  const providerDialogValue = $derived.by(() => {
+    void machineTick.value;
+    const id = providerDialog;
+    if (!m || !id) return null;
+    const fields = m.visibleProviderFields(id);
+    const hosted: Record<string, { label: string; paint: CredentialPaint }> = {};
+    for (const f of fields) {
+      if (f.field_type !== 'HostedAuth') continue;
+      hosted[f.id] = {
+        label: hostedAuthButtonLabel(m.providerHostedAuthState(id, f.id)),
+        paint: providerHostedAuthPaint(m, id, f.id),
+      };
+    }
+    return {
+      id,
+      meta: PROVIDERS.find((p) => p.id === id) ?? null,
+      fields,
+      hosted,
+      connect: connectProviderPaint(m, id),
+      notesKey: m.providerRegistrarNotesKey(id),
+      showsContact: m.providerShowsContactForm(id),
+      contact: m.providerContact(id) ?? {
+        first_name: '', last_name: '', email: '', phone: '',
+        address1: '', city: '', state: '', postal_code: '', country: '',
+      },
+    };
+  });
+  // nest_provisioning's choices region and its start predicate (§ 3d *The
+  // choices on the setting-things-up page*): the start is dead on the set-up
+  // path while the machine names a reason, said beneath the button (rule 5).
+  const provisioningChoicesVisibleValue: boolean = $derived.by(() => {
+    void machineTick.value;
+    return m?.provisioningChoicesVisible() ?? false;
+  });
+  const provisioningPriceConfirmVisibleValue: boolean = $derived.by(() => {
+    void machineTick.value;
+    return m?.provisioningPriceConfirmVisible() ?? false;
+  });
+  const provisioningStartBlockedValue: string = $derived(
+    resolveLocalized(provisioningStartPaintValue.reason),
+  );
+
+  const PROVIDER_MANUAL = 'manual';
+  function goalKey(goal: ProviderGoal): string {
+    return goal === 'Domain' ? 'domain' : goal === 'Dns' ? 'dns' : 'vps';
+  }
+  function coverKey(cover: GoalCover): string {
+    return cover === 'Manual' ? PROVIDER_MANUAL : cover.Provider.provider_id;
+  }
+  function coverFromKey(key: string): GoalCover {
+    return key === PROVIDER_MANUAL ? 'Manual' : { Provider: { provider_id: key } };
+  }
+  /** A provider's display name, or the id for one the registry does not know. */
+  function providerName(id: string): string {
+    if (id === PROVIDER_MANUAL) return t.onboarding.provider_choice.manual_row;
+    const p = PROVIDERS.find((x) => x.id === id);
+    return p ? L(p.displayNameKey) : id;
+  }
+  function goalLine(row: GoalRow): string {
+    const pc = t.onboarding.provider_choice;
+    const domain = providerGoalDomainValue;
+    const name = row.goal === 'Domain'
+      ? pc.goal_domain({ domain })
+      : row.goal === 'Dns' ? pc.goal_dns({ domain }) : pc.goal_vps;
+    const status = row.cover
+      ? pc.goal_covered_by({ provider: providerName(coverKey(row.cover)) })
+      : pc.goal_open;
+    let line = `${name} — ${status}`;
+    if (row.price_cents != null) {
+      const cur = row.currency ?? 'USD';
+      const first = formatPrice(BigInt(row.price_cents), cur);
+      line += ' · ' + (row.renewal_cents != null
+        ? pc.goal_price({ price: first, renewal: formatPrice(BigInt(row.renewal_cents), cur) })
+        : pc.goal_price_first_year({ price: first }));
+    }
+    return line;
+  }
+  function capabilityLabel(c: string): string | null {
+    const pc = t.onboarding.provider_choice;
+    if (c === 'Registrar') return pc.capability_registrar;
+    if (c === 'Dns') return pc.capability_dns;
+    if (c === 'Vps') return pc.capability_vps;
+    return null;
+  }
+  /** A provider row's text: its name, what it can do, whether it is connected. */
+  function providerRowText(row: ProviderRow): string {
+    const pc = t.onboarding.provider_choice;
+    if (row.provider_id === PROVIDER_MANUAL) return `${pc.manual_row} — ${pc.manual_row_help}`;
+    const caps = row.capabilities.map(capabilityLabel).filter((c) => c !== null).join(', ');
+    const state = row.connecting ? pc.state_connecting : row.connected ? pc.state_connected : pc.state_available;
+    return `${providerName(row.provider_id)} — ${caps} · ${state}`;
+  }
+  /** The un-id'd line beneath a row: why it cannot cover the goals it cannot
+   * (rule 5); a reason repeated across goals is said once. The manual row's
+   * server and registration reasons restate what it is — only DNS explains. */
+  function providerReasonLine(row: ProviderRow): string {
+    const reasons = row.provider_id === PROVIDER_MANUAL
+      ? [row.dns_reason]
+      : [row.domain_reason, row.dns_reason, row.vps_reason];
+    const seen: string[] = [];
+    for (const r of reasons) {
+      if (!r) continue;
+      // Nested: a `{provider}` is the provider's display-name key.
+      const text = resolveLocalizedNested(r);
+      if (text && !seen.includes(text)) seen.push(text);
+    }
+    return seen.join(' ');
+  }
+  function providerRowConnected(row: ProviderRow): boolean {
+    if (row.provider_id === PROVIDER_MANUAL) return providerDnsCoverValue === 'Manual';
+    return row.connected;
+  }
+  function onProviderRowPress(row: ProviderRow): void {
+    error = '';
+    if (row.provider_id === PROVIDER_MANUAL) {
+      try { m?.selectGoalCover('Dns', 'Manual'); }
+      catch (e) { error = e instanceof Error ? e.message : String(e); }
+      return;
+    }
+    providerDialog = row.provider_id;
+  }
+  function onGoalSelect(goal: ProviderGoal, key: string): void {
+    error = '';
+    try { m?.selectGoalCover(goal, coverFromKey(key)); }
+    catch (e) { error = e instanceof Error ? e.message : String(e); }
+  }
+  async function onConnectProvider(id: string): Promise<void> {
+    error = '';
+    try {
+      await m?.connectProvider(id);
+    } catch (e) {
+      // A failed check is the provider's own error, read back on the row
+      // (`provider-dialog-status-text`); only a refusal reaches here.
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
+  function onProviderContactInput(id: string, field: ContactField, value: string): void {
+    const current = providerDialogValue?.contact;
+    if (!m || !current) return;
+    m.setProviderContact(id, { ...current, [field]: value });
+  }
+  /** The dialog's `hosted-auth` button — the dns_config form's flow, on the
+   * provider's own slot (popup opened synchronously, see `beginHostedAuth`). */
+  async function beginProviderHostedAuth(id: string, fieldId: string) {
+    error = '';
+    const tab = window.open('about:blank', '_blank', 'noopener,noreferrer');
+    try {
+      const prompt = await m?.providerHostedAuthBegin(id, fieldId);
+      if (prompt) {
+        if (tab && !tab.closed) {
+          tab.location.href = prompt.verification_url;
+        } else {
+          window.open(prompt.verification_url, '_blank', 'noopener,noreferrer');
+        }
+      }
+      await m?.providerHostedAuthWait(id, fieldId);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
+  /** An add-account run shows as already connected every provider whose
+   * credential the signed-in account holds in its DNS record (§ 3d *Held
+   * credentials*): the record is read through this tab's live account runtime
+   * — the same read the retire page makes — and the credentials passed INTO
+   * the machine, which re-runs each provider's checks before the row reads
+   * connected. Best-effort, like tui's `App::enter_add_account`: a failed
+   * read leaves every row unconnected, the state a first-nest run starts in. */
+  async function seedHeldProviderCredentials(machine: Machine): Promise<void> {
+    try {
+      const held = await retireHeldDns();
+      if (!held || 'error' in held) {
+        if (held) logMessage('info', 'fauna_web::provider_choice', `DNS record read failed: ${held.error}`);
+        return;
+      }
+      const creds = held.providerIds.map((provider_id, i) => ({
+        provider_id,
+        fields: JSON.parse(held.credsJson[i] ?? '{}') as Record<string, string>,
+      }));
+      if (creds.length > 0) await machine.seedHeldProviderCredentials(creds);
+    } catch (e) {
+      logMessage('info', 'fauna_web::provider_choice', `held credential seeding failed: ${e}`);
+    }
+  }
+
+  function onContinueFromProviders(): void {
+    error = '';
+    try {
+      m?.continueFromProviders();
+      providerDialog = null;
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
   const dnsPostInstructionsValue: string | undefined = $derived.by(() => {
     void machineTick.value;
     return m?.dnsPostInstructions();
@@ -468,13 +766,17 @@
     void machineTick.value;
     return m?.provisioningSnapshot();
   });
-  // The reason `provisioning-continue-button` is disabled, or `''` when it's
-  // live — the four `○` step glyphs are a symbol, not a reason
+  // `provisioning-continue-button` paints from the machine's one answer, its
+  // reason `''` when it is live — the four `○` step glyphs are a symbol, not a reason
   // (`ui/README.md` § Copy comprehensibility rule 5).
-  const provisioningContinueBlockedReasonValue: string = $derived.by(() => {
+  const provisioningContinuePaint = $derived.by(() => {
     void machineTick.value;
-    return resolveLocalized(m?.provisioningContinueBlockedReason());
+    const answer = m?.provisioningContinuePossibility();
+    return answer ? paintPossibility(answer) : { shown: true, disabled: true, reason: null };
   });
+  const provisioningContinueBlockedReasonValue: string = $derived(
+    resolveLocalized(provisioningContinuePaint.reason),
+  );
   // Top-region price summary ("Bill of Materials", onboarding.md §6) — up to
   // two items: domain (one-time, only when buying a new domain) then VPS
   // (recurring, always present). Pure recap of prices already shown/agreed
@@ -482,6 +784,14 @@
   const billOfMaterialsValue: BillOfMaterialsItem[] = $derived.by(() => {
     void machineTick.value;
     return m?.billOfMaterials() ?? [];
+  });
+  // The DNS plan (`onboarding-provisioning.md` § 6 *The DNS plan*): what the
+  // run will keep, add, change and remove, read from the zone by the machine
+  // itself as it entered this page — rows and sentences from the shared
+  // snapshot, no page-entry hook and no action logic here.
+  const dnsPlanValue: DnsPlanSnapshot | undefined = $derived.by(() => {
+    void machineTick.value;
+    return m?.dnsPlan();
   });
   // Box-recovery branch reactive reads (box-recovery.md § Recovery UI (step 4)).
   // The box list holds public `nest_actor_id` hex only — the custodied seed
@@ -681,6 +991,35 @@
   // keeps no timer of its own — the machine's one refresh at the unlock time
   // is what signs the tab back in.
   let lockedShownUntil: number | null = $state(null);
+
+  // What this page's root shows, named for `fauna_e2e_agent::ROOT_SURFACE_KEY`'s
+  // journal (`#lib/e2e-root-surface`, test builds only): the template's own
+  // branch order, so the name is the arm the page renders. A frame in which
+  // that arm painted no text is journaled as nothing, whatever its name.
+  const rootSurface: string = $derived.by(() => {
+    if (retireEntry !== null) return 'nest_retire';
+    if (awaitingDns) return 'awaiting_manual_dns';
+    if (step === 'loading' || step === 'done') {
+      switch (launchState) {
+        case 'idle':
+        case 'in_flight':
+          return 'launch_progress';
+        case 'transient_error':
+          return 'launch_retry';
+        case 'needs_update':
+          return 'launch_needs_update';
+        case 'identity_forked':
+          return 'launch_identity_changed';
+        case 'account_index_refusal':
+          return 'launch_account_index_unreadable';
+        case 'identity_stolen_entry':
+          return 'identity_stolen_entry';
+        default:
+          return `launch_${launchState}`;
+      }
+    }
+    return 'wizard';
+  });
   // `launch-identity-label` on `launch_progress` (in flight) and `launch_retry`
   // (transient error): the bound account's cached `handle@domain · tier` from
   // the registry's server-data cache ($identity), absent while it holds no
@@ -713,8 +1052,10 @@
   // the never-settling class a try/catch cannot see (measured: a dep-level
   // `unwrap_throw` escaping a wasm future's poll kills the task WITHOUT
   // rejecting its JS promise, so `await start()` hangs with no exception).
-  // 45s > the machine's own 30s dispatch bound, so it can never fire while the
-  // machine is still legitimately probing.
+  // 45s > the shared machine's 30s bound on one launch attempt (domain dial and
+  // reach-hint fallback together — `LAUNCH_ATTEMPT_BOUND` in
+  // fauna-launch-machine, compiled into the wasm launch path too), so it can
+  // never fire while the machine is still legitimately signing in.
   let launchWatchdog: ReturnType<typeof setTimeout> | null = null;
   const LAUNCH_WATCHDOG_MS = 45_000;
 
@@ -784,6 +1125,89 @@
   // id; filled by the same reachable-nest `deploymentSeeds()` read that populates
   // the box list.
   let recoveryBoxDomains = $state<Record<string, string | null>>({});
+
+  // The account switcher `launch_retry` carries when the device holds more than
+  // one account (onboarding.md § Wizard exit handling → *The finished wizard
+  // holds*; ui.yaml `onboarding.launch_retry.optional_elements`): the way back
+  // to another account when this one's launch cannot connect. Rows from the
+  // registry in its order, read when the surface comes up — the active
+  // (unreachable) one a plain row, every other a switch running the SAME switch
+  // Settings runs (`#lib/account-switch`: re-auth gate first for a flagged
+  // target, then the activation and the relaunch as that account). A refusal is
+  // said in this surface's `error-message` and the surface stays. Nothing the
+  // finished wizard deferred is carried across: web runs its hand-offs at the
+  // wizard's exit, never held on a launch, and the switch's relaunch runs only
+  // the target account's own launch. Twin of tui's `launch::switcher_elements`.
+  let launchSwitcherRows = $state<SwitcherRow[]>([]);
+  let launchSwitchReauth = $state<ReauthTarget | null>(null);
+  let launchSwitching = $state(false);
+  let launchSwitchError = $state('');
+
+  $effect(() => {
+    if (launchState !== 'transient_error') {
+      launchSwitcherRows = [];
+      launchSwitchReauth = null;
+      launchSwitchError = '';
+      return;
+    }
+    void loadLaunchSwitcher();
+  });
+
+  async function loadLaunchSwitcher() {
+    try {
+      const rows = switcherRows(await accountsList(), accountsActiveSessionMaterial()?.actor_id);
+      if (launchState === 'transient_error') launchSwitcherRows = rows;
+    } catch (e) {
+      console.warn('[launch] account switcher: registry unreadable:', e);
+      launchSwitcherRows = [];
+    }
+  }
+
+  async function requestLaunchSwitch(actorId: string) {
+    if (launchSwitching) return;
+    launchSwitchError = '';
+    let target: ReauthTarget | null;
+    try {
+      target = await switchReauthTarget(actorId);
+    } catch (e) {
+      launchSwitchError = String(e);
+      return;
+    }
+    if (target) {
+      launchSwitchReauth = target;
+      return;
+    }
+    await runLaunchSwitch(actorId, false);
+  }
+
+  async function runLaunchSwitch(actorId: string, confirmed: boolean) {
+    if (launchSwitching) return;
+    const label = launchSwitcherRows.find((r) => r.actorId === actorId)?.label ?? actorId;
+    launchSwitching = true;
+    launchSwitchError = '';
+    try {
+      await performAccountSwitch(
+        actorId,
+        confirmed,
+        accountsActiveSessionMaterial()?.secret_hex ?? null,
+      );
+    } catch (e) {
+      launchSwitchError = switchRefusalText(e, label);
+      launchSwitching = false;
+    }
+  }
+
+  function confirmLaunchSwitch() {
+    const target = launchSwitchReauth;
+    launchSwitchReauth = null;
+    // The post-re-auth path — this surface's only `confirmed = true` call site.
+    if (target) void runLaunchSwitch(target.actorId, true);
+  }
+
+  /** Declining is a pure no-op: the surface stays as it was. */
+  function cancelLaunchSwitch() {
+    launchSwitchReauth = null;
+  }
 
   // Append-mode "Add account" (long-term-store.md § Multi-account evolution): the
   // switcher navigates here with `?add=1` to add a SECOND+ identity. We run a
@@ -874,6 +1298,7 @@
         appendMode = true;
         resetMachine();
         m = await initOnboardingMachine();
+        void seedHeldProviderCredentials(m);
         return;
       }
 
@@ -979,6 +1404,8 @@
   /** `launch-account-locked-stolen-button` → the `identity_stolen_entry` step. */
   function openStolenEntry() {
     error = '';
+    // The button's answer is the core chunk's (`stolenEntryPossibility`).
+    void ensureWasm();
     stolenPhrase = '';
     stolenConfirmWord = '';
     launchState = 'identity_stolen_entry';
@@ -1004,10 +1431,8 @@
   async function succeedFromLocked() {
     const secret = accountsActiveSessionMaterial()?.secret_hex ?? '';
     const phrase = stolenPhrase.trim();
-    if (!phrase) {
-      error = t.settings.recovery_kit.kit_phrase_required;
-      return;
-    }
+    error = '';
+    if (refuse(stolenEntryAnswer)) return;
     if (!secret) {
       error = t.onboarding.launch.locked_secret_missing;
       return;
@@ -1050,6 +1475,74 @@
       console.warn('[launch] stolen-identity ceremony from the locked surface failed:', e);
       error = e instanceof Error ? e.message : String(e);
       stolenBusy = false;
+    }
+  }
+
+  // The work a finished wizard deferred to the authenticated session, held by
+  // its launch (`onboarding.md` § Wizard exit handling → *The finished wizard
+  // holds until the session is signed in*): kept through every Retry, run by
+  // `applyLaunchPhase`'s `Online` arm just before it enters the app, dropped
+  // by "Use a different nest" (it belonged to the nest that could not be
+  // reached; the wizard run the screen goes back to captures its own — tui's
+  // `held_first_setup`). `null` on a cold load, which defers nothing.
+  let heldLaunchAtOnline: (() => void) | null = null;
+  if (__FAUNA_E2E_AUTOMATION__ && typeof window !== 'undefined') {
+    // Test builds only (convention 15): whether a finished wizard's launch is
+    // held right now. The web driver's `set_provider_base_urls` reads it to
+    // install the dial override in place instead of by its usual reload — a
+    // reload here is a cold signed-in reload, which would end the very launch
+    // `test_wizard_holds_until_signed_in.py` presses Retry on (native agents
+    // install the override in place always).
+    (window as unknown as { __fauna_launchHeld?: () => boolean }).__fauna_launchHeld =
+      () => heldLaunchAtOnline !== null;
+  }
+
+  /**
+   * The step from a finished wizard's `LoggedIn` to the app — a launch, the
+   * cold load's own: a fresh `LaunchMachine` over the registry the terminal
+   * just wrote (append mode: just switched), `start()`, and `applyLaunchPhase`
+   * routing its verdict. The page stays on its `done` step meanwhile, which
+   * renders the launch surfaces off `launchState` exactly as `loading` does:
+   * `launch_progress` while it runs, `launch_retry` (Retry in place, "Use a
+   * different nest") when it cannot connect, and the app only on `Online`.
+   */
+  async function runHeldLaunch(atOnline: () => void) {
+    heldLaunchAtOnline = atOnline;
+    launchFailureMessage = null;
+    launchState = 'in_flight';
+    const active = accountsActiveSessionMaterial();
+    pendingSilentChallenge =
+      active?.secret_hex && active.nest_url
+        ? { secret: active.secret_hex, nestUrl: active.nest_url }
+        : null;
+    try {
+      console.debug('[launch] held launch: createLaunchMachine');
+      launchMachine = await createLaunchMachine(
+        { onChanged() { setTimeout(followLockedNotice, 0); } },
+      );
+      const machine = launchMachine;
+      launchCurrency.begin(machine);
+      await machine.start();
+      if (!launchCurrency.deliver(machine)) {
+        dropSupersededVerdict();
+        return;
+      }
+      await applyLaunchPhase();
+      console.debug('[launch] held launch settled');
+    } catch (err) {
+      console.error('[launch] held launch failed:', err);
+      await surfaceLaunchFailure(err);
+    }
+  }
+
+  /** A held launch that routed to a wizard row (the § App-launch routing
+   *  table's other verdicts) mounts a NEW wizard there, never the finished one
+   *  still sitting at `done`; its deferred work goes with it. */
+  function dropFinishedWizard() {
+    heldLaunchAtOnline = null;
+    if (m !== null && m.step() === 'done') {
+      resetMachine();
+      m = null;
     }
   }
 
@@ -1166,6 +1659,11 @@
       // verdict for this secret, so it is re-run here; on a plain launch it is
       // still in flight or done, and this is a no-op.
       if (secret) void identity.reverifyAfterLaunch(secret);
+      // A finished wizard's deferred work runs here, once, with the session
+      // signed in — never ahead of a launch that could not connect.
+      const atOnline = heldLaunchAtOnline;
+      heldLaunchAtOnline = null;
+      atOnline?.();
       goto('/app/feed', { replaceState: true });
       return;
     }
@@ -1255,6 +1753,7 @@
     //    (factory-reset boot-reconcile, silent-challenge `fauna.setup.status`);
     //    the page just mounts the wizard where it landed and hydrates the record.
     launchState = 'idle';
+    dropFinishedWizard();
     const entry = wizardEntryOf(snap);
 
     if (entry === 'PendingFactoryReset') {
@@ -1374,6 +1873,7 @@
   ) {
     console.debug('[launch] superseded refusal; claimed successor', claimed);
     launchState = 'idle';
+    dropFinishedWizard();
     m = await initOnboardingMachine();
     // NOT `seedIdentity(secret)`: the stored secret is the identity that was
     // just refused, and seeding it walks the wizard past the very screen the
@@ -1616,6 +2116,7 @@
     if (accountIndexRefusal?.kind !== 'Malformed' || !accountIndexResetConfirming) return;
     launchMachine = null;
     launchState = 'idle';
+    dropFinishedWizard();
     await identity.logout();
     m = await initOnboardingMachine();
   }
@@ -1628,6 +2129,7 @@
     pendingSilentChallenge = null;
     launchMachine = null;
     launchState = 'idle';
+    dropFinishedWizard();
     // Walk the active account away from its nest through the registry
     // (account-scoping.md: `clear_nest_binding`), best-effort, BEFORE seeding —
     // else the stale binding survives an abandoned re-onboard and the next
@@ -1710,6 +2212,7 @@
     const pending = pendingSilentChallenge;
     pendingSilentChallenge = null;
     launchState = 'idle';
+    dropFinishedWizard();
     m = await initOnboardingMachine();
     if (pending) m.seedIdentityForRecovery(pending.secret);
     if (recoverableBoxes.length) m?.setRecoveryBoxes(recoverableBoxes);
@@ -1955,8 +2458,46 @@
   let lockoutAccount = $state('');
   let lockoutWord = $state('');
   let lockoutBusy = $state(false);
-  // The literal `LOCK` — never localized; the machine re-checks it.
-  const LOCKOUT_CONFIRM_WORD = 'LOCK';
+
+  // ── The signed-out forms' submits (`docs/goal/ui/README.md` § Offer only
+  // what is possible, rule 4's form case) ─────────────────────────────────
+  // Each submit paints from its shared draft answer — disabled, the reason on
+  // its `title` — and its handler asks the same answer again before it acts,
+  // refusing on `error-message`. The page keeps no emptiness, parse or
+  // confirm-word gate of its own (the `LOCK` / `SUCCEED` literals are the
+  // shared crates'). The onboarding chunk's answers read `m` so they are asked
+  // again once the chunk is up; until then a submit is dead with no reason.
+  // tui's twins: `apps/fauna-tui/src/wizard/*.rs`, `locked.rs`.
+  const importAnswer = () => identityImportPossibility(importHex);
+  const recoveryEntryAnswer = () => recoveryEntryPossibility(recoveryPhrase, recoveryAccount);
+  const lockoutAnswer = () => emergencyLockoutPossibility(lockoutSecret, lockoutAccount, lockoutWord);
+  const inviteCodeAnswer = () => inviteCodeDraftPossibility(oobCode);
+  const handleCheckAnswer = () => (m ? m.handleCheckPossibility(handleValue) : null);
+  const claimCodeAnswer = () => (m ? m.claimCodeSubmitPossibility(claimCodeValue) : null);
+  // A function, not a value: the core chunk is read at the click or the paint,
+  // never at construction (`route-wasm-init-contract.test.ts`).
+  function stolenEntryAnswer(): Possibility {
+    return stolenEntryPossibility(stolenPhrase, stolenConfirmWord);
+  }
+  /** Ask an answer that may be unreadable yet (`null` with no machine). */
+  function ask(answer: () => Possibility | null): Possibility | null {
+    return askPossibility(answer as () => Possibility) ?? null;
+  }
+  const importGate = $derived.by(() => { void m; return formGate(ask(importAnswer)); });
+  const recoveryEntryGate = $derived.by(() => { void m; return formGate(ask(recoveryEntryAnswer)); });
+  const lockoutGate = $derived.by(() => { void m; return formGate(ask(lockoutAnswer)); });
+  const inviteCodeGate = $derived.by(() => { void m; return formGate(ask(inviteCodeAnswer)); });
+  const handleCheckGate = $derived.by(() => { void machineTick.value; return formGate(ask(handleCheckAnswer)); });
+  const claimCodeGate = $derived.by(() => { void machineTick.value; return formGate(ask(claimCodeAnswer)); });
+  const stolenEntryGate = $derived(formGate(ask(stolenEntryAnswer)));
+  /** The click's re-ask: the refusal now on `error-message`, or `false` when
+   *  the submit may go on. */
+  function refuse(answer: () => Possibility | null): boolean {
+    const refusal = formRefusal(ask(answer));
+    if (refusal === null) return false;
+    error = refusal;
+    return true;
+  }
 
   function openEmergencyLockoutEntry() {
     error = '';
@@ -1976,6 +2517,7 @@
   async function submitEmergencyLockout() {
     if (!m || lockoutBusy) return;
     error = '';
+    if (refuse(lockoutAnswer)) return;
     lockoutBusy = true;
     try {
       // The account rides the machine's one handle slot — forwarded as shown,
@@ -2052,6 +2594,7 @@
   async function submitRecoveryEntry() {
     if (!m) return;
     error = '';
+    if (refuse(recoveryEntryAnswer)) return;
     // The typed account rides on the machine's one account field — the one
     // `handle_entry` asks for next. ALWAYS forwarded, empty included: what the
     // field shows is what is sent, never a handle an earlier flow left behind.
@@ -2085,6 +2628,7 @@
 
   async function importIdentity() {
     error = '';
+    if (refuse(importAnswer)) return;
     await ensureWasm();
     const parsed = parseIdentityImport(importHex);
     if (!parsed) {
@@ -2253,6 +2797,7 @@
   async function onClaimCodeSubmit() {
     if (!m) return;
     error = '';
+    if (refuse(claimCodeAnswer)) return;
     try {
       const stepName = await m.wizardSubmitClaimCode(claimCodeValue);
       handleWizardExit(stepName);
@@ -2434,7 +2979,10 @@
   // sign-in or invite redemption hands over all four OFF. Captured
   // synchronously, before any await — the onboarding machine `m` may be torn
   // down once we navigate to the feed. Fire-and-forget: every step logs its own
-  // failure and each is redoable from the settings pages.
+  // failure and each is redoable from the settings pages; a step the nest
+  // refused for good is said on the page the person is on by then — the
+  // shell's `error-message` (§ 3b *The step completes; it is not fired once*;
+  // `#lib/serving-enablement-refusal`).
   function applyPostClaimServingEnablement(
     secretHex: string,
     intents: { email: boolean; caldav: boolean; carddav: boolean; webdav: boolean },
@@ -2442,7 +2990,7 @@
     void (async () => {
       try {
         await ensureWasm();
-        await applyServingEnablement(secretHex, intents);
+        surfaceServingEnablementRefusal(await applyServingEnablement(secretHex, intents));
       } catch (e) {
         console.warn('[onboarding] serving enablement failed:', e);
         logMessage('warn', 'fauna_web::onboarding', `serving enablement failed: ${e}`);
@@ -2514,7 +3062,9 @@
         // Structurally impossible (the wizard cannot reach `LoggedIn` without
         // a secret) — a loud bug, never a fallback to the store.
         logMessage('error', 'fauna_web::onboarding', 'LoggedIn terminal: machine has no secret');
-        goto('/app/feed', { replaceState: true });
+        // Still the launch, never the feed: it routes on whatever the
+        // registry holds, and only its `Online` enters the app.
+        void runHeldLaunch(() => {});
         return;
       }
       const nestUrl = outcome.LoggedIn.nest_url;
@@ -2569,12 +3119,17 @@
             }
           : undefined,
         handoffs: () => handoffs.handoffs(secret),
-        enterApp: () => {
+        // The held launch (`runHeldLaunch`): `launch_progress` until it
+        // settles, `launch_retry` while it cannot connect, the app only on
+        // `Online` — where the deferred hand-offs run, once. A refused append
+        // add launches nothing: the previous account is still the active one,
+        // and the finished wizard shows the refusal instead.
+        launch: (atOnline) => {
           if (appendRefusal) {
             error = appendRefusal;
             return;
           }
-          void goto('/app/feed', { replaceState: true });
+          void runHeldLaunch(atOnline);
         },
         onFailure: (step, e) => {
           if (step === 'register') {
@@ -2652,21 +3207,9 @@
   // `fauna-wasm-onboarding` `provisioning{StatusGlyph,StepLabel,SubstepLabel}`
   // exports — the canonical glyph set + the variant→i18n-key mapping (the old
   // `pascalToSnake` re-derivation) now live there, so the template just resolves
-  // the returned `LocalizedText`. Only the two-i18n-string concatenations stay
-  // SPA-side: the `step_attempt_template` suffix below, and the Skipped-row
-  // "already configured" placeholder (one `LocalizedText` can't carry either).
-
-  function attemptSuffix(step: StepSnapshot): string {
-    // Gate on the shared `shows_attempt_suffix` projection, not a re-derived
-    // `attempt > 1 && max_attempts > 1` (see StepSnapshot doc comment).
-    if (step.shows_attempt_suffix) {
-      return t.onboarding.provision.step_attempt_template({
-        attempt: String(step.attempt),
-        max_attempts: String(step.max_attempts),
-      });
-    }
-    return '';
-  }
+  // the returned `LocalizedText`. Only the Skipped-row "already configured"
+  // placeholder stays SPA-side (one `LocalizedText` can't carry two strings).
+  // No attempt count is ever shown (onboarding-provisioning.md § 6).
 
   // The `provisioning-elapsed` ticker compute + format is single-sourced in
   // shared Rust (`fauna_provisioning::progress::elapsed_display`, value-formatting.md):
@@ -2778,7 +3321,115 @@
   </p>
 {/snippet}
 
-<div class="onboarding">
+<!-- The server choices of § 5 — location, mail mode, SSH door, server type —
+     shown on `vps_config` (cloud recovery) and in `nest_provisioning`'s
+     choices region on the set-up path (`onboarding-provisioning.md` § 3d *The
+     choices on the setting-things-up page*): one markup, two places. -->
+{#snippet vpsServerChoices()}
+  <!-- vps-location-picker: the verified locations, the machine's
+       pre-selection shown. The cross-app contract reads and selects
+       by the location's DISPLAY NAME (the tui and apple pickers
+       do the same), so each option's value is its name and the
+       change maps it back to the id. The setter re-lists the
+       server types for the new location (registry.md § Server
+       offers follow the location); the radio below follows it. -->
+  {#if vpsConfigValue && vpsConfigValue.locations.length > 0}
+    <label class="location-picker">
+      {t.onboarding.vps_config.location_heading}
+      <select
+        data-testid={IDS.VPS_LOCATION_PICKER}
+        value={vpsConfigValue.locations.find(
+          (l) => l.id === vpsConfigValue?.selected_location_id,
+        )?.name ?? ''}
+        onchange={(e) => {
+          const name = (e.currentTarget as HTMLSelectElement).value;
+          const loc = vpsConfigValue?.locations.find((l) => l.name === name);
+          if (loc) m?.selectVpsLocation(loc.id);
+        }}
+      >
+        {#each vpsConfigValue.locations as loc (loc.id)}
+          <option value={loc.name}>{loc.name}</option>
+        {/each}
+      </select>
+    </label>
+  {/if}
+
+  <label class="checkbox-row">
+    <input
+      type="checkbox"
+      data-testid={IDS.VPS_CONFIG_MAIL_MODE_TOGGLE}
+      checked={provisionMailModeEnabledValue}
+      onchange={(e) =>
+        m?.setProvisionMailMode((e.currentTarget as HTMLInputElement).checked)}
+    />
+    {t.onboarding.vps_config.mail_mode_label}
+  </label>
+  <p class="help">{t.onboarding.vps_config.mail_mode_desc}</p>
+
+  <label class="checkbox-row">
+    <input
+      type="checkbox"
+      data-testid={IDS.VPS_CONFIG_SSH_DOOR_TOGGLE}
+      checked={provisionSshDoorEnabledValue}
+      onchange={(e) =>
+        m?.setProvisionSshDoor((e.currentTarget as HTMLInputElement).checked)}
+    />
+    {t.onboarding.vps_config.ssh_door_label}
+  </label>
+  {#if provisionSshDoorEnabledValue}
+    <p class="help warning" data-testid={IDS.VPS_CONFIG_SSH_DOOR_WARNING}>
+      {t.onboarding.vps_config.ssh_door_warning}
+    </p>
+  {/if}
+
+  {#if vpsConfigValue && vpsConfigValue.server_types.length > 0}
+    <fieldset class="server-type-picker">
+      <legend>{t.onboarding.vps_config.server_type_radio_legend}</legend>
+      {#each vpsConfigValue.server_types
+        .filter((st) => serverTypeAllowedForMail(JSON.stringify(st), provisionMailModeEnabledValue))
+        .slice(0, 5) as st, idx (st.id)}
+        <label>
+          <input
+            type="radio"
+            name="vps-server-type"
+            data-testid={`vps-server-type-radio[${idx}]`}
+            data-state={vpsConfigValue.selected_server_type_id === st.id ? 'on' : 'off'}
+            checked={vpsConfigValue.selected_server_type_id === st.id}
+            onchange={() => m?.selectVpsServerType(st.id)}
+          />
+          {serverTypeLabel(JSON.stringify(st))}
+        </label>
+      {/each}
+    </fieldset>
+  {/if}
+{/snippet}
+
+<!-- Which builds the box's updater follows — the same two places. -->
+{#snippet vpsUpdateChannel()}
+  <!-- Which builds the box's updater follows. Outside the per-provider
+       detail on purpose: the choice does not depend on the provider, so it
+       is shown before one is picked. One keyed radio per channel
+       (`vps-config-update-channel-row[<id>]`), exactly one on. -->
+  <fieldset data-testid={IDS.VPS_CONFIG_UPDATE_CHANNEL_ROW} class="update-channel-picker">
+    <legend>{t.onboarding.vps_config.update_channel_heading}</legend>
+    {#each UPDATE_CHANNEL_IDS as id (id)}
+      {@const copy = updateChannelCopy(id)}
+      <label>
+        <input
+          type="radio"
+          name="vps-update-channel"
+          data-testid={`vps-config-update-channel-row[${id}]`}
+          data-state={provisionUpdateChannelValue === id ? 'on' : 'off'}
+          checked={provisionUpdateChannelValue === id}
+          onchange={() => m?.setProvisionUpdateChannel(id)}
+        />
+        {copy.label} — {copy.desc}
+      </label>
+    {/each}
+  </fieldset>
+{/snippet}
+
+<div class="onboarding" data-root-surface={__FAUNA_E2E_AUTOMATION__ ? rootSurface : undefined}>
   <!-- The "Almost ready" surface (onboarding.md § "Almost ready" surface).
        NOT an OnboardingStep, so it is matched BEFORE the step branches: it is
        rendered whenever `wizard_outcome() == AwaitingManualDns`, which is true on
@@ -2838,7 +3489,15 @@
       {/if}
     </div>
 
-  {:else if step === 'loading'}
+  {:else if step === 'loading' || step === 'done'}
+    <!-- `loading`: the cold load's launch. `done`: the wizard's `LoggedIn`
+         exit (onboarding.md § Wizard exit handling → *The wizard becomes the
+         app in place*, *The finished wizard holds until the session is signed
+         in*): the machine sits at `Done` while `handleWizardExit`'s terminal
+         registers the account (append mode: switches to it) and runs the held
+         launch, so the tab shows the same launch surfaces — never a blank page,
+         never the app before `Online`. The `AwaitingManualDns` exit never
+         reaches here (its surface is matched above). -->
     <div class="center">
       {#if launchState === 'transient_error'}
         <!-- Silent-challenge transient retry per target-state §"App-launch routing":
@@ -2881,6 +3540,37 @@
             onclick={() => { retireEntry = 'launch'; }}
           >{t.onboarding.launch.retire_server}</button>
         </div>
+        {#if launchSwitcherRows.length > 1}
+          <!-- The way back to another account (onboarding.md § Wizard exit
+               handling → *The finished wizard holds*): shown only while the
+               device holds more than one account. -->
+          <h2>{t.settings.account_page.accounts}</h2>
+          <div class="launch-account-switcher" data-testid={IDS.ACCOUNT_SWITCHER_LIST}>
+            {#each launchSwitcherRows as row (row.actorId)}
+              {#if row.isActive}
+                <p class="muted" data-testid={IDS.ACCOUNT_SWITCHER_ITEM}>{row.label}</p>
+              {:else}
+                <button
+                  class="btn"
+                  data-testid={IDS.ACCOUNT_SWITCHER_ITEM}
+                  disabled={launchSwitching}
+                  onclick={() => { void requestLaunchSwitch(row.actorId); }}
+                >{row.label}</button>
+              {/if}
+            {/each}
+          </div>
+          {#if launchSwitchReauth}
+            <AccountReauthPrompt
+              label={launchSwitchReauth.label}
+              busy={launchSwitching}
+              onconfirm={confirmLaunchSwitch}
+              oncancel={cancelLaunchSwitch}
+            />
+          {/if}
+        {/if}
+        {#if launchSwitchError}
+          <div data-testid={IDS.ERROR_MESSAGE} class="error">{launchSwitchError}</div>
+        {/if}
       {:else if launchState === 'needs_update'}
         <!-- Nest authoritatively reported it is outdated (`fauna.nest.outdated`):
              a NON-retry terminal surface (no Retry CTA — retrying the same
@@ -2938,7 +3628,8 @@
           <button
             class="btn danger"
             data-testid={IDS.IDENTITY_STOLEN_BUTTON}
-            disabled={stolenBusy || stolenConfirmWord.trim() !== 'SUCCEED'}
+            disabled={stolenBusy || stolenEntryGate.disabled}
+            title={stolenEntryGate.reason || undefined}
             onclick={() => { void succeedFromLocked(); }}
           >{t.settings.recovery_kit.stolen}</button>
           <button
@@ -3064,6 +3755,11 @@
           <p data-testid={IDS.LAUNCH_IDENTITY_LABEL} class="muted">{launchIdentityLine}</p>
         {/if}
         <p class="muted">{t.common.loading}</p>
+        {#if step === 'done' && errorMessageValue}
+          <!-- An append add refused by the registry launches nothing and
+               stays here with its line. -->
+          <div data-testid={IDS.ERROR_MESSAGE} class="error">{errorMessageValue}</div>
+        {/if}
       {/if}
     </div>
 
@@ -3179,6 +3875,8 @@
       <button
         class="btn primary large"
         data-testid={IDS.IMPORT_SUBMIT_BUTTON}
+        disabled={importGate.disabled}
+        title={importGate.reason || undefined}
         onclick={importIdentity}
       >{t.onboarding.identity_import.import}</button>
 
@@ -3244,8 +3942,8 @@
   {:else if step === 'recovery_entry'}
     <!-- onboarding.md § 1 Identity — the phrase-only identity restore. Every
          refusal's words are the shared `RecoveryEntryOutcome::message`; the
-         submit is always enabled, because every way the input can be wrong
-         is an answer the ceremony gives on `error-message`. -->
+         submit paints from `recovery_entry_possibility` (kit, then account),
+         the same checks the restore itself runs. -->
     <div class="center">
       <h1>{t.onboarding.recovery_entry.title}</h1>
       <p class="subtitle">{t.onboarding.recovery_entry.desc}</p>
@@ -3275,6 +3973,8 @@
       <button
         class="btn primary large"
         data-testid={IDS.RECOVERY_ENTRY_SUBMIT_BUTTON}
+        disabled={recoveryEntryGate.disabled}
+        title={recoveryEntryGate.reason || undefined}
         onclick={submitRecoveryEntry}
       >{t.onboarding.recovery_entry.submit}</button>
 
@@ -3332,7 +4032,8 @@
       <button
         class="btn danger large"
         data-testid={IDS.SESSIONS_LOCKOUT_BUTTON}
-        disabled={lockoutBusy || lockoutWord !== LOCKOUT_CONFIRM_WORD}
+        disabled={lockoutBusy || lockoutGate.disabled}
+        title={lockoutGate.reason || undefined}
         onclick={() => { void submitEmergencyLockout(); }}
       >{t.sessions.lockout_button}</button>
 
@@ -3370,8 +4071,9 @@
         <button
           class="btn"
           data-testid={IDS.HANDLE_CHECK_BUTTON}
-          disabled={!handleValue.trim() || !m}
-          onclick={() => { error = ''; m?.clearError(); void m?.startHandleCheck(handleValue); }}
+          disabled={handleCheckGate.disabled}
+          title={handleCheckGate.reason || undefined}
+          onclick={() => { error = ''; m?.clearError(); if (refuse(handleCheckAnswer)) return; void m?.startHandleCheck(handleValue); }}
         >{t.common.check}</button>
       </div>
 
@@ -3379,17 +4081,6 @@
         <div data-testid={IDS.HANDLE_MESSAGE_AREA} class="handle-message" class:phase-loading={handleCheckSnapshotValue.phase !== 'Idle' && handleCheckSnapshotValue.phase !== 'Complete'}>
           {Lookup(handleCheckSnapshotValue.message)}
         </div>
-        {#if handleCheckSnapshotValue.control_checkbox_visible}
-          <label class="checkbox-row">
-            <input
-              type="checkbox"
-              data-testid={IDS.HANDLE_CONTROL_CHECKBOX}
-              checked={handleCheckSnapshotValue.control_checkbox_checked}
-              onchange={(e) => m?.setControlCheckbox((e.currentTarget as HTMLInputElement).checked)}
-            />
-            {t.onboarding.handle.control_checkbox}
-          </label>
-        {/if}
       {/if}
 
       {#if errorMessageValue}
@@ -3413,8 +4104,226 @@
         <button
           class="btn primary large"
           data-testid={IDS.HANDLE_ENTRY_CONTINUE_BUTTON}
-          disabled={!handleCheckSnapshotValue?.continue_enabled}
+          disabled={handleContinuePaintValue.disabled}
           onclick={onHandleEntryContinue}
+        >{t.common.continue}</button>
+        {#if handleContinuePaintValue.reason}
+          <p class="muted">{resolveLocalized(handleContinuePaintValue.reason)}</p>
+        {/if}
+      </div>
+    </div>
+
+  {:else if step === 'provider_choice'}
+    <!-- Choose providers (`onboarding-provisioning.md` § 3d): the goals at the
+         top, the providers below, each opened in its own dialog whose Connect
+         runs every check of the provider's capabilities. Every predicate is
+         the machine's; tui's `wizard::provider_choice` is the reference. -->
+    <div class="center">
+      <h1>{t.onboarding.provider_choice.title}</h1>
+      <p class="muted">{t.onboarding.provider_choice.description}</p>
+
+      {#if errorMessageValue}
+        <div data-testid={IDS.ERROR_MESSAGE} class="error">{errorMessageValue}</div>
+      {/if}
+
+      <div data-testid={IDS.PROVIDER_GOAL_ROW} class="provider-goals">
+        {#each goalRowsValue as row (row.goal)}
+          {@const g = goalKey(row.goal)}
+          <p
+            data-testid={`provider-goal-row[${g}]`}
+            data-state={row.cover ? 'covered' : 'open'}
+            data-provider={row.cover ? coverKey(row.cover) : undefined}
+          >{goalLine(row)}</p>
+          {#if row.note}
+            <p class="muted">{resolveLocalizedNested(row.note)}</p>
+          {/if}
+          {#if row.candidates.length > 1}
+            <label class="location-picker">
+              {t.onboarding.provider_choice.goal_select}
+              <select
+                data-testid={`provider-goal-select[${g}]`}
+                value={row.cover ? coverKey(row.cover) : ''}
+                onchange={(e) => onGoalSelect(row.goal, (e.currentTarget as HTMLSelectElement).value)}
+              >
+                {#each row.candidates as c (c)}
+                  <option value={c}>{providerName(c)}</option>
+                {/each}
+              </select>
+            </label>
+          {/if}
+        {/each}
+      </div>
+
+      {#if canOfferBuyDomainValue}
+        <label class="checkbox-row">
+          <input
+            type="checkbox"
+            data-testid={IDS.DNS_BUY_DOMAIN_CHECKBOX}
+            checked={dnsConfigValue?.buy_domain ?? false}
+            onchange={(e) => m?.toggleBuyDomain((e.currentTarget as HTMLInputElement).checked)}
+          />
+          {t.onboarding.dns_config.buy_domain_checkbox}
+        </label>
+      {/if}
+      {#if shouldShowNoProviderMessageValue}
+        <p data-testid={IDS.DNS_NO_PROVIDER_MESSAGE} class="warning">
+          {t.onboarding.dns_config.no_provider_carries_tld({ tld: handleTld })}
+        </p>
+      {/if}
+
+      <h2>{t.onboarding.provider_choice.providers_heading}</h2>
+      <!-- Row presses are delegated at the container, as on dns_config: a
+           button with both a template-literal testid and a dynamic `disabled`
+           had its own `onclick` dropped there. Disabled buttons dispatch no
+           click, so they self-guard; the row is named by `data-provider-id`.
+           Presses inside an open dialog carry no `data-provider-id` and pass. -->
+      <div
+        data-testid={IDS.PROVIDER_ROW}
+        class="provider-list"
+        role="presentation"
+        onclick={(e) => {
+          const btn = (e.target as HTMLElement).closest('button[data-provider-id]') as HTMLButtonElement | null;
+          if (!btn || btn.disabled || !btn.dataset.providerId) return;
+          const row = providerRowsValue.find((r) => r.provider_id === btn.dataset.providerId);
+          if (row) onProviderRowPress(row);
+        }}
+      >
+        {#each providerRowsValue as row (row.provider_id)}
+          {@const reason = providerReasonLine(row)}
+          <button
+            class="btn provider-choice-row"
+            data-testid={`provider-row[${row.provider_id}]`}
+            data-provider-id={row.provider_id}
+            data-state={providerRowConnected(row) ? 'connected' : 'available'}
+            disabled={row.provider_id === PROVIDER_MANUAL && manualDnsCoverPaintValue.disabled}
+          >{providerRowText(row)}</button>
+          {#if row.held}
+            <p class="muted">{t.onboarding.provider_choice.held_credential}</p>
+          {/if}
+          {#if reason}
+            <p class="muted">{reason}</p>
+          {/if}
+          <!-- The open dialog paints directly under its own row, inside this
+               {#each} item: the same Svelte 5 scheduling reason as the
+               dns_config form (an {#each}-item block is re-scheduled where a
+               step-block-level {#if} is not). -->
+          {#if providerDialogValue && providerDialogValue.id === row.provider_id}
+            {@const d = providerDialogValue}
+            <div data-testid={IDS.PROVIDER_DIALOG} class="provider-detail provider-dialog" role="dialog" aria-label={providerName(d.id)}>
+              <h3>{providerName(d.id)}</h3>
+              {#if d.meta}
+                <a
+                  data-testid={IDS.PROVIDER_DIALOG_LINK}
+                  href={d.meta.signupUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >{d.meta.signupUrl}</a>
+                <button
+                  class="btn"
+                  data-testid={IDS.PROVIDER_DIALOG_OPEN_BROWSER_BUTTON}
+                  onclick={() => window.open(d.meta?.signupUrl, '_blank', 'noopener,noreferrer')}
+                >{t.onboarding.dns_config.open_in_browser}</button>
+                <p data-testid={IDS.PROVIDER_DIALOG_HELP_TEXT}>{L(d.meta.helpKey)}</p>
+              {/if}
+              {#if d.notesKey}
+                <p data-testid={IDS.DNS_REGISTRAR_NOTES_TEXT} class="help">{L(d.notesKey)}</p>
+              {/if}
+
+              <div data-testid={IDS.PROVIDER_CREDENTIALS_FORM}>
+                {#each d.fields as field (field.id)}
+                  {#if field.field_type === 'HostedAuth'}
+                    <div class="form-group">
+                      <span class="field-label">{L(field.label_key)}</span>
+                      <button
+                        class="btn"
+                        data-testid={`provider-credentials-form-${field.id}`}
+                        disabled={d.hosted[field.id]?.paint.disabled ?? true}
+                        onclick={() => beginProviderHostedAuth(d.id, field.id)}
+                      >{d.hosted[field.id]?.label ?? t.provisioning.hosted_auth.connect}</button>
+                      {#if d.hosted[field.id]?.paint.reason}
+                        <p class="muted">{resolveLocalized(d.hosted[field.id].paint.reason)}</p>
+                      {/if}
+                    </div>
+                  {:else}
+                    <label class="form-group">
+                      <span class="field-label">{L(field.label_key)}</span>
+                      <input
+                        type={field.field_type === 'Secret' ? 'password' : 'text'}
+                        class="input"
+                        data-testid={`provider-credentials-form-${field.id}`}
+                        oninput={(e) => m?.setProviderCred(d.id, field.id, (e.currentTarget as HTMLInputElement).value)}
+                      />
+                    </label>
+                  {/if}
+                {/each}
+              </div>
+
+              {#if row.connected}
+                <button
+                  class="btn"
+                  data-testid={IDS.PROVIDER_DISCONNECT_BUTTON}
+                  onclick={() => { error = ''; m?.disconnectProvider(d.id); }}
+                >{t.onboarding.provider_choice.disconnect}</button>
+              {:else if d.connect.shown}
+                <button
+                  class="btn primary"
+                  data-testid={IDS.PROVIDER_CONNECT_BUTTON}
+                  disabled={d.connect.disabled}
+                  onclick={() => onConnectProvider(d.id)}
+                >{t.onboarding.provider_choice.connect}</button>
+                {#if d.connect.reason}
+                  <p class="muted">{resolveLocalized(d.connect.reason)}</p>
+                {/if}
+              {/if}
+
+              {#if d.showsContact}
+                <fieldset data-testid={IDS.DNS_CONTACT_FORM} class="contact-form">
+                  <legend>{t.onboarding.dns_config.contact_form_heading}</legend>
+                  {#each contactFieldDefs as f (f.id)}
+                    <label class="form-group">
+                      <span class="field-label">{f.label}</span>
+                      <input
+                        type={f.id === 'email' ? 'email' : (f.id === 'phone' ? 'tel' : 'text')}
+                        class="input"
+                        data-testid={`dns-contact-${f.id}-input`}
+                        value={d.contact[f.field] ?? ''}
+                        oninput={(e) => onProviderContactInput(d.id, f.field, (e.currentTarget as HTMLInputElement).value)}
+                      />
+                    </label>
+                  {/each}
+                </fieldset>
+              {/if}
+
+              <p data-testid={IDS.PROVIDER_DIALOG_STATUS_TEXT}>{
+                row.connecting
+                  ? t.onboarding.provider_choice.dialog_connecting
+                  : row.error
+                    ? row.error
+                    : row.connected ? t.onboarding.provider_choice.dialog_connected : ''
+              }</p>
+              <button
+                class="btn link"
+                data-testid={IDS.PROVIDER_DIALOG_CLOSE_BUTTON}
+                onclick={() => { providerDialog = null; }}
+              >{t.onboarding.provider_choice.close}</button>
+            </div>
+          {/if}
+        {/each}
+      </div>
+
+      <p data-testid={IDS.PROVIDER_CHOICE_STATUS_TEXT} class="muted">{providersContinueBlockedValue}</p>
+
+      <div class="button-group">
+        <button
+          class="btn link"
+          data-testid={IDS.PROVIDER_CHOICE_BACK_BUTTON}
+          onclick={() => { error = ''; providerDialog = null; m?.clearError(); m?.back(); }}
+        >{t.common.back}</button>
+        <button
+          class="btn primary large"
+          data-testid={IDS.PROVIDER_CHOICE_CONTINUE_BUTTON}
+          disabled={providersContinuePaintValue.disabled}
+          onclick={onContinueFromProviders}
         >{t.common.continue}</button>
       </div>
     </div>
@@ -3521,9 +4430,12 @@
                     <button
                       class="btn"
                       data-testid={`dns-credentials-form-${field.id}`}
-                      disabled={!(hostedAuthDnsValue[field.id]?.enabled ?? false)}
+                      disabled={hostedAuthDnsValue[field.id]?.paint.disabled ?? true}
                       onclick={() => beginHostedAuth('dns', field.id)}
                     >{hostedAuthDnsValue[field.id]?.label ?? t.provisioning.hosted_auth.connect}</button>
+                    {#if hostedAuthDnsValue[field.id]?.paint.reason}
+                      <p class="muted">{resolveLocalized(hostedAuthDnsValue[field.id].paint.reason)}</p>
+                    {/if}
                   </div>
                 {:else}
                   <label class="form-group">
@@ -3543,7 +4455,7 @@
             <button
               class="btn"
               data-testid={IDS.DNS_VERIFY_BUTTON}
-              disabled={!canVerifyDnsValue || isLoadingValue}
+              disabled={verifyDnsPaintValue.disabled || isLoadingValue}
               onclick={async () => {
                 error = '';
                 try {
@@ -3553,6 +4465,9 @@
                 }
               }}
             >{isLoadingValue ? t.common.loading : t.common.verify}</button>
+            {#if verifyDnsPaintValue.reason}
+              <p class="muted">{resolveLocalized(verifyDnsPaintValue.reason)}</p>
+            {/if}
 
             <!-- Per target-state §4: price display reads from
                  provider_status() (the canonical computed view), not raw
@@ -3640,7 +4555,7 @@
         <button
           class="btn primary large"
           data-testid={IDS.DNS_CONFIG_CONTINUE_BUTTON}
-          disabled={!canContinueDnsValue}
+          disabled={dnsContinuePaintValue.disabled}
           onclick={() => {
             error = '';
             try {
@@ -3706,9 +4621,12 @@
                     <button
                       class="btn"
                       data-testid={`vps-credentials-form-${field.id}`}
-                      disabled={!(hostedAuthVpsValue[field.id]?.enabled ?? false)}
+                      disabled={hostedAuthVpsValue[field.id]?.paint.disabled ?? true}
                       onclick={() => beginHostedAuth('vps', field.id)}
                     >{hostedAuthVpsValue[field.id]?.label ?? t.provisioning.hosted_auth.connect}</button>
+                    {#if hostedAuthVpsValue[field.id]?.paint.reason}
+                      <p class="muted">{resolveLocalized(hostedAuthVpsValue[field.id].paint.reason)}</p>
+                    {/if}
                   </div>
                 {:else}
                   <label class="form-group">
@@ -3728,7 +4646,7 @@
             <button
               class="btn"
               data-testid={IDS.VPS_VERIFY_BUTTON}
-              disabled={!canVerifyVpsValue || isLoadingValue}
+              disabled={verifyVpsPaintValue.disabled || isLoadingValue}
               onclick={async () => {
                 error = '';
                 try {
@@ -3738,108 +4656,17 @@
                 }
               }}
             >{isLoadingValue ? t.common.loading : t.common.verify}</button>
-
-            <!-- vps-location-picker: the verified locations, the machine's
-                 pre-selection shown. The cross-app contract reads and selects
-                 by the location's DISPLAY NAME (the tui and apple pickers
-                 do the same), so each option's value is its name and the
-                 change maps it back to the id. The setter re-lists the
-                 server types for the new location (registry.md § Server
-                 offers follow the location); the radio below follows it. -->
-            {#if vpsConfigValue && vpsConfigValue.locations.length > 0}
-              <label class="location-picker">
-                {t.onboarding.vps_config.location_heading}
-                <select
-                  data-testid={IDS.VPS_LOCATION_PICKER}
-                  value={vpsConfigValue.locations.find(
-                    (l) => l.id === vpsConfigValue?.selected_location_id,
-                  )?.name ?? ''}
-                  onchange={(e) => {
-                    const name = (e.currentTarget as HTMLSelectElement).value;
-                    const loc = vpsConfigValue?.locations.find((l) => l.name === name);
-                    if (loc) m?.selectVpsLocation(loc.id);
-                  }}
-                >
-                  {#each vpsConfigValue.locations as loc (loc.id)}
-                    <option value={loc.name}>{loc.name}</option>
-                  {/each}
-                </select>
-              </label>
+            {#if verifyVpsPaintValue.reason}
+              <p class="muted">{resolveLocalized(verifyVpsPaintValue.reason)}</p>
             {/if}
 
-            <label class="checkbox-row">
-              <input
-                type="checkbox"
-                data-testid={IDS.VPS_CONFIG_MAIL_MODE_TOGGLE}
-                checked={provisionMailModeEnabledValue}
-                onchange={(e) =>
-                  m?.setProvisionMailMode((e.currentTarget as HTMLInputElement).checked)}
-              />
-              {t.onboarding.vps_config.mail_mode_label}
-            </label>
-            <p class="help">{t.onboarding.vps_config.mail_mode_desc}</p>
-
-            <label class="checkbox-row">
-              <input
-                type="checkbox"
-                data-testid={IDS.VPS_CONFIG_SSH_DOOR_TOGGLE}
-                checked={provisionSshDoorEnabledValue}
-                onchange={(e) =>
-                  m?.setProvisionSshDoor((e.currentTarget as HTMLInputElement).checked)}
-              />
-              {t.onboarding.vps_config.ssh_door_label}
-            </label>
-            {#if provisionSshDoorEnabledValue}
-              <p class="help warning" data-testid={IDS.VPS_CONFIG_SSH_DOOR_WARNING}>
-                {t.onboarding.vps_config.ssh_door_warning}
-              </p>
-            {/if}
-
-            {#if vpsConfigValue && vpsConfigValue.server_types.length > 0}
-              <fieldset class="server-type-picker">
-                <legend>{t.onboarding.vps_config.server_type_radio_legend}</legend>
-                {#each vpsConfigValue.server_types
-                  .filter((st) => serverTypeAllowedForMail(JSON.stringify(st), provisionMailModeEnabledValue))
-                  .slice(0, 5) as st, idx (st.id)}
-                  <label>
-                    <input
-                      type="radio"
-                      name="vps-server-type"
-                      data-testid={`vps-server-type-radio[${idx}]`}
-                      checked={vpsConfigValue.selected_server_type_id === st.id}
-                      onchange={() => m?.selectVpsServerType(st.id)}
-                    />
-                    {serverTypeLabel(JSON.stringify(st))}
-                  </label>
-                {/each}
-              </fieldset>
-            {/if}
+            {@render vpsServerChoices()}
             </div>
           {/if}
         {/each}
       </div>
 
-      <!-- Which builds the box's updater follows. Outside the per-provider
-           detail on purpose: the choice does not depend on the provider, so it
-           is shown before one is picked. One keyed radio per channel
-           (`vps-config-update-channel-row[<id>]`), exactly one on. -->
-      <fieldset data-testid={IDS.VPS_CONFIG_UPDATE_CHANNEL_ROW} class="update-channel-picker">
-        <legend>{t.onboarding.vps_config.update_channel_heading}</legend>
-        {#each UPDATE_CHANNEL_IDS as id (id)}
-          {@const copy = updateChannelCopy(id)}
-          <label>
-            <input
-              type="radio"
-              name="vps-update-channel"
-              data-testid={`vps-config-update-channel-row[${id}]`}
-              data-state={provisionUpdateChannelValue === id ? 'on' : 'off'}
-              checked={provisionUpdateChannelValue === id}
-              onchange={() => m?.setProvisionUpdateChannel(id)}
-            />
-            {copy.label} — {copy.desc}
-          </label>
-        {/each}
-      </fieldset>
+      {@render vpsUpdateChannel()}
 
       <div class="button-group">
         <button
@@ -3851,7 +4678,7 @@
         <button
           class="btn primary large"
           data-testid={IDS.VPS_CONFIG_CONTINUE_BUTTON}
-          disabled={!canContinueVpsValue || isLoadingValue}
+          disabled={vpsContinuePaint.disabled || isLoadingValue}
           onclick={async () => {
             error = '';
             try {
@@ -3920,12 +4747,12 @@
           <button
             class="btn primary"
             data-testid={IDS.INVITE_REQUEST_SUBMIT_BUTTON}
-            disabled={isLoadingValue
-              || (typeof inviteRequestSnapshotValue.state === 'object'
-                  && ('PendingReview' in inviteRequestSnapshotValue.state
-                      || 'Approved' in inviteRequestSnapshotValue.state))}
+            disabled={inviteSubmitPaintValue.disabled || isLoadingValue}
             onclick={onInviteSubmit}
           >{t.onboarding.invite_request.submit}</button>
+          {#if inviteSubmitPaintValue.reason}
+            <p class="muted">{resolveLocalized(inviteSubmitPaintValue.reason)}</p>
+          {/if}
 
           <p data-testid={IDS.INVITE_REQUEST_STATUS} class="status-line">
             {Lookup(inviteRequestSnapshotValue.message)}
@@ -3953,8 +4780,9 @@
           <button
             class="btn"
             data-testid={IDS.INVITE_CODE_CHECK_BUTTON}
-            disabled={!oobCode.trim()}
-            onclick={() => { error = ''; void m?.verifyOobInviteCode(oobCode); }}
+            disabled={inviteCodeGate.disabled}
+            title={inviteCodeGate.reason || undefined}
+            onclick={() => { error = ''; if (refuse(inviteCodeAnswer)) return; void m?.verifyOobInviteCode(oobCode); }}
           >{t.common.check}</button>
           <p data-testid={IDS.INVITE_CODE_STATUS} class="status-line">
             {Lookup(inviteRequestSnapshotValue.oob_message)}
@@ -3988,9 +4816,12 @@
         <button
           class="btn primary large"
           data-testid={IDS.INVITE_REQUEST_CONTINUE_BUTTON}
-          disabled={!inviteRequestSnapshotValue?.continue_enabled}
+          disabled={inviteContinuePaintValue.disabled}
           onclick={onInviteContinue}
         >{t.common.continue}</button>
+        {#if inviteContinuePaintValue.reason}
+          <p class="muted">{resolveLocalized(inviteContinuePaintValue.reason)}</p>
+        {/if}
       </div>
     </div>
 
@@ -4020,7 +4851,8 @@
       <button
         class="btn primary large"
         data-testid={IDS.CLAIM_CODE_SUBMIT_BUTTON}
-        disabled={!(claimCodeSnapshotValue?.submit_enabled ?? false)}
+        disabled={claimCodeGate.disabled}
+        title={claimCodeGate.reason || undefined}
         onclick={onClaimCodeSubmit}
       >{t.onboarding.claim_code.submit_button}</button>
 
@@ -4104,9 +4936,12 @@
         <button
           class="btn primary large"
           data-testid={IDS.NAT_MODE_CONFIRM_BUTTON}
-          disabled={!(natModeSnapshotValue?.submit_enabled ?? false)}
+          disabled={natModeConfirmPaintValue.disabled}
           onclick={onNatModeConfirm}
         >{t.onboarding.nat_mode.confirm_button}</button>
+        {#if natModeConfirmPaintValue.reason}
+          <p class="muted">{resolveLocalized(natModeConfirmPaintValue.reason)}</p>
+        {/if}
       </div>
     </div>
 
@@ -4192,7 +5027,50 @@
                 })}
               {/if}
             </div>
+            {#if !item.recurring && provisioningPriceConfirmVisibleValue}
+              <!-- On the set-up path the price is agreed here, at the
+                   purchase, directly under the domain line; it gates *Buy and
+                   set up* (`onboarding-provisioning.md` § 3d). § 4's label. -->
+              <label class="checkbox-row">
+                <input
+                  type="checkbox"
+                  data-testid={IDS.DNS_PRICE_CONFIRM_CHECKBOX}
+                  checked={dnsConfigValue?.price_agreed ?? false}
+                  value={t.registrar.price_confirm}
+                  onchange={(e) => {
+                    if ((e.currentTarget as HTMLInputElement).checked) m?.confirmPrice();
+                  }}
+                />
+                {t.registrar.price_confirm}
+              </label>
+            {/if}
           {/each}
+        </div>
+      {/if}
+
+      {#if dnsPlanValue?.visible}
+        <!-- The DNS plan (onboarding-provisioning.md § 6): one keyed row per
+             record the run will publish, each sentence resolved by the shared
+             snapshot (keep / add / change / remove). Mirrors tui's
+             wizard::nest_provisioning. Selectable text. -->
+        <div data-testid={IDS.PROVISIONING_DNS_PLAN} class="dns-plan">
+          <p class="dns-plan-heading">{resolveLocalized(dnsPlanValue.heading)}</p>
+          {#each dnsPlanValue.rows as row (row.key)}
+            <div
+              data-testid={`${IDS.PROVISIONING_DNS_PLAN_ROW}[${row.key}]`}
+              data-action={row.action.toLowerCase()}
+              class="dns-plan-row"
+            >{resolveLocalized(row.text)}</div>
+          {/each}
+        </div>
+      {/if}
+
+      {#if provisioningChoicesVisibleValue}
+        <!-- The choices region (§ 3d): every choice has a default, so the
+             shortest path is connect, Continue, *Buy and set up*. -->
+        <div class="provisioning-choices">
+          {@render vpsServerChoices()}
+          {@render vpsUpdateChannel()}
         </div>
       {/if}
 
@@ -4207,8 +5085,12 @@
           <button
             class="btn primary large"
             data-testid={IDS.PROVISIONING_START_BUTTON}
+            disabled={provisioningStartPaintValue.disabled}
             onclick={onProvisioningStart}
           >{t.onboarding.nest_provisioning.start_button}</button>
+          {#if provisioningStartBlockedValue}
+            <p class="muted">{provisioningStartBlockedValue}</p>
+          {/if}
         </div>
       {/if}
 
@@ -4219,15 +5101,13 @@
               data-testid={IDS.PROVISIONING_STEP_ROW}
               class={`prov-row prov-row--${step.status.toLowerCase()}`}
             >
-              <span data-testid={IDS.PROVISIONING_STEP_CHECKBOX} class="prov-checkbox" aria-hidden="true">
-                {provisioningStatusGlyph(step.status)}
-              </span>
+              <ProvisioningStepGlyph status={step.status} />
               <span data-testid={IDS.PROVISIONING_STEP_LABEL} class="prov-label">
                 {resolveLocalized(provisioningStepLabelRaw(step.kind))}
               </span>
               {#if step.shows_substep}
                 <span data-testid={IDS.PROVISIONING_SUBSTEP} class="prov-substep">
-                  {resolveLocalized(provisioningSubstepLabelRaw(step.substep, step.last_error ?? undefined))}{attemptSuffix(step)}
+                  {resolveLocalized(provisioningSubstepLabelRaw(step.substep, step.last_error ?? undefined))}
                 </span>
               {/if}
               {#if step.shows_error}
@@ -4305,7 +5185,7 @@
           <button
             class="btn primary large"
             data-testid={IDS.PROVISIONING_CONTINUE_BUTTON}
-            disabled={provisioningSnapshotValue.overall !== 'Succeeded'}
+            disabled={provisioningContinuePaint.disabled}
             onclick={onProvisioningContinue}
           >{t.common.continue}</button>
           {#if provisioningContinueBlockedReasonValue}
@@ -4481,6 +5361,14 @@
     margin-top: 1rem;
   }
 
+  /* launch_retry's account switcher: one row per account, stacked like the
+     button group above it. */
+  .launch-account-switcher {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
   .btn {
     padding: 0.625rem 1.25rem;
     border: 1px solid var(--border);
@@ -4639,6 +5527,24 @@
     font-size: 0.9375rem;
   }
 
+  /* nest_provisioning page: the DNS plan (onboarding-provisioning.md § 6) */
+  .dns-plan {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin: 1rem 0;
+    text-align: left;
+  }
+  .dns-plan-heading {
+    margin: 0 0 0.25rem;
+  }
+  .dns-plan-row {
+    color: var(--text-muted);
+    font-size: 0.9375rem;
+    font-family: var(--font-mono, monospace);
+    user-select: text;
+  }
+
   /* nest_provisioning page (snapshot-driven 4-step rendering) */
   .provisioning .prov-rows {
     display: flex;
@@ -4664,7 +5570,6 @@
   .prov-row--running { border-color: var(--accent); }
   .prov-row--succeeded { color: var(--text-muted); }
   .prov-row--failed { border-color: var(--danger); }
-  .prov-checkbox { grid-area: checkbox; font-size: 1.125rem; }
   .prov-label    { grid-area: label; font-weight: 500; }
   .prov-substep  { grid-area: substep; color: var(--text-muted); font-size: 0.875rem; }
   .prov-error    { grid-area: error; color: var(--danger); font-size: 0.8125rem; word-break: break-word; }

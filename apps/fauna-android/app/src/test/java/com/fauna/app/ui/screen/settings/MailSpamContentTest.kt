@@ -2,6 +2,7 @@ package com.fauna.app.ui.screen.settings
 
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
+import com.fauna.app.R
 import com.fauna.ffi.FfiReportShareEntry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -9,10 +10,13 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import com.fauna.app.testing.FaunaRobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import uniffi.fauna_client_mail_settings.SpamTrainingView
 import uniffi.fauna_client_mail_settings.TrainingLabel
 import uniffi.fauna_client_mail_settings.TrainingSource
+import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
 
 /**
  * Compose-level coverage for the stateless [MailSpamContent] (the `mail-spam`
@@ -72,6 +76,9 @@ class MailSpamContentTest {
         onUndo: (String) -> Unit = {},
         // Pure stub for the FFI-backed parser (no native lib in this JVM test).
         parseCount: (String) -> UInt? = { it.toUIntOrNull() },
+        contributeAnswer: Possibility = Possibility.Possible,
+        shareAnswer: Possibility = Possibility.Possible,
+        thresholdAnswer: Possibility = Possibility.Possible,
     ) {
         composeTestRule.setContent {
             MailSpamContent(
@@ -90,8 +97,53 @@ class MailSpamContentTest {
                 onSetThresholdOverride = onSetThresholdOverride,
                 onUndo = onUndo,
                 parseCount = parseCount,
+                contributeAnswer = contributeAnswer,
+                shareAnswer = shareAnswer,
+                thresholdAnswer = thresholdAnswer,
             )
         }
+    }
+
+    // ── Controls wait for their reads (mail-settings.md § Errors & edge
+    //    cases, *Controls wait for their reads*) — the answers the shared
+    //    `Possibility::from_read` gives, seeded as data (no native call). ──
+
+    private fun text(id: Int) = RuntimeEnvironment.getApplication().getString(id)
+    private val stillLoading = Possibility.Blocked(LocalizedText("common.still_loading", emptyMap()))
+    private val loadFailed = Possibility.Blocked(LocalizedText("common.load_failed", emptyMap()))
+
+    @Test
+    fun contributeToggleWaitsForTheClassifierSnapshot() {
+        var toggled: Boolean? = null
+        render(contributeAnswer = stillLoading, onSetContributeBaseline = { toggled = it })
+        composeTestRule.onNodeWithTag("mail-spam-contribute-baseline-toggle").assertIsNotEnabled()
+        composeTestRule.onNodeWithText(text(R.string.common_still_loading)).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("mail-spam-contribute-baseline-toggle").performClick()
+        assertEquals(null, toggled)
+    }
+
+    @Test
+    fun shareReportsToggleWaitsForItsRead() {
+        var toggled: Boolean? = null
+        render(shareAnswer = stillLoading, onSetReportShare = { toggled = it })
+        composeTestRule.onNodeWithTag("mail-spam-share-reports-toggle").assertIsNotEnabled()
+        composeTestRule.onNodeWithText(text(R.string.common_still_loading)).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("mail-spam-share-reports-toggle").performClick()
+        assertEquals(null, toggled)
+    }
+
+    @Test
+    fun shareReportsToggleSaysTheReadFailedAfterAFailedRead() {
+        render(shareAnswer = loadFailed)
+        composeTestRule.onNodeWithTag("mail-spam-share-reports-toggle").assertIsNotEnabled()
+        composeTestRule.onNodeWithText(text(R.string.common_load_failed)).assertIsDisplayed()
+    }
+
+    @Test
+    fun thresholdOverrideWaitsForItsReadWithTheReasonOnALineOfItsOwn() {
+        render(thresholdAnswer = stillLoading)
+        composeTestRule.onNodeWithTag("mail-spam-threshold-override-input").assertIsNotEnabled()
+        composeTestRule.onNodeWithText(text(R.string.common_still_loading)).performScrollTo().assertIsDisplayed()
     }
 
     @Test

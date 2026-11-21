@@ -25,6 +25,14 @@ schema_version: 1
 #   silent runtime None that reads as "this provider has no DNS".
 #   Declaring a capability without a resolvable variant is a generate error.
 #
+# dns_creates_zones / registrar_sets_nameservers: the delegation doors
+#   (docs/goal/architecture/provisioning/registry.md § Delegation doors) —
+#   `DnsProvider::create_zone` / `Registrar::set_nameservers` implemented by
+#   this provider's adapter. Absent = false. A door needs its capability, and
+#   a field of kind `zone` (needed only to create a zone) needs the zone door.
+#   Emitted on the Rust ProviderMeta only; tests/delegation_doors.rs asserts
+#   the declaration matches dispatch.rs.
+#
 # cors_policy values:
 #   open      — browser fetch works directly (rare)
 #   proxy     — web app must route through proxy.fauna.social
@@ -75,6 +83,7 @@ providers:
     cors_policy:      proxy
     dispatch:         CloudflareDns
     registrar_dispatch: CloudflareRegistrar
+    dns_creates_zones: true
     # Cloudflare's Registrar API uses the account's configured default
     # registrant contact — not a per-registration ContactInfo, same
     # account-level model as Porkbun. UI skips the contact form on this
@@ -83,7 +92,7 @@ providers:
     registrar_notes_key: provisioning.cloudflare.registrar_account_contact_note
     fields:
       - { id: api-token, type: secret, label_key: provisioning.cloudflare.api_token, required: true }
-      - { id: account-id, type: text, label_key: provisioning.cloudflare.account_id, required: true, kinds: [registrar] }
+      - { id: account-id, type: text, label_key: provisioning.cloudflare.account_id, required: true, kinds: [registrar, zone] }
     post_verify_select:
       id:        zone-select
       label_key: provisioning.cloudflare.zone
@@ -99,6 +108,7 @@ providers:
     cors_policy:      open
     dispatch:         PorkbunDns        # for DNS calls
     registrar_dispatch: PorkbunRegistrar # for domain-search + register
+    registrar_sets_nameservers: true
     # Porkbun uses the contact info configured on the user's Porkbun account
     # for domain registration. Their API does not accept per-registration
     # contact fields. UI skips the contact form on this registrar and shows
@@ -124,6 +134,7 @@ providers:
     cors_policy:      open
     dispatch:         HetznerVps
     dns_dispatch:     HetznerDns
+    dns_creates_zones: true
     # Hetzner uses ONE Cloud API token for both VPS and DNS. The standalone
     # dns.hetzner.com DNS API went read-only 2026-05-20 and is being shut
     # down; DNS zones are now Cloud-API resources (api.hetzner.cloud/v1,
@@ -162,6 +173,7 @@ providers:
     cors_policy:      proxy
     dispatch:         NamecheapDns
     registrar_dispatch: NamecheapRegistrar
+    registrar_sets_nameservers: true
     # Namecheap requires WHOIS contacts per registration (Registrant, Tech,
     # Admin and AuxBilling — the wizard submits its single contact four
     # times), unlike Porkbun's account-level model. UI renders the contact
@@ -185,6 +197,7 @@ providers:
     cors_policy:      proxy
     dispatch:         GandiDns
     registrar_dispatch: GandiRegistrar
+    registrar_sets_nameservers: true
     # Gandi accepts per-registration WHOIS contacts (unlike Porkbun's
     # account-level model). UI renders the contact form on the registrar
     # path; no `registrar_notes_key` needed.
@@ -194,6 +207,32 @@ providers:
     post_verify_select:
       id:        domain-select
       label_key: provisioning.gandi.domain
+      source:    zones
+      required:  true
+    pricing_source: null
+
+  spaceship:
+    display_name_key: provisioning.spaceship.name
+    help_key:         provisioning.spaceship.help
+    signup_url:       https://www.spaceship.com/application/api-manager/
+    capabilities:     [dns, registrar]
+    # The API answers a browser preflight 401 with no
+    # Access-Control-Allow-Origin (measured 2026-11-17), so the web build
+    # routes it through the CORS forwarder's `spaceship` entry.
+    cors_policy:      proxy
+    dispatch:         SpaceshipDns
+    registrar_dispatch: SpaceshipRegistrar
+    registrar_sets_nameservers: true
+    # Spaceship's create references contacts by id and its API exposes no
+    # account default, so the wizard collects the contact and the adapter
+    # saves it (`PUT /contacts`) before naming it under every role.
+    registrar_requires_contact: true
+    fields:
+      - { id: api-key,    type: secret, label_key: provisioning.spaceship.api_key,    required: true }
+      - { id: api-secret, type: secret, label_key: provisioning.spaceship.api_secret, required: true }
+    post_verify_select:
+      id:        domain-select
+      label_key: provisioning.spaceship.domain
       source:    zones
       required:  true
     pricing_source: null

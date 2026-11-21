@@ -29,7 +29,6 @@ import SwiftUI
 /// `admin-nav-back` is provided by the admin shell rail (macOS) / the navigation stack
 /// (iOS), not this page.
 public struct AdminFilesView: View {
-    @Environment(FaunaClient.self) private var client: FaunaClient?
     @State private var vm = AdminFilesVM()
     /// Reload trigger — macOS passes the shell's `navGeneration`; iOS leaves it 0 (the
     /// NavigationLink re-mounts the view, re-running the load).
@@ -59,10 +58,7 @@ public struct AdminFilesView: View {
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .task(id: reloadToken) {
-            guard let client else { return }
-            await vm.configure(api: client.api)
-        }
+        .adminReadOnEntryAndReconnect(vm, reloadToken: reloadToken)
     }
 
     // MARK: - Deployment-wide toggle (dispatch-on-change)
@@ -84,6 +80,10 @@ public struct AdminFilesView: View {
                     let next = !(vm.snapshot?.webdavEnabled ?? false)
                     Task { await vm.setWebdavEnabled(next) }
                 }
+                // Waits for `get_mail_config` (admin.md § Errors & edge cases,
+                // *Controls wait for their read*) — never flipped from the
+                // `false` a machine starts at.
+                .faunaPossible(vm.toggleAnswer)
                 .faunaGate("fauna.bridges.set_webdav_enabled")
                 Text(L.admin.filesPage.enabledSubtitle)
                     .font(.caption).foregroundStyle(.secondary)

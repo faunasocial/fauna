@@ -523,8 +523,6 @@ def test_apple_add_account_appends_second_identity_to_registry(
                 "args": {"handle": handle},
             },
             "continue_enabled": True,
-            "control_checkbox_visible": False,
-            "control_checkbox_checked": False,
         }, handle=handle)
         driver.click(HANDLE_CONTINUE_BUTTON)
 
@@ -1887,8 +1885,6 @@ def test_apple_abandoned_created_identity_never_shows_among_your_identities(
                 "args": {"handle": handle},
             },
             "continue_enabled": True,
-            "control_checkbox_visible": False,
-            "control_checkbox_checked": False,
         }, handle=handle)
         driver.click(HANDLE_CONTINUE_BUTTON)
         await_session_actor(

@@ -85,6 +85,17 @@ pub enum FeedEmptyState {
     NoMatches,
 }
 
+/// The `feed-selector` entry in force ([`FeedSnapshot::selector_choice`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FeedSelectorChoice<'a> {
+    /// `feed-trending-item`.
+    Trending,
+    /// `feed-local-item` — the nest's local feed.
+    Local,
+    /// The `feed-item` whose feed id this is.
+    Feed(&'a str),
+}
+
 /// Where this reader's words go when they reply to, or quote, a **restricted**
 /// post (`ui/feed.md` § Encryption at rest → *Ruling 5's build — the shape*,
 /// (d)). The manager's answer, derived at every snapshot read like
@@ -1236,6 +1247,23 @@ impl FeedSnapshot {
         "local".to_string()
     }
 
+    /// The `feed-selector` entry that is the current choice — the one rule
+    /// every app paints its selector from, so the entry in force is published
+    /// on every app and at every moment, launch included (`ui/feed.md`
+    /// § Element IDs, `feed-local-item`: "selected while the selection is
+    /// Local"; § Persistence: the selection defaults to Local on launch).
+    /// Trending when its flag is set, else the saved feed `selected_feed`
+    /// names, else Local.
+    pub fn selector_choice(&self) -> FeedSelectorChoice<'_> {
+        if self.trending_selected {
+            FeedSelectorChoice::Trending
+        } else if let Some(id) = self.selected_feed.as_deref() {
+            FeedSelectorChoice::Feed(id)
+        } else {
+            FeedSelectorChoice::Local
+        }
+    }
+
     /// Every post this snapshot renders: the timeline list, then the
     /// [`deep_linked_post`](Self::deep_linked_post) slot. The **one** definition
     /// of that union — every render walk and every per-post lazy resolve reads it,
@@ -1397,6 +1425,18 @@ pub fn feed_empty_state(snapshot: FeedSnapshot) -> Option<FeedEmptyState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// At launch nothing is chosen and Local is in force — the selector
+    /// publishes it then too, so the entry in force is never unnamed.
+    #[test]
+    fn the_selector_choice_is_local_at_launch_then_follows_the_selection() {
+        let mut s = FeedSnapshot::default();
+        assert_eq!(s.selector_choice(), FeedSelectorChoice::Local);
+        s.selected_feed = Some("f1".into());
+        assert_eq!(s.selector_choice(), FeedSelectorChoice::Feed("f1"));
+        s.trending_selected = true;
+        assert_eq!(s.selector_choice(), FeedSelectorChoice::Trending);
+    }
 
     /// A post's bytes rest on its named home, and on this nest when it names
     /// none — a blank or whitespace home included, which names no host.

@@ -83,6 +83,10 @@ public struct AddressBookView: View {
         // only while the Address Book segment is showing, which is the segment
         // gate the row asks for; see `onAddressBookChanged`'s doc comment.
         .onAddressBookChanged { await vm.refreshFromPush() }
+        // The book read is unresolved while the account's key is still being
+        // minted: the mint landing is a store change, so re-run the read then
+        // (tui's `contacts::store_resync_op`); a resolved read is left alone.
+        .onStoreChange { await vm.resyncIfUnresolved() }
     }
 
     /// The Address Book picker (`addressbook-item`, indexed — mirror
@@ -91,8 +95,11 @@ public struct AddressBookView: View {
     @ViewBuilder
     private var bookPicker: some View {
         if vm.addressbooks.isEmpty {
-            if !vm.isLoading {
-                Text(L.contacts.addressBook.noAddressbooks)
+            // Loading while the read is unresolved (no key yet — the mint in
+            // flight), never the empty address book (`ui/contacts.md` § Errors
+            // & edge cases); the empty state only once the read answered.
+            if let placeholder = vm.bookPickerPlaceholder {
+                Text(placeholder)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .padding(16)
@@ -140,7 +147,7 @@ public struct AddressBookView: View {
     private var cardList: some View {
         ScrollView {
             if vm.cards.isEmpty {
-                if !vm.isLoading {
+                if !vm.isLoading && !vm.addressbooksUnresolved {
                     Text(L.contacts.addressBook.noCards)
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -182,6 +189,7 @@ private struct CardDetailOverlay: View {
         ZStack {
             Color.black.opacity(0.35)
                 .ignoresSafeArea()
+                .faunaActsOnClick()
                 .onTapGesture { onClose() }
 
             VStack(alignment: .leading, spacing: 10) {

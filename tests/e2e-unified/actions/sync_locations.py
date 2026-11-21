@@ -57,6 +57,18 @@ class SyncLocationsActions:
         if self.driver.is_windows():
             self.inject_locations([])
 
+    def remove_binding(self, *, scope: str | None = None) -> None:
+        """End the bound row's binding — ``folder-location-remove-button``, the
+        user's unbind (ui.yaml `folders`). On windows the click drives
+        `LocationsViewModel.RemoveLocationAsync`, which removes the row at once and
+        re-pushes the unbind until the agent stops listing it; the agent's ended
+        binding then tears its root down whole (`file-sync.md` § the registration
+        lifecycle). Nothing here waits: the caller polls the effect it is about —
+        the OS's registration, the agent's list — never the row (convention 14).
+        """
+        self.driver.is_visible_scrolled("folder-location-remove-button", scope=scope)
+        self.driver.click("folder-location-remove-button", scope=scope)
+
     # --- Per-binding on-demand mode (`folder-location-mode-toggle`) -----------
     #
     # ui.yaml § folders: windows and linux, plus tui on a windows host. The

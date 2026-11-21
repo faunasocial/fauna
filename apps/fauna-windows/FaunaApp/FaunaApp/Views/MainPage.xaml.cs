@@ -727,6 +727,8 @@ public sealed partial class MainPage : Page
         {
             NavigateForSelection(tag);
 #if DEBUG || FAUNA_E2E_AGENT
+            FaunaApp.Core.Logs.E2eTrace.Write(
+                $"[nav] selection {tag}; selected now {CurrentViewName}, content {ContentFrame.Content?.GetType().Name}");
             NoteViewWhenLoaded(CurrentViewName);
 #endif
         }
@@ -741,22 +743,44 @@ public sealed partial class MainPage : Page
     /// frame before it (convention 11: the state provider answers what is on
     /// screen). Before this the view was written only by <c>nav</c> patches and read
     /// "feed" through a whole walk the user took through the tabs.
+    ///
+    /// <para>A deferred publish also arms the e2e nav-readiness barrier
+    /// (<see cref="App.AddNavLoad"/>), so a <c>nav</c> patch reports ready only once
+    /// the page it selected has loaded and its view is published. Without it the
+    /// agent signalled ready right after the selection, while the new page had not
+    /// loaded: the state read that followed answered the page before — the previous
+    /// page's own deferred publish lands between the patch and the selection,
+    /// overwriting the patch's view — and <c>test_page_loads</c> read
+    /// <c>'conversations'</c> on events, <c>'feed'</c> on settings.</para>
     /// </summary>
     private void NoteViewWhenLoaded(string view)
     {
+        // A selection that replaced the page an earlier one waited on ends that wait:
+        // that view is never published, and the barrier must not hold for it.
+        _viewPublished?.TrySetResult();
+        _viewPublished = null;
         if (ContentFrame.Content is not FrameworkElement page || page.IsLoaded)
         {
             App.NoteShellView(view);
             return;
         }
+        var published = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _viewPublished = published;
         void OnLoaded(object sender, RoutedEventArgs e)
         {
             page.Loaded -= OnLoaded;
             // A later selection may have replaced this page before it loaded.
             if (ReferenceEquals(ContentFrame.Content, page)) App.NoteShellView(view);
+            published.TrySetResult();
+            if (ReferenceEquals(_viewPublished, published)) _viewPublished = null;
         }
         page.Loaded += OnLoaded;
+        App.AddNavLoad(published.Task);
     }
+
+    /// <summary>The pending deferred publish of <see cref="NoteViewWhenLoaded"/>,
+    /// completed once its page has loaded or a later selection replaced it.</summary>
+    private TaskCompletionSource? _viewPublished;
 #endif
 
     private void NavigateForSelection(string tag)

@@ -96,17 +96,21 @@ Stamped 2026-10-13 at ab51f8d2bd.
     - `tests/e2e-unified/tests/api/test_mail_health.py::test_a_second_check_within_the_minute_asks_no_list_and_keeps_the_listing`
 34. [app] The mail health section points you to the two big mailbox providers' own sender dashboards, as plain help text with links — `docs/goal/behavior/mail-deliverability.md` § The admin-pane surface
     - `tests/e2e-unified/tests/test_admin_mail_health.py::test_the_sender_dashboard_note_points_to_gmail_and_outlook`
+35. [app] When the server cannot connect to other mail servers on port 25 at all, Check again makes the line say outgoing mail cannot leave this server, the outgoing queue row says why and to ask the provider to lift the block, and once it is lifted the next Check again clears it — `docs/goal/behavior/mail-deliverability.md` § Symptom diagnostics
+    - `tests/e2e-unified/tests/test_admin_mail_health.py::test_a_blocked_outbound_port_reads_outgoing_mail_cannot_leave_naming_why`
+36. [app] On a new server whose provider blocks outgoing mail, claiming it with your own domain is enough for the Mail page to say outgoing mail cannot leave and why — the check runs when mail is turned on, with no Check again and no wait for the daily run — `docs/goal/behavior/mail-deliverability.md` § Symptom diagnostics
+    - `tests/e2e-unified/tests/test_mail_client_full_roundtrip.py::test_a_claim_on_a_box_whose_port_25_is_blocked_says_why_mail_cannot_leave`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+d8a27534 standalone |
+| web | ⚠ partial | 0.1.5-dev+d8a27534 standalone |
 | linux | ✅ full | 0.1.5-dev+d8a27534 standalone |
-| windows | ✅ full | 0.1.5-dev+e98a39b5 standalone |
-| macos | ✅ full | 0.1.5-dev+a1b3eaab standalone |
-| ios | ✅ full | 0.1.5-dev+5beed650 standalone |
+| windows | ⚠ partial | 0.1.5-dev+e98a39b5 standalone |
+| macos | ⚠ partial | 0.1.5-dev+a1b3eaab standalone |
+| ios | ⚠ partial | 0.1.5-dev+5beed650 standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+79cc323c standalone |
 | android-kids | — absent | |
@@ -150,4 +154,6 @@ Stamped 2026-10-13 at ab51f8d2bd.
 | 32 | app | `tests/e2e-unified/tests/test_admin_mail_health.py::test_an_address_on_several_lists_names_them_all_and_links_the_first` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 33 | nest | `tests/e2e-unified/tests/api/test_mail_health.py::test_a_second_check_within_the_minute_asks_no_list_and_keeps_the_listing` | nest (linux): passed, nest (macos): passed |
 | 34 | app | `tests/e2e-unified/tests/test_admin_mail_health.py::test_the_sender_dashboard_note_points_to_gmail_and_outlook` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 35 | app | `tests/e2e-unified/tests/test_admin_mail_health.py::test_a_blocked_outbound_port_reads_outgoing_mail_cannot_leave_naming_why` | linux (linux): passed, tui (macos): passed |
+| 36 | app | `tests/e2e-unified/tests/test_mail_client_full_roundtrip.py::test_a_claim_on_a_box_whose_port_25_is_blocked_says_why_mail_cannot_leave` | linux (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

@@ -1,7 +1,7 @@
 #!/bin/bash
 HERE="$(dirname "$(readlink -f "${0}")")"
-export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
-export GDK_PIXBUF_MODULE_FILE="${HERE}/usr/lib/gdk-pixbuf-loaders.cache"
+# No library is bundled: the AppImage runs on the host's GTK and libadwaita
+# (installers/linux-desktop.md § 5 AppImage, § Platform Support).
 # The systemd user unit written by the app under an AppImage install execs the
 # stable .AppImage file itself with --sync-agent (the per-run FUSE mount path
 # is throwaway) — dispatch to the bundled agent.

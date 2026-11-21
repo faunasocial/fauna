@@ -73,16 +73,6 @@
                     Opacity="0.85"
                     Margin="0,8,0,0" />
 
-                <!-- "I control DNS for this domain" — visible only when
-                     the snapshot's outcome is RegisteredNoNest. Hidden
-                     otherwise. -->
-                <CheckBox
-                    x:Name="HandleControlCheckbox"
-                    AutomationProperties.AutomationId="{x:Bind ids:Ids.HandleControlCheckbox}"
-                    Content="{loc:Localize Key=onboarding/handle/control_checkbox}"
-                    IsChecked="{Binding HandleControlCheckboxChecked, Mode=TwoWay}"
-                    Visibility="{x:Bind local:HandleEntryView.BoolToVisibility(ViewModel.HandleControlCheckboxVisible), Mode=OneWay}" />
-
                 <!-- Only while Continue signs in (snapshot terms_notice_visible);
                      Collapsed keeps it out of the automation tree. Joining is
                      acceptance (nest-rules.md § Acceptance at joining): the nest's

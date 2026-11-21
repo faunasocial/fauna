@@ -1,0 +1,129 @@
+# The two declared lists of the possibility sweep `actuation-changes-or-reports`
+# (helpers/ui_walk_actuation.py; owner docs/goal/architecture/e2e-systematic-ui-walks.md
+# § Implementation status today, the possibility-invariants bullet).
+#
+# Every entry carries its reason. `id` is a ui.yaml element id or an fnmatch
+# pattern over ids. Both lists start as short as honesty allows: an entry here is
+# a place a violation could hide, so it is added only with a reason a reviewer
+# would accept, never to make a red run green.
+
+# ---------------------------------------------------------------------------
+# Affordances the sweep NEVER actuates: destructive and sovereign acts. The
+# first step of a two-step act (a button that opens its confirmation) is still
+# actuated — opening the confirmation is a frame change, and the confirmation is
+# then left alone, because only these patterns' confirm steps are held.
+# ---------------------------------------------------------------------------
+
+[[never_actuate]]
+id = "exit-tab"
+reason = "quits the app; the sweep would be judging a dead process"
+
+[[never_actuate]]
+id = "sign-out*"
+reason = "ends the session the whole sweep runs on"
+
+[[never_actuate]]
+id = "*confirm*"
+reason = "the confirming step of a two-step act (a deletion, a revoke, a reset); the step that opens it is judged instead"
+
+[[never_actuate]]
+id = "*delete*"
+reason = "deletes user data"
+
+[[never_actuate]]
+id = "*remove*"
+reason = "removes user data, a device, a member or a destination"
+
+[[never_actuate]]
+id = "*revoke*"
+reason = "revokes a grant, session or credential"
+
+[[never_actuate]]
+id = "*reset*"
+reason = "factory reset or a reset of learned state"
+
+[[never_actuate]]
+id = "*retire*"
+reason = "retires a nest or an account — sovereign and irreversible"
+
+[[never_actuate]]
+id = "*rotate*"
+reason = "rotates key material — sovereign"
+
+[[never_actuate]]
+id = "recovery-kit-*"
+reason = "mints, replaces or lets go of recovery key material — sovereign"
+
+[[never_actuate]]
+id = "*unlink*"
+reason = "disconnects a bridge or a linked account"
+
+[[never_actuate]]
+id = "*leave*"
+reason = "leaves a room, folder or family"
+
+[[never_actuate]]
+id = "*block-button"
+reason = "blocks a person or a peer"
+
+[[never_actuate]]
+id = "*unblock*"
+reason = "lifts a block the person set — their safety decision, never the sweep's"
+
+[[never_actuate]]
+id = "*transfer*"
+reason = "transfers ownership — sovereign"
+
+[[never_actuate]]
+id = "*restart*"
+reason = "restarts the nest or an import, taking the box away from the sweep"
+
+[[never_actuate]]
+id = "*suspend*"
+reason = "suspends an account"
+
+# Fields are held back by the same list: a held field is never typed into, and
+# the actuation that painted it is judged by its frame change alone.
+
+[[never_actuate]]
+id = "file-upload"
+reason = "a file path (a native picker on the apps that have one); no fixed value names a real file, so a typed path judges the harness's guess, not the page"
+
+[[never_actuate]]
+id = "calendar-import-file"
+reason = "a file path to an .ics file (the file-upload shape); no fixed value names a real file"
+
+# ---------------------------------------------------------------------------
+# Affordances that legitimately change nothing on the frame when actuated.
+# (Empty to start: the first observing corpus decides what belongs here, each
+# with its reason.)
+# ---------------------------------------------------------------------------
+
+[[nothing_changes]]
+id = "*terms-link"
+reason = "opens the terms and content guidelines in the system browser (the shared TERMS_URL); the change is the browser's window, outside the app's frame (first met on the ios corpus of 2026-11-19)"
+
+[[nothing_changes]]
+id = "calendar-export-button"
+reason = "writes the selected calendar as one .ics file into the downloads location (ui.yaml's snapshot-file-download-button precedent); the file is the change, and the notice naming it carries no ui.yaml id, so the registered frame is the same on success while a failure paints `error-message` (first met on the web corpus of 2026-11-20)"
+
+# ---------------------------------------------------------------------------
+# Inputs that filter the page as they are typed into: no form, nothing to
+# submit. The actuation that painted one is judged by its own frame change, and
+# the input is reported beside the count line, never filled or submitted.
+# ---------------------------------------------------------------------------
+
+[[filter_inputs]]
+id = "conversation-search-box"
+reason = "a local filter over the loaded conversations, applied as each key is typed (no nest query, no submit); on a fresh account the list is empty, so nothing it filters could show"
+
+# ---------------------------------------------------------------------------
+# Texts that move with the wall clock at a coarser grain than the two entry
+# reads are apart: volatile by declaration (compared by identity and state
+# alone). The two-read measure catches a seconds clock; a minute clock ticks
+# between steps, so the restore met it as a lasting change.
+# ---------------------------------------------------------------------------
+
+[[clock_texts]]
+id = "sync-agent-status-uptime"
+reason = "the running sync agent's humanized uptime (ui.yaml: `fauna_core::format::duration_secs`), minute-granular, so it rolls between steps while the two entry reads seconds apart see it still (the linux corpus of 2026-11-19 met `1m` → `2m` on Events)"

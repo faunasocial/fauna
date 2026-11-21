@@ -25,7 +25,8 @@ that someone you trust already runs.
 content, no account of yours, and no key that could read what you store. We
 maintain three servers of our own, used to test releases of the nest software
 and to let app-store reviewers try the apps. Only one of them, fauna.build,
-has accounts that people sign in to: reviewers and our own testers. There we
+has accounts that people sign in to: reviewers and our own testers; the
+other two hold only accounts that our automated tests use. On fauna.build we
 are the admin, and everything below about admins applies to us.
 
 ## Who runs your nest
@@ -51,7 +52,8 @@ An admin has four levers:
   and keeps full access, so they can export everything; then access ends, and
   two weeks later the account and its data on that nest are deleted. Their
   data on their own devices is untouched; they can take their key to another
-  nest, and their data comes back from their backup.
+  nest, and a backup on one of their devices brings back their mail,
+  calendar, contacts and posts, and any folder they attached to it.
 - **Removing content under a legal obligation.** When the law obliges the
   admin to remove something (on fauna.build, an app store's or an authority's
   request to remove it counts), they withhold it from everyone on the nest,
@@ -134,7 +136,7 @@ with the request kept as the recorded reference.
 When this page changes, the change is visible in the public source repository,
 {repo}, alongside the software's source code.
 
-Last changed: 25 October 2026.
+Last changed: 20 November 2026.
 
 ## Questions
 

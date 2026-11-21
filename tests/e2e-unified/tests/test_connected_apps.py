@@ -704,14 +704,15 @@ def _answered_handoff(client: OAuthClient, request_uri: str):
 
 
 def _open_handoff_card(ca: ConnectedAppsActions, client: OAuthClient, request_uri: str) -> int:
-    """Open the route and return the card's index. No re-navigation: the
-    command acks once the open has landed, so the card must already be painted
-    by the route itself, not by a later visit's re-read."""
+    """Open the route and return the card's index. No re-navigation: a revisit
+    would open the handoff a second time. The command acks on dispatch, and the
+    Apple pair resolve the open in a detached task, so the card is waited for on
+    a deadline (convention 14), never read once."""
     ca.open_handoff_route(request_uri)
     assert ca.is_page_visible(), (
         f"the consent route must land on Connected apps. error: {ca.current_error_text()!r}"
     )
-    index = ca.request_index_for_client(client.client_id)
+    index = ca.wait_for_request_from(client.client_id, renavigate=False)
     assert index is not None, (
         "the route must open its card in the tray. "
         f"error: {ca.current_error_text()!r} client_id: {client.client_id!r} "

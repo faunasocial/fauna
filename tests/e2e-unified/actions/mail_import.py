@@ -64,9 +64,13 @@ class MailImportActions:
 
         ``error-message`` is built hidden — absent from the registry, not
         merely empty — when there's nothing to show, so an unguarded
-        `get_text` 404s on a clean page. Check visibility first.
+        `get_text` 404s on a clean page. Check presence first, with
+        ``is_absent``, never ``is_visible``: windows' ``is_visible`` is
+        ``!IsOffscreen``, and its error bar sits at the top of the page's
+        scroll view, so once a press below (Resume, the restart) has scrolled
+        the Progress step into view a painted reason read as ``""``.
         """
-        if not self.driver.is_visible("error-message"):
+        if self.driver.is_absent("error-message"):
             return ""
         try:
             return self.driver.get_text("error-message")

@@ -104,7 +104,7 @@ def _seed_local_domain(nest_instance, domain: str) -> None:
 
 
 def _error(admin_app) -> str:
-    return admin_app.driver.get_text("error-message") if admin_app.has_error() else "none"
+    return admin_app.error_for_failure()
 
 
 def _index(admin_app, domain: str) -> int | None:

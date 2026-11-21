@@ -13,7 +13,10 @@ import com.fauna.app.core.InheritedFilterMarks
 import com.fauna.app.core.ShellLog
 import com.fauna.app.core.StolenCeremonyHold
 import com.fauna.app.core.SuccessionHandoff
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.formRefusal
 import com.fauna.app.ui.util.getStringFmt
+import com.fauna.app.ui.util.isPossible
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.ffi.FfiConnectionState
 import com.fauna.ffi.FfiDeadGenerations
@@ -23,6 +26,7 @@ import com.fauna.ffi.FfiOwedNestsView
 import com.fauna.ffi.FfiRecoveryKitStatus
 import com.fauna.ffi.FfiStolenOutcome
 import com.fauna.ffi.recoveryOwedNestsAfterDismiss
+import com.fauna.ffi.recoveryStolenEntryPossibility
 import com.fauna.ffi.FfiSweepView
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -33,6 +37,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
 import javax.inject.Inject
 
 /**
@@ -129,11 +134,19 @@ data class RecoveryKitUiState(
     val stolenVisible: Boolean
         get() = status?.allowsStolen != false
 
-    /** Whether `identity-stolen-button` is armed — a SECOND condition beside
+    /** `identity-stolen-button`'s draft answer — the shared
+     *  `stolen_entry_possibility` (`ui/README.md` § Offer only what is
+     *  possible, rule 4's form case): a kit pasted, then the confirm field
+     *  holding the never-localized word. A SECOND condition beside
      *  [stolenVisible], since `allowsStolen` is unconditionally true: this gate
      *  is the only thing between a stray tap and a re-pointed account. */
+    val stolenAnswer: Possibility
+        get() = askForm { recoveryStolenEntryPossibility(phraseInput, stolenConfirmInput) }
+
+    /** Whether `identity-stolen-button` is armed: [stolenAnswer] possible and
+     *  no ceremony already in flight. */
     val stolenArmed: Boolean
-        get() = stolenConfirmInput == RecoveryKitVM.STOLEN_CONFIRM_WORD && !busy
+        get() = stolenAnswer.isPossible && !busy
 
     // `toString` never carries the secret, the URI that embeds it, or the
     // typed phrase — a logged state must not leak a root secret.
@@ -441,9 +454,10 @@ class RecoveryKitVM @Inject constructor(
     /**
      * `identity-stolen-button` — the irreversible succession ceremony.
      *
-     * Both gates are re-checked HERE: the `SUCCEED` literal first (an armed
-     * render is not proof — a test agent driving the id reaches this handler),
-     * then the kit in hand.
+     * The draft answer the button is painted from ([RecoveryKitUiState.stolenAnswer])
+     * is asked again HERE — an armed render is not proof, a test agent driving
+     * the id reaches this handler — and refuses with its own line: the kit
+     * first, then the `SUCCEED` literal.
      *
      * On the persisted landed arm the account belongs to a new identity and this
      * session's bearers were revoked inside the nest's own transaction, so
@@ -457,12 +471,8 @@ class RecoveryKitVM @Inject constructor(
     fun succeedWithHeldKit(predecessorActorIdHex: String?, onSucceeded: (String) -> Unit) {
         val s = _state.value
         if (s.busy) return
-        if (s.stolenConfirmInput != STOLEN_CONFIRM_WORD) {
-            setError(context.getString(R.string.settings_recovery_kit_stolen_confirm_placeholder))
-            return
-        }
-        if (s.phraseInput.isEmpty()) {
-            setError(context.getString(R.string.settings_recovery_kit_kit_phrase_required))
+        formRefusal(context, s.stolenAnswer)?.let { refusal ->
+            setError(refusal.reason)
             return
         }
         _state.update { it.copy(busy = true) }

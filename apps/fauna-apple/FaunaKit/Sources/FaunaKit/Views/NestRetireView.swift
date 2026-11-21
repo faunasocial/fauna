@@ -7,7 +7,7 @@ import SwiftUI
 /// Shared by macOS and iOS (priority #2). A paint shell over the shared
 /// `NestRetireMachine`: credentials → list → confirm → running → done, every state
 /// the machine's. The credential state reuses `vps_config`'s controls by id
-/// (`ProviderRow`, `CredentialsForm`, the verify button); the running and done
+/// (`ProviderButtonRow`, `CredentialsForm`, the verify button); the running and done
 /// states reuse the `provisioning-step-row` glyphs. The lift of tui's
 /// `wizard/nest_retire.rs` and android's `NestRetireScreen`.
 ///
@@ -73,7 +73,7 @@ public struct NestRetireView: View {
         let providers = PROVIDERS.filter { $0.capabilities.contains(.vps) }
         let selectedId = m.selectedProvider()
 
-        ProviderRow(
+        ProviderButtonRow(
             providers: providers,
             selectedId: selectedId,
             kind: "vps",
@@ -90,7 +90,7 @@ public struct NestRetireView: View {
                     kind: "vps",
                     getCred: { vm.creds[$0] ?? "" },
                     setCred: { vm.setCred($0, $1) },
-                    hostedAuthCanBegin: { m.hostedAuthCanBegin(fieldId: $0) },
+                    hostedAuthPossibility: { m.hostedAuthPossibility(fieldId: $0) },
                     hostedAuthState: { m.hostedAuthState(fieldId: $0) },
                     hostedAuthBegin: { await vm.hostedAuthBegin($0) },
                     hostedAuthWait: { await vm.hostedAuthWait($0) }
@@ -100,14 +100,15 @@ public struct NestRetireView: View {
                 HStack {
                     Button(L.provisioning.verifyCredentials) { vm.verify() }
                         .buttonStyle(.bordered)
-                        .disabled(!m.canVerify() || listing)
                         .accessibilityIdentifier(Ids.vpsVerifyButton)
-                        .automationActivate(
-                            Ids.vpsVerifyButton,
-                            isEnabled: { m.canVerify() && !listing }
-                        ) { vm.verify() }
+                        .automationActivate(Ids.vpsVerifyButton) { vm.verify() }
+                        // The shared answer — the listing in flight included
+                        // (`ui/README.md` § Offer only what is possible, rules
+                        // 2 and 6); no app-side phase test beside it.
+                        .faunaPossible(m.verifyPossibility())
                     if listing { ProgressView().controlSize(.small) }
                 }
+                FaunaPossibilityReason(m.verifyPossibility())
             }
         }
         backButton()
@@ -188,6 +189,7 @@ public struct NestRetireView: View {
         .background(selected ? Color.accentColor.opacity(0.12) : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .contentShape(Rectangle())
+        .faunaActsOnClick()
         .onTapGesture { vm.select(row.serverId) }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(Ids.retireServerItem)

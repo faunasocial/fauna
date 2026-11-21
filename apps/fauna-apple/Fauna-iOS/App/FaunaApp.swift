@@ -340,6 +340,10 @@ public struct FaunaApp: App {
     public var body: some Scene {
         WindowGroup {
             ContentView(onboardingVM: onboardingVM)
+                // Read-only text is selectable on every page: one decision at the
+                // root (`FaunaKit/Core/ReadOnlyText.swift`; ui/README.md § Text the
+                // person reads can be copied).
+                .faunaReadOnlyText()
                 // The whole-app store-consent lock (account-age-band.md § The
                 // account age band → the store-law developer duties bullet,
                 // item (3)): over EVERYTHING the window renders — onboarding and
@@ -437,7 +441,8 @@ public struct FaunaApp: App {
                     #if DEBUG
                     TestAgentBootstrap.bindInProcessAgent(
                         stateProvider: { [self] in self.serializeState() },
-                        commandHandler: { [self] command in await self.handleTestCommand(command) }
+                        commandHandler: { [self] command in await self.handleTestCommand(command) },
+                        rootSurfaceName: { [appState] in ContentView.rootSurfaceName(appState) }
                     )
                     #endif
                     runLaunch()
@@ -567,8 +572,15 @@ public struct FaunaApp: App {
                     // switch to it; the append wrote nothing to the store, so a
                     // `runLaunch()` here would boot the still-active old account and drop
                     // the identity the user just added (see `completeAppendedAccount`).
+                    //
+                    // Both are held until signed in (`onboarding.md` § Wizard exit
+                    // handling → *The finished wizard holds until the session is signed
+                    // in*): no optimistic entry for this launch or any Retry of it — the
+                    // `launch_progress` spinner, the tabs only on `Online`, `launch_retry`
+                    // on a transient failure (`LaunchMachineBox.holdUntilOnline`).
                     appState.onLaunchAuthenticated = {
                         Task { @MainActor in
+                            launchMachineBox.holdUntilOnline()
                             if appState.isAddingAccount {
                                 await completeAppendedAccount()
                             } else {
@@ -593,7 +605,12 @@ public struct FaunaApp: App {
                     }
                     // Account switcher (Account settings) — same seam as `onFactoryReset`,
                     // so the shared FaunaKit `AccountSwitcherSection` stays platform-agnostic.
+                    // A plain switch goes to an account already signed in on this
+                    // device and keeps the optimistic entry: it releases any hold a
+                    // failed append finish left standing (the account switcher is the
+                    // way back from that finish's `launch_retry`).
                     appState.onSwitchAccount = { actorId, confirmed in
+                        launchMachineBox.releaseHold()
                         try await switchAccount(to: actorId, confirmed: confirmed)
                     }
                     appState.onAddAccount = {
@@ -694,7 +711,18 @@ public struct FaunaApp: App {
     /// launch. Instead we enter optimistically and let the machine's verdict correct
     /// course — including backing out of the session entirely when it must.
     @MainActor
-    private func runLaunch() {
+    private func runLaunch(resuming claim: UInt64? = nil) {
+        // Claimed FIRST — before the sign-out gate below, whose first call of every
+        // process defers this launch across a detached finish and re-enters through
+        // `relaunch` with the same claim (`LaunchMachineBox.claim(resuming:)` owns
+        // why). A re-entry superseded while the gate's finish ran — an e2e session
+        // patch or a teardown cleared the box — drops before touching anything.
+        guard let launch = launchMachineBox.claim(resuming: claim) else {
+            logMessage(
+                level: .info, target: "fauna.app",
+                message: "[launch] superseded while the sign-out gate's finish ran — dropping it")
+            return
+        }
         let keychain = KeychainStore()
 
         // Bring credential rows in line with the iCloud-backup preference (default:
@@ -711,12 +739,11 @@ public struct FaunaApp: App {
         // record still owes the wipe fails closed — no launch machine, the
         // wizard's `identity_choice` painting the refusal line, until Remove
         // Again clears it and re-enters here. The macOS root gates the same way.
-        guard onboardingVM.launchMayProceed(relaunch: { runLaunch() }) else {
+        guard onboardingVM.launchMayProceed(relaunch: { runLaunch(resuming: launch) }) else {
             appState.isOnboarding = true
             appState.launchPending = !onboardingVM.launchFailedClosed
             return
         }
-
         // The optimistic read below and the machine both resolve through the registry's
         // ACTIVE account, so a same-process account SWITCH (`switchAccount(to:)` moves the
         // active pointer) builds the incoming identity's session on both halves — there is
@@ -736,20 +763,29 @@ public struct FaunaApp: App {
         // `IdentityChanged` state). See `FaunaMacApp`'s holder for the full note.
         launchMachineBox.machine = machine
 
-        // Optimistic entry is withheld in exactly one case: a pending-factory-reset slot.
-        // The box may have been wiped, so entering the home tabs first would flash a
-        // session against a nest that is not there — and whether the slot is even REAL is
-        // the machine's CR-2 boot reconcile to decide (a slot left by a permanently-failed
-        // dispatch is stale, and the box is healthy and still claimed), not ours to assume.
-        // The slot is the active account's per-actor row, read through the same launch
-        // persistence the machine routes on.
-        if FaunaAccounts.launchPersistence(keychain: keychain).loadPendingFactoryReset() == nil {
+        // Optimistic entry is withheld in two cases (`LaunchMachineBox.entersOptimistically`).
+        // (1) A pending-factory-reset slot. The box may have been wiped, so entering the
+        // home tabs first would flash a session against a nest that is not there — and
+        // whether the slot is even REAL is the machine's CR-2 boot reconcile to decide (a
+        // slot left by a permanently-failed dispatch is stale, and the box is healthy and
+        // still claimed), not ours to assume. The slot is the active account's per-actor
+        // row, read through the same launch persistence the machine routes on.
+        // (2) The finished wizard's hold (`onboarding.md` § Wizard exit handling → *The
+        // finished wizard holds until the session is signed in*): a launch the wizard's
+        // `LoggedIn` handoff or an append finish started — and every Retry of it — has no
+        // session this device entered before to bet on, so it gates as macOS does.
+        let pendingReset =
+            FaunaAccounts.launchPersistence(keychain: keychain).loadPendingFactoryReset() != nil
+        let held = launchMachineBox.heldUntilOnline
+        if launchMachineBox.entersOptimistically(pendingFactoryReset: pendingReset) {
             enterOptimistically(keychain: keychain)
         }
         // No optimistic entry → nothing is known to be right to show until the
         // verdict: hold the spinner rather than the wizard's `identity_choice`
-        // default (`AppState.launchPending`). `dispatchLaunch` clears it.
-        appState.launchPending = appState.isOnboarding
+        // default (`AppState.launchPending`). `dispatchLaunch` clears it. A held
+        // launch spins whatever `isOnboarding` reads: the append finish's switch
+        // teardown has already cleared it, and the tabs must not paint sessionless.
+        appState.launchPending = held || appState.isOnboarding
 
         Task { @MainActor in
             await machine.start()
@@ -1091,6 +1127,9 @@ public struct FaunaApp: App {
         appState.session.clearAuthenticatedOverride()
         appState.isOnboarding = true
         appState.fpReconcile = nil
+        #if !FAUNA_EXCISE_P2P_SHARE
+        devicesVM.onPresenceSetsChanged = nil
+        #endif
         // The nest-scoped FP capability + domains must not outlive the session
         // (mirrors FaunaMacApp's teardown; best-effort, no-op without an appex).
         Task { await FileProviderCoordinator.signOut() }
@@ -1126,7 +1165,7 @@ public struct FaunaApp: App {
         if snap.lockedUntilSecs == nil { appState.accountLocked = nil }
         switch snap.phase {
         case .online:
-            // Normally we are already in — the optimistic bet paid off. The one case where
+            // Normally we are already in — the optimistic bet paid off. One case where
             // we are not: entry was withheld for a pending-factory-reset slot that the CR-2
             // reconcile then found STALE and cleared (the box was never reset, or was
             // already re-claimed — it is healthy and still claimed, and the ordinary rows
@@ -1134,6 +1173,10 @@ public struct FaunaApp: App {
             // on a claim page forever. Through `liveFaunaClient`, not the raw
             // `client` — this function is handleTestCommand-reachable, and a
             // raw read is the row 376 bug class.
+            // The other: the finished wizard's hold — the wizard's handoff or an append
+            // finish withheld the entry until this verdict, and it is spent here (the
+            // glue below runs the wizard's deferred first-setup work, once).
+            launchMachineBox.releaseHold()
             if liveFaunaClient == nil {
                 enterOptimistically(keychain: keychain)
             }
@@ -1340,6 +1383,83 @@ public struct FaunaApp: App {
         #endif
     }
 
+    /// Wire and run the File Provider domain reconcile for the signed-in
+    /// session: the launch glue and the e2e session patch both call it, since
+    /// a seat signed in by a patch never runs `completeAuthenticatedGlue` —
+    /// which left the phone with no reconcile hook at all, so a group set a
+    /// ceremony admitted never got its domain (`group-set.md` § Build design —
+    /// the group set, decision 11 (a)).
+    @MainActor
+    private func wireFileProviderReconcile(faunaClient: FaunaClient) async {
+        // File Provider auto-appear for the Files app (on-demand-files-apple.md § On-Demand
+        // Files → Apple File Provider binding): the same FaunaKit reconcile macOS
+        // runs — domains for the user's own sets this device's place accepts in and
+        // the sets shared with the account, behind the default-ON
+        // per-device toggle, app-dead capability provisioned first. iOS has no
+        // local-folder binding surface, so the one-local-presence rule reduces to
+        // `boundSets: []` (FP domain or RemoteOnly; the resident-engine arm can't
+        // arise). Best-effort: only the appex-embedding `.xcodeproj`-built app
+        // serves domains. Gated off e2e — FP domains + the shared app-group
+        // Keychain are machine-global (testing.md § conventions point 10) —
+        // save on a seat the harness launched from the appex-embedding app on
+        // its own ephemeral simulator (`FaunaE2E.fileProviderReconcile`, the
+        // `ios_file_provider_app` marker), where the domain stays that seat's.
+        // `os(iOS)`-gated (not just canImport) — this file also typechecks for
+        // the macOS host via the CrossPlatformUI shims, where UIDevice is absent.
+        #if os(iOS)
+        if !FaunaE2E.isActive || FaunaE2E.fileProviderReconcile,
+           let secret = appState.session.secretHex,
+           let nodeUrl = appState.session.nodeUrl,
+           let deviceId = appState.session.deviceId {
+            let fpReconcile: @Sendable () async -> Void = {
+                do {
+                    // Every set the account holds — own and shared with it —
+                    // mapped in shared Rust (the plan applies this device's
+                    // place and the toggle), keyed by its `FolderRef` wire
+                    // string; the name is the Files display label.
+                    let api = await faunaClient.api
+                    let sets = try await api.folderPresenceSets(deviceIdHex: deviceId)
+                    await FileProviderCoordinator.reconcile(
+                        sets: sets,
+                        provisioning: FileProviderProvisioningContext(
+                            nestUrl: nodeUrl,
+                            secretHex: secret,
+                            deviceIdHex: deviceId,
+                            deviceLabel: FaunaClient.deviceLabel
+                        )
+                    )
+                } catch {
+                    logMessage(
+                        level: .warn, target: "fauna.fileprovider",
+                        message: "[fp] reconcile skipped — folder list or roster read failed: \(error)")
+                }
+            }
+            // The `folder-on-demand-toggle` re-drives the same reconcile a
+            // launch runs (AppState.fpReconcile — FoldersView consumes it).
+            appState.fpReconcile = fpReconcile
+            // A group set a ceremony admits mid-session re-converges too.
+            #if !FAUNA_EXCISE_P2P_SHARE
+            devicesVM.onPresenceSetsChanged = fpReconcile
+            #endif
+            logMessage(
+                level: .info, target: "fauna.fileprovider",
+                message: "[fp] reconcile wired (launch + toggle + held group sets)")
+            await fpReconcile()
+        } else if !FaunaE2E.isActive || FaunaE2E.fileProviderReconcile {
+            // A seat that wants the reconcile but lacks an input never
+            // registers a domain, so say which input was missing (convention 6).
+            let missing = [
+                appState.session.secretHex == nil ? "secret" : nil,
+                appState.session.nodeUrl == nil ? "nest url" : nil,
+                appState.session.deviceId == nil ? "device id" : nil,
+            ].compactMap { $0 }.joined(separator: ", ")
+            logMessage(
+                level: .warn, target: "fauna.fileprovider",
+                message: "[fp] reconcile not wired — the session has no \(missing)")
+        }
+        #endif
+    }
+
     @MainActor
     private func completeAuthenticatedGlue(keychain: KeychainStore) async {
         // Through `liveFaunaClient`, not the raw `client` — handleTestCommand-
@@ -1420,55 +1540,9 @@ public struct FaunaApp: App {
         // twin.
         await MailEnableGlue.runPostAuthGlue(api: faunaClient.api, session: appState.session)
 
-        // File Provider auto-appear for the Files app (on-demand-files-apple.md § On-Demand
-        // Files → Apple File Provider binding): the same FaunaKit reconcile macOS
-        // runs — domains for the user's own sets this device's place accepts in and
-        // the sets shared with the account, behind the default-ON
-        // per-device toggle, app-dead capability provisioned first. iOS has no
-        // local-folder binding surface, so the one-local-presence rule reduces to
-        // `boundSets: []` (FP domain or RemoteOnly; the resident-engine arm can't
-        // arise). Best-effort: only the appex-embedding `.xcodeproj`-built app
-        // serves domains. Gated off e2e — FP domains + the shared app-group
-        // Keychain are machine-global (testing.md § conventions point 10) —
-        // save on a seat the harness launched from the appex-embedding app on
-        // its own ephemeral simulator (`FaunaE2E.fileProviderReconcile`, the
-        // `ios_file_provider_app` marker), where the domain stays that seat's.
-        // `os(iOS)`-gated (not just canImport) — this file also typechecks for
-        // the macOS host via the CrossPlatformUI shims, where UIDevice is absent.
-        #if os(iOS)
-        if !FaunaE2E.isActive || FaunaE2E.fileProviderReconcile,
-           let secret = appState.session.secretHex,
-           let nodeUrl = appState.session.nodeUrl,
-           let deviceId = appState.session.deviceId {
-            let fpReconcile: @Sendable () async -> Void = {
-                do {
-                    // Every set the account holds — own and shared with it —
-                    // mapped in shared Rust (the plan applies this device's
-                    // place and the toggle), keyed by its `FolderRef` wire
-                    // string; the name is the Files display label.
-                    let api = await faunaClient.api
-                    let sets = try await api.folderPresenceSets(deviceIdHex: deviceId)
-                    await FileProviderCoordinator.reconcile(
-                        sets: sets,
-                        provisioning: FileProviderProvisioningContext(
-                            nestUrl: nodeUrl,
-                            secretHex: secret,
-                            deviceIdHex: deviceId,
-                            deviceLabel: FaunaClient.deviceLabel
-                        )
-                    )
-                } catch {
-                    logMessage(
-                        level: .warn, target: "fauna.fileprovider",
-                        message: "[fp] reconcile skipped — folder list or roster read failed: \(error)")
-                }
-            }
-            // The `folder-on-demand-toggle` re-drives the same reconcile a
-            // launch runs (AppState.fpReconcile — FoldersView consumes it).
-            appState.fpReconcile = fpReconcile
-            await fpReconcile()
-        }
-        #endif
+        // File Provider auto-appear for the Files app — one wiring for every
+        // sign-in path (`wireFileProviderReconcile`).
+        await wireFileProviderReconcile(faunaClient: faunaClient)
     }
 
     /// Seed the onboarding wizard for the entry **the machine chose**, then show it.
@@ -1777,6 +1851,7 @@ public struct FaunaApp: App {
                 "pending": pb.pendingCount,
                 "passes_started": pb.passesStarted,
                 "passes_completed": pb.passesCompleted,
+                "requests_coalesced": pb.requestsCoalesced,
                 "completed_total": pb.completedCount,
                 "last_backup_at": pb.lastBackupDate?.timeIntervalSince1970 as Any,
                 "enabled": AppDefaults.store.bool(forKey: PhotoBackupControlsView.enabledKey),
@@ -2588,6 +2663,13 @@ public struct FaunaApp: App {
                         level: .info, target: "fauna.app",
                         message: "[e2e] account_pump_now: no client yet (pre-auth)")
                 }
+            case FoldersCustodyReadHoldTestCommand.holdAction,
+                 FoldersCustodyReadHoldTestCommand.releaseAction:
+                // Park / release the Folders page's mail-custody reads — see the
+                // macOS twin (shared FaunaKit handler). A refusal is LOUD.
+                if let reason = FoldersCustodyReadHoldTestCommand.apply(action) {
+                    testAgentFailure(reason)
+                }
             case "custody_owner_resend_now":
                 // Devices outcome 15's owner send-again poke — see the macOS twin
                 // (shared FaunaKit handler, fire-and-forget).
@@ -2671,6 +2753,7 @@ public struct FaunaApp: App {
             // the macOS twin's clear, for the reason `LaunchMachineBox.machine`'s doc
             // states.
             launchMachineBox.machine = nil
+            launchMachineBox.releaseHold()
             appState.launchPending = false
 
             // An authenticating patch MUST yield a live `FaunaClient` — see the twin
@@ -2797,6 +2880,14 @@ public struct FaunaApp: App {
                     Task { @MainActor in
                         await MailEnableGlue.reportHostAddress(api: faunaClient.api)
                     }
+                    // The File Provider reconcile, as the launch glue wires it:
+                    // a patched sign-in never reaches that glue, so without this
+                    // the seat had no reconcile hook and a group set a ceremony
+                    // admitted never got its domain. Detached: its first pass
+                    // provisions at the nest, and nothing below waits on it.
+                    Task { @MainActor in
+                        await self.wireFileProviderReconcile(faunaClient: faunaClient)
+                    }
                     // Critical-alerts session-start + periodic re-sweep loop —
                     // the e2e session-patch path calls the full `start()`
                     // (unlike macOS's, which skips it), so this fires here too
@@ -2828,6 +2919,15 @@ public struct FaunaApp: App {
                     // (`test_subscriptions.py::test_follow_auto_grants_in_encrypted_mode`).
                     #if !FAUNA_KIDS
                     SubscriptionsAuthorCadence.shared.start(api: faunaClient.api)
+                    // Same reasoning for the TLS-cert auto-renew cadence
+                    // (tls-certificates.md § C.3): only the production launch
+                    // arms it, so an e2e-logged-in admin had no loop and the
+                    // `auto_renew_wake` seam was refused "no authenticated
+                    // session" (`test_admin_dns_cert_auto_renew_tick.py`).
+                    // Latched, and its first tick waits the full interval, so
+                    // no other walk is disturbed. Twin of macOS's and of
+                    // windows's start at its e2e login `session` seam.
+                    DnsAutoRenewCadence.shared.start(api: faunaClient.api)
                     #endif
                     // Two e2e sub-modes (the e2e session-patch path never runs the
                     // production `activate(...)`, which keeps the deterministic mock
@@ -2952,25 +3052,10 @@ public struct FaunaApp: App {
             appState.inAdmin = true
             let subId = stack.count > 1 ? (stack[1]["id"] as? String) : nil
             appState.selectedAdminPage = AdminPage(navId: subId) ?? .dashboard
-        case "devices", "folders":
-            // Compat shim (2026-06-28 sync/folder UI unification): the device
-            // roster + folder control plane moved out of the "More" menu into the
-            // Settings shell (devices.md / folders.md). A bare
-            // `{"view":"devices"|"folders"}` nav — the pre-unification cross-app
-            // shape still used by the shared e2e action layer until every app
-            // migrates — lands on the matching Settings sub-page so iOS stays
-            // drivable during the rollout. (The canonical post-migration form
-            // `{"view":"settings","id":"devices"|"folders"}` is the `settings` case.)
-            appState.isOnboarding = false
-            appState.inAdmin = false
-            appState.selectedTab = "more"
-            appState.moreSelectedView = "settings"
-            appState.selectedSettingsPage = SettingsPage(navId: view)
         case "search":
             // Search is an overlay above the main tabs, not a tab/page of its
-            // own (`ContentView.MainTabView`'s `showSearchBar`) — macOS has no
-            // equivalent case because its `search-query-field` is always
-            // present via `.searchable(placement: .sidebar)`. Leaves the
+            // own (`ContentView.MainTabView`'s `showSearchBar`; macOS has the
+            // same case for its sidebar field). Leaves the
             // current tab as-is (unlike topLevelTabs/moreTabs below), matching
             // the real search-toggle-button gesture, which never changes tabs.
             appState.isOnboarding = false
@@ -3019,6 +3104,21 @@ public struct FaunaApp: App {
                 appState.profileHome = appState.profileActorId == nil
                     ? nil : first["home_nest_url"] as? String
             }
+        case _ where SettingsPage(navId: view) != nil:
+            // A bare `{"view":<page>}` naming a page iOS keeps under Settings —
+            // `nostr` (a canonical `navigation.pages` page whose tab is a
+            // declared nav exception here: reachable only through Settings),
+            // `devices` and `folders` (moved into Settings 2026-06-28) — lands
+            // on that Settings sub-page, so every canonical page is entered by
+            // its own name as on every other app. It fell to `default` before
+            // and left the previous page up (the actuation sweep's nostr entry
+            // read the Backups page). The two-entry form
+            // `{"view":"settings","id":<page>}` is the `settings` case.
+            appState.isOnboarding = false
+            appState.inAdmin = false
+            appState.selectedTab = "more"
+            appState.moreSelectedView = "settings"
+            appState.selectedSettingsPage = SettingsPage(navId: view)
         default:
             logMessage(level: .debug, target: "fauna.testagent", message: "[TestAgent] Unknown nav view: \(view)")
         }
@@ -3139,6 +3239,12 @@ public struct FaunaApp: App {
         // macOS twin.
         onboardingVM.machine.reset()
         await tearDownSessionForSwitch()
+        // The teardown clears `launchPending` and leaves no session, which paints
+        // the wizard (or, mid-append, the outgoing shell) for the hop until
+        // `runLaunch()` below decides — hold the launch progress view across it,
+        // as the macOS twin holds `.launching` (`onboarding.md` § Wizard exit
+        // handling → *The finished wizard holds*). `runLaunch()` recomputes it.
+        appState.launchPending = true
         Task { @MainActor in
             // FP teardown must COMPLETE before the incoming session starts
             // (on-demand-files-apple.md § Apple File Provider binding, multi-account: the
@@ -3237,6 +3343,9 @@ public struct FaunaApp: App {
         // The FP reconcile hook captured the OUTGOING session's secret/nest —
         // the incoming launch re-sets it.
         appState.fpReconcile = nil
+        #if !FAUNA_EXCISE_P2P_SHARE
+        devicesVM.onPresenceSetsChanged = nil
+        #endif
 
         appState.session.clearAuthenticatedOverride()
         appState.session.secretHex = nil
@@ -3298,7 +3407,7 @@ public struct FaunaApp: App {
     /// "Add account" → onboarding in **append** mode (a sheet over the live session).
     @MainActor
     private func beginAddAccount() {
-        onboardingVM.machine.reset()
+        onboardingVM.beginAddAccount()
         appState.isAddingAccount = true
     }
 
@@ -3308,9 +3417,19 @@ public struct FaunaApp: App {
     private func completeAppendedAccount() async {
         await FaunaKit.completeAppendedAccount(
             wizard: onboardingVM.machine,
+            // The finished append wizard holds on `launch_progress` from here — see
+            // the macOS twin; `switchAccount` keeps it across its teardown.
+            holdLaunch: { appState.launchPending = true },
+            // An append that never reaches the switch hands the live session back.
+            releaseLaunch: { appState.launchPending = false },
             dismissWizard: { appState.isAddingAccount = false },
             switchAccount: { actorId, confirmed in
-                try? await self.switchAccount(to: actorId, confirmed: confirmed)
+                do {
+                    try await self.switchAccount(to: actorId, confirmed: confirmed)
+                } catch {
+                    // Refused before any teardown: the live session is untouched.
+                    appState.launchPending = false
+                }
             },
             reportRefused: AccountSwitcherVM.postAddRefused
         )
@@ -3368,6 +3487,7 @@ public struct FaunaApp: App {
         appState.accountIndexRefusal = nil
         appState.accountIndexConfirming = false
         launchMachineBox.machine = nil
+        launchMachineBox.releaseHold()
         appState.launchPending = false
 
         appState.session.clearAuthenticatedOverride()
@@ -3378,6 +3498,10 @@ public struct FaunaApp: App {
         appState.session.handle = nil
         appState.session.domain = nil
         appState.isOnboarding = true
+        // An "Add account" wizard open at the reset belongs to the erased
+        // session; left up, it covered the next account's pages (macOS's
+        // twin met it in the actuation sweep).
+        appState.isAddingAccount = false
         appState.inAdmin = false
         appState.selectedSettingsPage = nil
         // Not overwritten by ordinary settings nav (only the mail-lists Members

@@ -4,7 +4,7 @@ from .base import PlatformDriver
 def create_driver(app_name: str) -> PlatformDriver:
     """Create a PlatformDriver for the given app name.
 
-    Valid names: web, android, ios, ios-kids, macos, windows, linux, tui
+    Valid names: web, android, android-kids, ios, ios-kids, macos, windows, linux, tui
 
     macOS and iOS are both driven by the **in-process automation server** (the
     app hosts an `InProcessAutomationServer` + `AutomationRegistry` on a
@@ -29,6 +29,11 @@ def create_driver(app_name: str) -> PlatformDriver:
     elif app_name == "android":
         from .android import AndroidBridgeDriver
         return AndroidBridgeDriver()
+    elif app_name == "android-kids":
+        # The kids column (feature-catalog.md § Cell semantics): android's driver
+        # on android's venue, launching the kids identity.
+        from .android import AndroidKidsBridgeDriver
+        return AndroidKidsBridgeDriver()
     elif app_name == "ios":
         from .ios import IosInProcessDriver
         return IosInProcessDriver()

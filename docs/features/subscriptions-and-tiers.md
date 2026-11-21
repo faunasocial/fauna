@@ -108,13 +108,20 @@ Stamped 2026-11-09 at a24f65b1161d.
    - `tests/e2e-unified/tests/test_claim_redeem_across_nests.py::test_a_code_minted_on_another_nest_redeems_from_the_creators_profile`
 36. [app] The profile of someone whose account lives on another nest lists the tiers they offer, with your status for each, read through your own nest — `docs/goal/behavior/subscriptions.md` § Pillar 1 — Fauna-app subscriptions (built)
    - `tests/e2e-unified/tests/test_offers_browse_cross_nest.py::test_a_reader_on_another_nest_sees_the_authors_offered_tiers`
+37. [app] A tier's Save is disabled and says a name is needed while the name is blank, and Redeem is disabled and says a code is needed while the code is blank; pressing either says the same and sends nothing — `docs/goal/ui/profile.md` § Errors & edge cases
+    - `tests/e2e-unified/tests/test_folder_and_tier_forms_offer_only_possible.py::test_tier_save_and_redeem_say_what_is_missing_while_the_name_or_code_is_blank`
+38. [app] Until you own a tier, making a claim code and adding a payment provider are disabled and say to create a tier first, with Create tier on the same tab; while your tiers are still loading they say that instead, never that you have none — `docs/goal/ui/profile.md` § Errors & edge cases
+    - `tests/e2e-unified/tests/test_fresh_account_offer_only_possible.py::test_claim_mint_and_provider_add_say_to_create_a_tier_until_one_is_owned`
+    - `tests/e2e-unified/tests/test_read_pending_offer_only_possible.py::test_claim_mint_and_provider_add_say_still_loading_while_the_tier_read_is_out`
+39. [app] On a nest that takes no payments, the redeem-a-code block is not shown at all, rather than shown greyed — `docs/goal/ui/profile.md` § Errors & edge cases
+    - `tests/e2e-unified/tests/test_share_webdav_redeem_offer_only_possible.py::test_the_redeem_block_is_left_out_on_a_nest_with_no_payments_plane`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+1e755069 standalone |
+| web | ⚠ partial | 0.1.5-dev+1e755069 standalone |
 | linux | ⚠ partial | 0.1.5-dev+1e755069 standalone |
 | windows | 🚧 unbuilt | 0.1.5-dev+517219d5 standalone |
 | macos | ⚠ partial | 0.1.5-dev+1e755069 standalone |
@@ -158,7 +165,7 @@ Stamped 2026-11-09 at a24f65b1161d.
 | 18 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_manual_claim_void` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 19 | app | `tests/e2e-unified/tests/test_federated_follow_cross_nest.py::test_a_reader_follows_an_author_on_another_nest_and_their_posts_reach_the_readers_feed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 20 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_config_add_and_remove` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 21 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_a_payment_backed_request_shows_the_paid_badge` — requires `author-drain-hold` (test harness) (not built: windows) | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 21 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_a_payment_backed_request_shows_the_paid_badge` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 22 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_return_url_display` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 22 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_webhook_url_preview` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 23 | nest | `tests/e2e-unified/tests/api/test_payments_webhook.py::test_a_refund_voids_the_purchases_code_after_redemption_a_renewal_keeps_it_and_an_unpaid_checkout_grants_nothing` | nest (linux): passed |
@@ -170,11 +177,15 @@ Stamped 2026-11-09 at a24f65b1161d.
 | 27 | nest | `tests/e2e-unified/tests/api/test_federated_follow_cross_nest_api.py::test_a_post_delivered_by_two_homes_lists_once_per_home_and_the_real_homes_tombstone_removes_it` | nest (linux): passed, nest (macos): passed |
 | 28 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_provider_product_mapping_covers_only_its_own_payments` — requires `subscription-provider-form-product` (not built: windows, android-kids, ios-kids) | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 29 | app | `tests/e2e-unified/tests/test_profile.py::test_profile_follow_toggle_unfollows_and_confirms_a_paid_leave` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, android (linux): error, tui (linux): passed, tui (macos): passed |
-| 30 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_the_payment_link_subscribes_first_and_binds_the_checkout` | web (linux): passed, tui (linux): passed, tui (macos): passed |
+| 30 | app | `tests/e2e-unified/tests/test_subscription_payments.py::test_the_payment_link_subscribes_first_and_binds_the_checkout` | web (linux): passed, windows (windows): passed, tui (linux): passed, tui (macos): passed |
 | 31 | nest | `tests/e2e-unified/tests/api/test_paid_tiers_cross_nest_api.py::test_a_code_minted_on_another_nest_is_redeemed_from_the_buyers_own_nest` | nest (linux): passed |
 | 32 | nest | `tests/e2e-unified/tests/api/test_paid_tiers_cross_nest_api.py::test_a_payment_ahead_of_the_request_from_another_nest_is_held_until_the_request_names_its_home` | nest (linux): passed |
 | 33 | nest | `tests/e2e-unified/tests/api/test_paid_tiers_cross_nest_api.py::test_a_buyer_on_another_nest_of_a_ranked_tier_is_served_the_per_post_tiers_it_includes` | nest (linux): passed |
 | 34 | nest | `tests/e2e-unified/tests/api/test_paid_tiers_cross_nest_api.py::test_a_paid_windows_end_reaches_the_buyers_nest_and_a_renewal_inside_the_grace_keeps_it` | nest (linux): passed |
-| 35 | app | `tests/e2e-unified/tests/test_claim_redeem_across_nests.py::test_a_code_minted_on_another_nest_redeems_from_the_creators_profile` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 35 | app | `tests/e2e-unified/tests/test_claim_redeem_across_nests.py::test_a_code_minted_on_another_nest_redeems_from_the_creators_profile` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 36 | app | `tests/e2e-unified/tests/test_offers_browse_cross_nest.py::test_a_reader_on_another_nest_sees_the_authors_offered_tiers` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 37 | app | `tests/e2e-unified/tests/test_folder_and_tier_forms_offer_only_possible.py::test_tier_save_and_redeem_say_what_is_missing_while_the_name_or_code_is_blank` — requires `blocked-reason-read` (test harness) (not built: windows) | macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 38 | app | `tests/e2e-unified/tests/test_fresh_account_offer_only_possible.py::test_claim_mint_and_provider_add_say_to_create_a_tier_until_one_is_owned` — requires `blocked-reason-read` (test harness) (not built: windows) | tui (linux): passed |
+| 38 | app | `tests/e2e-unified/tests/test_read_pending_offer_only_possible.py::test_claim_mint_and_provider_add_say_still_loading_while_the_tier_read_is_out` — requires `blocked-reason-read` (test harness) (not built: windows) | tui (linux): passed |
+| 39 | app | `tests/e2e-unified/tests/test_share_webdav_redeem_offer_only_possible.py::test_the_redeem_block_is_left_out_on_a_nest_with_no_payments_plane` | web (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

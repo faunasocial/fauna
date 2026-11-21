@@ -154,6 +154,27 @@ class DevicesVMOnDemandTest {
     }
 
     @Test
+    fun anEnrolRepaintsTheRowsPlacesAndAFoundPlaceReadsNothing() = runTest {
+        val f = makeVm()
+        val own = folder("photos", 1L)
+        val seat = com.fauna.ffi.FfiFolderMember(deviceId, "this phone", true, true, true)
+        whenever(f.api.folderPlaces("photos")).thenReturn(listOf(seat))
+        whenever(f.api.ensureFolderPlace("photos", deviceId)).thenReturn(true, false)
+        f.vm.loadOnDemand(listOf(own))
+
+        // The enrol wrote this device's place: the roster is re-read at once.
+        f.vm.setFolderOnDemand(own, false)
+        f.vm.setFolderOnDemand(own, true)
+        verify(f.api, times(1)).folderPlaces("photos")
+        assertEquals(listOf(seat), f.vm.folderPlaces.value["photos"])
+
+        // A second ON finds the place and writes nothing: no re-read.
+        f.vm.setFolderOnDemand(own, false)
+        f.vm.setFolderOnDemand(own, true)
+        verify(f.api, times(1)).folderPlaces("photos")
+    }
+
+    @Test
     fun memberRowIsHideOnlyAndNeverWritesAPlace() = runTest {
         val f = makeVm()
         val shared = folder("docs", 3L, role = "member")

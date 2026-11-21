@@ -121,6 +121,23 @@ pub fn log_rows(entries: Vec<LogEntry>, tz_offset_secs: i32) -> Vec<LogRow> {
     fauna_log::format::rows(&entries, tz_offset_secs)
 }
 
+/// Whether `log-copy-button` / `log-clear-button` can do anything now
+/// ([`fauna_log::format::ring_action_possibility`]; `docs/goal/architecture/apps/observability.md`
+/// § Surfaces, *Copy and clear offer only what they can do*): blocked with the
+/// page's own empty line (`logs.empty` on the device page,
+/// `admin.logs_page.empty` on the nest one) when the filter shows no entry.
+/// The buttons paint from it and their handlers ask it again. Gated
+/// `value-format` beside `logs` for `offline_possibility`'s bare-`fauna_core`
+/// reason (the Go mail-bridge build has no Logs surface).
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn log_ring_action_possibility(
+    shown: u32,
+    empty_reason_key: String,
+) -> fauna_core::possibility::Possibility {
+    fauna_log::format::ring_action_possibility(shown as usize, &empty_reason_key)
+}
+
 // ---------------------------------------------------------------------------
 // app-log's size-cap e2e seams (`docs/features/app-log.md` outcome 7) — the
 // UniFFI apps' twin of the tui and linux `app_log_emit` arms, one shared body

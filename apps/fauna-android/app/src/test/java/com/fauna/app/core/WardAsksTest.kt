@@ -59,6 +59,37 @@ class WardAsksTest {
         unknownPeerDm = null,
     )
 
+    // ── The ward's entry gate (contacts.md § Errors & edge cases) ───────────
+
+    /** Before the status read the knock and accept wait and no ask is offered;
+     *  with contact approval on, the knock to a stranger and every accept are
+     *  blocked and the ask is the result's one step; an accepted peer passes;
+     *  an unsupervised read makes both possible. Over the shared Rust predicates. */
+    @Test
+    fun theEntryGateFollowsTheStatusRead() {
+        val asks = WardAsks()
+        assertFalse(asks.knockPossibility(null) is uniffi.fauna_core.Possibility.Possible)
+        assertFalse(asks.acceptPossibility() is uniffi.fauna_core.Possibility.Possible)
+        assertFalse("no ask on a guess", asks.guardianDecides(null))
+
+        asks.setFromStatus(true, policy(contactApproval = true), emptyList(), emptyList())
+        val knock = asks.knockPossibility(null) as uniffi.fauna_core.Possibility.Blocked
+        assertEquals("contacts.guardian_approval_required", knock.reason.key)
+        val accept = asks.acceptPossibility() as uniffi.fauna_core.Possibility.Blocked
+        assertEquals("contacts.knock_guardian_pending", accept.reason.key)
+        assertTrue(asks.guardianDecides(null))
+        assertEquals(ContactAskRender.ASK, contactAskRender(false, KnockAskState.forPeer(peer), asks.guardianDecides(null)))
+        assertTrue(asks.knockPossibility("accepted") is uniffi.fauna_core.Possibility.Possible)
+        assertFalse(asks.guardianDecides("accepted"))
+        assertEquals("accepted", rosterStatus(listOf(peer.uppercase() to "accepted"), peer))
+
+        asks.setFromStatus(false, policy(contactApproval = true), emptyList(), emptyList())
+        assertTrue(asks.knockPossibility(null) is uniffi.fauna_core.Possibility.Possible)
+        assertTrue(asks.acceptPossibility() is uniffi.fauna_core.Possibility.Possible)
+        asks.clear()
+        assertFalse(asks.acceptPossibility() is uniffi.fauna_core.Possibility.Possible)
+    }
+
     // ── The durable store (rule (c)) ────────────────────────────────────────
 
     /** Contact approval on the ward's own policy marks every knock row

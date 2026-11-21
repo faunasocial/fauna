@@ -1816,6 +1816,57 @@ class HttpBridgeDriver(PlatformDriver):
         except Exception:
             return {}
 
+    # --- Text selection (`e2e-conventions.md` § Driver primitives → *Reading
+    # whether text can be selected`) ---
+
+    # Bridges that serve POST /element/select-text and POST /page/selection —
+    # the selection made with the platform's own gesture, then read back (web's
+    # real drag, macos's and linux's Select All, ios's long-press) — opt in by
+    # setting this True.
+    # The rest keep the base reads (the `selectable` attr, no `selected_text`).
+    _serves_select_text = False
+
+    def is_text_selectable(self, element_id: str, index: int = 0, *,
+                           scope: str | None = None) -> bool | None:
+        """On a bridge serving ``/element/select-text``: make the selection a
+        person makes in the element's text with the platform's own gesture,
+        then whether that selection holds the element's text — so text whose
+        selection is off reads False — or, where the platform answers the
+        gesture with its whole-text Copy action instead (ios's edit menu, which
+        the bridge takes down before replying), whether it raised that action
+        (``copy_offered``). An in-place selection stays standing for
+        `selected_text`. Elsewhere the base read."""
+        if not self._serves_select_text:
+            return super().is_text_selectable(element_id, index, scope=scope)
+        body: dict = {"id": element_id, "index": index}
+        wire = self._scope_wire(scope)
+        if wire:
+            body["scope"] = wire
+        reply = self._post("/element/select-text", body)
+        selected = (reply.get("selected") or "").strip()
+        # A bridge may name the step that answered no selection; `diagnose`
+        # folds it into the failure message (convention 6).
+        self._last_select_why = reply.get("why") or reply.get("error")
+        if not selected:
+            return reply.get("copy_offered") is True
+        shown = " ".join(self.get_text(element_id, index, scope=scope).split())
+        return " ".join(selected.split()) in shown
+
+    def selected_text(self) -> str | None:
+        """What the current selection holds (``/page/selection``) on a bridge
+        serving it; ``None`` elsewhere."""
+        if not self._serves_select_text:
+            return super().selected_text()
+        return self._post("/page/selection").get("selected") or ""
+
+    def diagnose(self, element_id: str, *, attrs: tuple[str, ...] = (),
+                 scope: str | None = None) -> str:
+        """The base snapshot, plus the step the last ``/element/select-text``
+        named for answering no selection, when it named one."""
+        snap = super().diagnose(element_id, attrs=attrs, scope=scope)
+        why = getattr(self, "_last_select_why", None)
+        return f"{snap} select-text: {why}" if why else snap
+
     # --- Scroll support ---
 
     _MAX_SCROLL_RETRIES = 3
@@ -2338,6 +2389,23 @@ class HttpBridgeDriver(PlatformDriver):
             return None
         elements = payload.get("elements")
         return elements if isinstance(elements, list) else None
+
+    def registry_frame(self) -> tuple[list[dict] | None, int]:
+        """``GET /registry`` with its ``reads_owed`` — see
+        :meth:`PlatformDriver.registry_frame`. A bridge that sends no count
+        reads 0, as the base class does."""
+        try:
+            payload = self._get("/registry", {})
+        except Exception:
+            return None, 0
+        elements = payload.get("elements")
+        owed = payload.get("reads_owed", 0)
+        # Which source lines the owed reads were started from — read by a
+        # checker naming a page that never settled (convention 6).
+        by = payload.get("reads_owed_by")
+        self.last_reads_owed_by = by if isinstance(by, dict) else {}
+        return (elements if isinstance(elements, list) else None,
+                owed if isinstance(owed, int) and owed >= 0 else 0)
 
     def dismiss_system_dialogs(self) -> int:
         """Dismiss system dialogs (e.g. Windows Firewall). Returns count dismissed."""

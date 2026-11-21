@@ -42,6 +42,10 @@ p2p-share = ["dep:fauna-peer-share"]
 # flag). The edge points THIS way — mail-settings sits below this crate (via
 # `fauna-client-conversations`), so it holds the trait and this crate the fold.
 mail-settings = ["dep:fauna-client-mail-settings"]
+# The e2e arming surface of the custody-read hold
+# (`webdav_provision::hold_next_custody_read_for_test`) in a release-profile
+# e2e build; a debug build reaches it through `debug_assertions`.
+test-helpers = []
 
 [dependencies]
 # `mail-settings`: the `WebdavServedSets` seam (see [features] above). Base

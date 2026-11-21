@@ -57,6 +57,79 @@ public final class MailSettingsVM: MachineBackedVM {
         snapshot?.credentialManagementReachable ?? false
     }
 
+    /// The credential section's shared answer over that field
+    /// (`mail-settings.md` § Errors & edge cases, *The in-page predicates*;
+    /// `ui/README.md` § Offer only what is possible, rule 6): absent before the
+    /// first read (nothing painted yet, as tui) and on a box that can never
+    /// serve mail, blocked naming the enable toggle while mail is off and
+    /// nothing else reaches the credential, possible otherwise. The view
+    /// paints from this, never from the bare field.
+    public var credentialManagementAnswer: Possibility {
+        guard let snapshot else { return .absent }
+        return mailSettingsCredentialManagementPossibility(snapshot: snapshot)
+    }
+
+    // MARK: - Controls wait for their reads (mail-settings.md § Errors & edge cases)
+
+    /// The enable toggle's answer (`mail-settings.md` § Errors & edge cases,
+    /// *Controls wait for their reads*): the shared
+    /// `MailSettingsSnapshot::enable_toggle_possibility` — blocked *still
+    /// loading* until the first hydrate resolves, so the enable form never
+    /// opens on the never-read "off", then blocked with the unavailable notice
+    /// for a turn-on on a box that cannot serve mail. Before the machine exists
+    /// the read has not started; a never-built machine is `dispatch`'s
+    /// refusal, never a "still loading" that would never end.
+    public var enableAnswer: Possibility {
+        guard let snapshot else { return readPossibility(read: .pending) }
+        return mailSettingsEnableTogglePossibility(snapshot: snapshot)
+    }
+
+    /// The forward-all read and the automatic reply's read, each held beside
+    /// the read it tracks (tui's `forward_all_read` / `autorespond_read`): an
+    /// empty pre-read draft never clears a forward and never writes a reply
+    /// filter. The hourly limit's commit waits for its own read, which brings
+    /// its ceiling (§ *The in-page predicates*).
+    var forwardAllRead = PageRead()
+    var forwardPerHourRead = PageRead()
+    var autorespondRead = PageRead()
+
+    /// The forward-all input's and commit's answer.
+    public var forwardAllAnswer: Possibility { forwardAllRead.possibility }
+    /// The hourly forwarding limit's commit answer.
+    public var forwardPerHourAnswer: Possibility { forwardPerHourRead.possibility }
+    /// The automatic reply's toggle and message answer.
+    public var autorespondAnswer: Possibility { autorespondRead.possibility }
+
+    // MARK: - Rotate keys (mail-settings.md § Errors & edge cases)
+
+    /// This app's own rotation is running — set for the life of
+    /// ``startRotation(excludedCredentials:)``'s dispatch (tui's
+    /// `rotation_in_flight`, linux's `w.rotation_in_flight`).
+    public internal(set) var rotationInFlight = false
+
+    /// `mail-settings-rotate-keys-button`'s and the rotate confirm's answer:
+    /// the shared `mail_settings_rotate_keys_possibility` — blocked *still
+    /// saving* while a rotation runs (this app's own, or one the snapshot
+    /// reports running) and with `mail_settings.rotate_pending` while an
+    /// interrupted one waits for the banner's Resume (`mail-settings.md`
+    /// § Errors & edge cases, *The in-page predicates*; linux's
+    /// `rotate_answer`). Before the first read the page has nothing to rotate.
+    public var rotateKeysAnswer: Possibility {
+        guard let snapshot else { return readPossibility(read: .pending) }
+        var inFlight = rotationInFlight
+        if case .rotationInProgress = snapshot.status { inFlight = true }
+        return mailSettingsRotateKeysPossibility(snapshot: snapshot, inFlight: inFlight)
+    }
+
+    /// The rotate confirm: asks the same answer the paint asked (rule 7),
+    /// refusing with its reason on `error-message`, then runs the rotation.
+    public func startRotation(excludedCredentials: [String]) async {
+        if refusePress(rotateKeysAnswer, errorMessage: &errorMessage) { return }
+        rotationInFlight = true
+        defer { rotationInFlight = false }
+        await dispatch(.startRotation(excludedCredentials: excludedCredentials))
+    }
+
     /// Whether THIS actor serves ≥1 folder over WebDAV — the per-actor serve state that
     /// gates the `mail-settings-mua-webdav-url` row. Deliberately NOT the deployment-wide
     /// `webdav_enabled` toggle, which defaults ON for a real-domain box (so gating on it
@@ -120,22 +193,32 @@ public final class MailSettingsVM: MachineBackedVM {
     public internal(set) var forwardPerHourCeiling: UInt32 = 0
 
     /// Read both settings into the drafts. Shown only while mail is enabled, so
-    /// nothing is fetched otherwise.
+    /// nothing is fetched otherwise. Each read is tracked on its own, so its
+    /// control waits for it alone.
     private func loadForwarding() async {
         guard enabled, let api = configuredApi else { return }
         do {
             forwardAllToDraft = try await api.forwardAllToGet() ?? ""
+            forwardAllRead.resolved()
+        } catch {
+            errorMessage = DisplayError.message(error)
+            forwardAllRead.failed()
+        }
+        do {
             let hourly = try await api.forwardPerHourGet()
             forwardPerHourDraft = String(hourly.value)
             forwardPerHourCeiling = hourly.ceiling
+            forwardPerHourRead.resolved()
         } catch {
             errorMessage = DisplayError.message(error)
+            forwardPerHourRead.failed()
         }
     }
 
     /// Enter on the forward-all field: the shared parser decides, a refusal shows
     /// on the page's `error-message` and sends nothing.
     public func commitForwardAllTo() async {
+        if refusePress(forwardAllAnswer, errorMessage: &errorMessage) { return }
         guard let api = configuredApi else {
             errorMessage = L.errors.notConnectedToNest
             return
@@ -158,6 +241,7 @@ public final class MailSettingsVM: MachineBackedVM {
 
     /// Enter on the hourly-limit field; same shape as `commitForwardAllTo`.
     public func commitForwardPerHour() async {
+        if refusePress(forwardPerHourAnswer, errorMessage: &errorMessage) { return }
         guard let api = configuredApi else {
             errorMessage = L.errors.notConnectedToNest
             return
@@ -203,7 +287,12 @@ public final class MailSettingsVM: MachineBackedVM {
     private func loadAccount() async {
         guard enabled, let api = configuredApi else { return }
         if let s = try? await api.mailSwitchesGet() { switches = s }
-        if let r = try? await api.autorespondGet() { publishAutorespond(r) }
+        do {
+            publishAutorespond(try await api.autorespondGet())
+            autorespondRead.resolved()
+        } catch {
+            autorespondRead.failed()
+        }
         if let q = try? await api.mailQuotasGet() { quotas = q }
     }
 
@@ -256,6 +345,7 @@ public final class MailSettingsVM: MachineBackedVM {
 
     /// The reply's toggle: on clears it; off commits the draft, which turns it on.
     public func toggleAutorespond() async {
+        if refusePress(autorespondAnswer, errorMessage: &errorMessage) { return }
         guard autorespond?.enabled == true else {
             await commitAutorespondMessage()
             return
@@ -277,6 +367,7 @@ public final class MailSettingsVM: MachineBackedVM {
     /// the page's `error-message` and sends nothing; otherwise the reply is set
     /// (and so turned on) and re-read.
     public func commitAutorespondMessage() async {
+        if refusePress(autorespondAnswer, errorMessage: &errorMessage) { return }
         guard let api = configuredApi else {
             errorMessage = L.errors.notConnectedToNest
             return
@@ -325,6 +416,9 @@ public final class MailSettingsVM: MachineBackedVM {
             errorMessage = L.errors.notConnectedToNest
             return
         }
+        // The enable form's submit asks the enable toggle's answer again
+        // (rule 6): nothing reaches the nest before the first hydrate.
+        if case .enableMail = action, refusePress(enableAnswer, errorMessage: &errorMessage) { return }
         isLoading = true
         defer { isLoading = false }
         // A throw here must never be silent: the machine records most failures on the
@@ -351,7 +445,7 @@ public final class MailSettingsVM: MachineBackedVM {
         snapshot = snap
         errorMessage = snap.error ?? thrown.map { "\($0)" }
         // Enabling mail from this page reveals the Forwarding section mid-visit.
-        if enabled && forwardPerHourCeiling == 0 { await loadForwarding() }
+        if enabled && forwardPerHourRead.state != .resolved { await loadForwarding() }
         if enabled && switches == nil { await loadAccount() }
     }
 

@@ -23,6 +23,7 @@ pub use fauna_core::fleet_removal::{
 use fauna_core::label_custody::LabelCustody;
 use fauna_core::localized::LocalizedText;
 use fauna_core::path_crypto::{LabelField, SealedLabelRender};
+use fauna_core::possibility::Possibility;
 use fauna_folders_machine::{DeviceOption, FolderWizardMachine, FolderWizardObserver};
 use fauna_protocol::folders::FolderSummary as WireFolderSummary;
 use fauna_protocol::folders::SyncConflict;
@@ -56,6 +57,8 @@ const RENAME_NEEDS_KEY_ERROR_KEY: &str = "devices.error_rename_needs_key";
 /// (`label_custody::is_synthetic_device_label`), which never names a row by
 /// the user's hand and so cannot seal.
 const RENAME_RESERVED_NAME_ERROR_KEY: &str = "devices.error_rename_reserved_name";
+/// [`DevicesMachine::rename_possibility`]'s reason for a blank draft.
+const RENAME_BLANK_KEY: &str = "devices.rename_blank";
 /// i18n key for `remove_device`'s fleet-scope leg failing (the nest deletion
 /// already succeeded — see [`DevicesMachine::remove_device`]).
 const REMOVE_FLEET_DEVICE_ERROR_KEY: &str = "devices.error_remove_fleet_device";
@@ -1368,6 +1371,22 @@ impl DevicesMachine {
             })
             .collect()
     }
+
+    /// The current name of the listed row `device_id` when it is one the user
+    /// may rename: `None` for an id the last roster read did not list, and for
+    /// the nest-authored WebDAV pseudo-device (`bridge_blob_handlers.rs`
+    /// registers it under [`fauna_core::label_custody::WEBDAV_PSEUDO_DEVICE_LABEL`],
+    /// unsealed), which `fauna.sync.devices.rename` refuses outright. A
+    /// user-chosen name can never be that label — the rename refuses every
+    /// synthetic label — so the opened name alone tells the row apart.
+    fn renameable_name(&self, device_id: &str) -> Option<String> {
+        let s = self.state.lock().unwrap();
+        if !s.devices.iter().any(|d| d.device_id == device_id) {
+            return None;
+        }
+        let name = s.device_names.get(device_id).cloned().unwrap_or_default();
+        (name != fauna_core::label_custody::WEBDAV_PSEUDO_DEVICE_LABEL).then_some(name)
+    }
 }
 
 #[cfg_attr(feature = "uniffi", fauna_uniffi_async::export)]
@@ -1984,24 +2003,33 @@ impl DevicesMachine {
     /// and so is the row's own current name ([`Self::device_name`]) — the
     /// editor confirmed unchanged, an unrenamed row's app default included.
     /// A different app default typed by hand is refused with its own reason.
+    ///
+    /// [`Self::save_device_name`] for a caller that needs no answer back.
     pub async fn rename_device(&self, device_id: String, label: String) {
+        self.save_device_name(device_id, label).await;
+    }
+
+    /// [`Self::rename_device`], answering whether the editor may close
+    /// (`docs/goal/ui/README.md` § Offer only what is possible, rule 4: a form
+    /// closes only once its save succeeded): `true` once the name is saved,
+    /// or when there was nothing to send (the unchanged name); `false` on
+    /// every refusal and failure, each of which is on `error-message`, so the
+    /// editor stays open with what was typed.
+    pub async fn save_device_name(&self, device_id: String, label: String) -> bool {
         let label = label.trim();
-        let current = {
-            let s = self.state.lock().unwrap();
-            s.devices
-                .iter()
-                .any(|d| d.device_id == device_id)
-                .then(|| s.device_names.get(&device_id).cloned().unwrap_or_default())
+        let Some(current) = self.renameable_name(&device_id) else {
+            return false;
         };
-        let Some(current) = current else {
-            return;
-        };
-        if label.is_empty() || label == current {
-            return;
+        if label == current {
+            return true;
+        }
+        if label.is_empty() {
+            self.set_error(LocalizedText::key(RENAME_BLANK_KEY));
+            return false;
         }
         if fauna_core::label_custody::is_synthetic_device_label(label) {
             self.set_error(LocalizedText::key(RENAME_RESERVED_NAME_ERROR_KEY));
-            return;
+            return false;
         }
         let owner = self.label_custody.lock().unwrap().owner_key();
         let sealed = owner.and_then(|owner| {
@@ -2018,13 +2046,50 @@ impl DevicesMachine {
         });
         let Some(sealed) = sealed else {
             self.set_error(LocalizedText::key(RENAME_NEEDS_KEY_ERROR_KEY));
-            return;
+            return false;
         };
         tracing::info!(target: "fauna_devices", %device_id, "rename_device");
         match self.nest_api.rename_device(&device_id, sealed).await {
-            Ok(()) => self.refresh().await,
-            Err(e) => self.set_error(error_text(RENAME_DEVICE_ERROR_KEY, e.detail())),
+            Ok(()) => {
+                self.refresh().await;
+                true
+            }
+            Err(e) => {
+                self.set_error(error_text(RENAME_DEVICE_ERROR_KEY, e.detail()));
+                false
+            }
         }
+    }
+
+    /// Whether the rename editor's save can go with `draft` now
+    /// (`docs/goal/ui/README.md` § Offer only what is possible, rule 4's
+    /// form case): the draft-validity answer every app paints
+    /// `device-rename-confirm-button` from, and the save asks again before
+    /// [`Self::rename_device`]. Absent for a device no longer listed, and for
+    /// the nest's WebDAV pseudo-device row, whose rename the nest always
+    /// refuses (so no app paints a rename on it at all); blocked
+    /// with the field's reason on a blank name, a name the apps give an
+    /// unnamed device, or a reader holding no owner key (nothing could be
+    /// sealed); possible otherwise — the unchanged name included, whose save
+    /// sends nothing and closes the editor.
+    pub fn rename_possibility(&self, device_id: &str, draft: &str) -> Possibility {
+        let label = draft.trim();
+        let Some(current) = self.renameable_name(device_id) else {
+            return Possibility::Absent;
+        };
+        if label == current {
+            return Possibility::Possible;
+        }
+        if label.is_empty() {
+            return Possibility::blocked(LocalizedText::key(RENAME_BLANK_KEY));
+        }
+        if fauna_core::label_custody::is_synthetic_device_label(label) {
+            return Possibility::blocked(LocalizedText::key(RENAME_RESERVED_NAME_ERROR_KEY));
+        }
+        if self.label_custody.lock().unwrap().owner_key().is_none() {
+            return Possibility::blocked(LocalizedText::key(RENAME_NEEDS_KEY_ERROR_KEY));
+        }
+        Possibility::Possible
     }
 
     /// The NAME of the listed row `device_id` — the opened name, without

@@ -5,6 +5,7 @@ import { sharedAccountPort } from './account-runtime';
 import { conversationsManagerIfReady } from './conversations';
 import type { MediaMachine } from '../../static/fauna_wasm_media.js';
 import type { LocalizedText } from '#lib/i18n/localized';
+import type { Possibility } from '#lib/possibility';
 
 // Re-export so route files consume the machine type via `#lib/wasm-media` rather
 // than a fragile relative path into `static/` (mirrors how pages reach the machine).
@@ -163,4 +164,11 @@ export function shareLinkExpiryLabel(value: string): LocalizedText | null {
  *  for an unknown state, painted raw. */
 export function shareLinkStateLabel(state: string): LocalizedText | null {
   return (wasm().shareLinkStateLabel(state) as LocalizedText | undefined) ?? null;
+}
+
+/** Whether `share-link-button` is offered on an item's detail surface
+ *  (`fauna_media_machine::share_link_possibility` over the item's
+ *  `share_link_eligible`): absent where the file is not eligible. */
+export function shareLinkPossibility(eligible: boolean): Possibility {
+  return wasm().shareLinkPossibility(eligible) as Possibility;
 }

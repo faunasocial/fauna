@@ -77,7 +77,12 @@
               Name="$(var.ShellDllName)" />
       </Component>
 
-      <!-- Fauna-Sparse.msix — the sparse ("external location") package that grants the
+      <!-- RETIRED (installers/windows.md § Direct download, 6): the sparse package's
+           sources are gone and every MSI is linked -d NoSparsePackage=1, so this
+           component never builds; it goes with the full-feature package's sources. What
+           follows is what it was.
+
+           Fauna-Sparse.msix — the sparse ("external location") package that grants the
            shell extension PACKAGE IDENTITY, the ONLY way its context-menu handler reaches
            the Windows 11 DEFAULT context menu (the HKCR verb below reaches only "Show more
            options"). A manifest-only MSIX (~KB): the shell DLL + app exe it references stay

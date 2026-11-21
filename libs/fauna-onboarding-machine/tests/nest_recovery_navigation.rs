@@ -76,8 +76,6 @@ async fn handle_entry_already_on_nest_under_recovery_intent_lands_on_nest_recove
             args: Default::default(),
         },
         continue_enabled: true,
-        control_checkbox_visible: false,
-        control_checkbox_checked: false,
         ..Default::default()
     });
 
@@ -213,8 +211,6 @@ async fn back_from_nest_recovery_identity_entry_returns_to_handle_entry() {
             args: Default::default(),
         },
         continue_enabled: true,
-        control_checkbox_visible: false,
-        control_checkbox_checked: false,
         ..Default::default()
     });
     m.submit_handle_check_continue().await;

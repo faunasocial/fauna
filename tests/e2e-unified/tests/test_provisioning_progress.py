@@ -221,9 +221,10 @@ def test_running_shows_cancel_and_substep(app):
     )
 
 
-def test_running_with_retry_attempt_shows_attempt_counter(app):
-    """When attempt > 1 and max_attempts > 1, substep gets the
-    "(attempt N of M)" suffix per `step_attempt_template`."""
+def test_running_with_retry_attempt_shows_no_attempt_counter(app):
+    """A step mid-retry (attempt > 1) shows its substep text and no attempt
+    count — `onboarding-provisioning.md` § 6 *A running step shows activity,
+    never an attempt count*."""
     steps = [
         _step('Domain', status='Succeeded'),
         _step('Server', status='Succeeded'),
@@ -240,10 +241,32 @@ def test_running_with_retry_attempt_shows_attempt_counter(app):
         f"got {sub!r}: "
         f"{app.driver.diagnose('provisioning-substep', scope='provisioning-step-row[2]')}"
     )
-    # Attempt counter appended.
-    assert '2' in sub and '3' in sub, (
-        "substep should carry the '(attempt 2 of 3)' counter when attempt>1; "
+    # No attempt counter: the row reads the substep text alone.
+    assert sub.strip() == S.onboarding.provision.substep.dns_adding_domain_records, (
+        "substep should read the substep text alone, with no attempt count; "
         f"got {sub!r}"
+    )
+
+
+def test_online_past_the_line_shows_still_starting(app):
+    """An Online step the machine has switched to `OnlineStillStarting` (three
+    minutes from the step's start) renders the long-wait text, with no attempt
+    count however many polls have run."""
+    steps = [
+        _step('Domain', status='Succeeded'),
+        _step('Server', status='Succeeded'),
+        _step('Dns', status='Succeeded'),
+        _step('Online', status='Running', substep='OnlineStillStarting',
+              attempt=37, max_attempts=480),
+    ]
+    set_provisioning_snapshot(app, _snapshot(
+        overall='Running', steps=steps, started_at_ms=20_000,
+    ))
+    sub = app.get_text('provisioning-substep', scope='provisioning-step-row[3]')
+    assert sub.strip() == S.onboarding.provision.substep.online_still_starting, (
+        "Online row past the line should read the still-starting text alone; "
+        f"got {sub!r}: "
+        f"{app.driver.diagnose('provisioning-substep', scope='provisioning-step-row[3]')}"
     )
 
 

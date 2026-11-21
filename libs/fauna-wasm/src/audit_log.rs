@@ -40,6 +40,18 @@ impl WasmAuditLog {
         self.read(None)
     }
 
+    /// Whether `admin-audit-more-button` can fetch older entries now:
+    /// `fauna_client_admin::audit_more_possibility` over the held view —
+    /// blocked, saying so, once the whole record is shown (the UniFFI
+    /// `FfiAuditLog::more_possibility` twin). The SPA paints the button from
+    /// it and asks again before [`Self::more`].
+    #[wasm_bindgen(js_name = morePossibility)]
+    pub fn more_possibility(&self) -> Result<JsValue, JsValue> {
+        to_js(&fauna_client_admin::audit_more_possibility(
+            &self.log.borrow().view(),
+        ))
+    }
+
     /// `admin-audit-more-button` — read the page older than the oldest entry
     /// held; with the whole record already shown, resolve to the held view.
     pub fn more(&self) -> Promise {

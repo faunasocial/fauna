@@ -76,6 +76,10 @@ pub(crate) struct TaskDelegationState {
     /// every visit re-runs the load op, which sets or clears this, and the
     /// paint only reads it while `sub == TaskDelegation`.
     pub(crate) load_error: Option<String>,
+    /// Bumped by every pin write's fold; the store-change re-read
+    /// (`settings::store_resync_op`) carries it, so a late one never repaints
+    /// the rows a newer pin re-composed (the late-fold rule's generation half).
+    pub(crate) gesture_gen: super::GestureGen,
 }
 
 /// The Task delegation sub-page's ordered element list.

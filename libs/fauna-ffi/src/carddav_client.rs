@@ -24,7 +24,11 @@
 //! (CalDAV + CardDAV read the SAME msek). `None` (localhost / IP nest with no mail
 //! enabled) **degrades gracefully** — reads return an empty list — so the
 //! Kotlin/Swift layer never touches key material and an un-provisioned nest never
-//! crashes the page. Unlike CalDAV there is **no lazy provisioning**: an address
+//! crashes the page. The book picker's load is [`FfiCarddavClient::read_addressbooks`],
+//! which keeps that wait (no key yet: the first-connect mint in flight) apart as
+//! *unresolved* — painted as loading, never an empty address book
+//! (`docs/goal/ui/contacts.md` § Errors & edge cases); `list_addressbooks` is
+//! the untyped read the apps not yet moved still call. Unlike CalDAV there is **no lazy provisioning**: an address
 //! book is minted by the write path (slice 4c) or a CardDAV MUA, never by this
 //! read seam, so an actor with no book yet renders an empty Address Book.
 
@@ -145,6 +149,24 @@ pub struct FfiLocatedCard {
     pub found: Option<FfiFoundCard>,
 }
 
+/// The address-book read's two answers, as they cross UniFFI
+/// ([`fauna_client_carddav::AddressbooksRead`]; `ui/contacts.md` § Errors &
+/// edge cases — the segment never waits on a credential), the books as the
+/// page's decrypted rows.
+#[derive(uniffi::Enum, Clone, Debug, PartialEq, Eq)]
+pub enum FfiAddressbooksRead {
+    /// Not finished, the custody read failed (the account store is not up
+    /// yet), or custody holds no key yet (the first-connect mint is in
+    /// flight): a wait the segment paints as loading — never an empty address
+    /// book — re-read when the store changes.
+    Unresolved,
+    /// The key is there and the listing came back, possibly with no books
+    /// (the address book has no lazy provisioning).
+    Loaded {
+        addressbooks: Vec<FfiAddressbookRow>,
+    },
+}
+
 // ── FfiCarddavClient ─────────────────────────────────────────────────────────────
 
 /// UniFFI handle for the encrypted-CardDAV Address Book surface. Construct via
@@ -191,6 +213,29 @@ impl FfiCarddavClient {
             .await
             .map_err(|e| e.to_string())?;
         Ok(books.iter().map(map_addressbook).collect())
+    }
+
+    /// The Address Book segment's book load in its answers
+    /// ([`fauna_client_carddav::CardDavClient::read_addressbooks`]): unlike
+    /// [`Self::list_addressbooks`], a wait (custody not readable yet, or no key
+    /// minted yet) is kept apart instead of reading as an empty list, so the
+    /// segment paints loading, never an empty address book. A list error is
+    /// the call's error.
+    pub async fn read_addressbooks(&self) -> Result<FfiAddressbooksRead, FfiError> {
+        let custody = crate::caldav_client::dav_custody(&self.nest).await;
+        let read = self
+            .client()
+            .read_addressbooks(&custody)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(match read {
+            fauna_client_carddav::AddressbooksRead::Unresolved => FfiAddressbooksRead::Unresolved,
+            fauna_client_carddav::AddressbooksRead::Loaded { addressbooks } => {
+                FfiAddressbooksRead::Loaded {
+                    addressbooks: addressbooks.iter().map(map_addressbook).collect(),
+                }
+            }
+        })
     }
 
     /// Query + decode every vCard in one address book (hex `addressbook_id`). Empty

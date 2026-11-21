@@ -93,6 +93,102 @@ fn assign_colors(calendars: &[CalendarRow], existing: &mut HashMap<String, Strin
 // Public API
 // ---------------------------------------------------------------------------
 
+/// The calendar list's empty state (`ui/events.md` § Errors & edge cases →
+/// *No calendar to hold an event*, ruling 3) — the list box's placeholder, so
+/// it shows only while no calendar row is listed. Painted from the page's
+/// [`super::calendar_view::CreateGate`] by [`EmptyState::paint`]: while the
+/// read is unresolved (a missing key included — the mint is in flight,
+/// ruling 5) the loading line, never the empty state; on *provision failed*
+/// the predicate's reason (`calendar-list-empty-state`), with no jump — the
+/// next read retries the provision. "No calendars yet." is said only of a
+/// loaded list that painted no row (every row failed to unseal), which the
+/// lazy `Personal` makes unreachable in a working account.
+#[derive(Clone)]
+pub struct EmptyState {
+    pub root: gtk::Box,
+    pub loading: gtk::Label,
+    pub reason: gtk::Label,
+    pub none: gtk::Label,
+}
+
+impl EmptyState {
+    fn new() -> Self {
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        root.set_margin_top(8);
+        root.set_margin_bottom(8);
+        root.set_margin_start(8);
+        root.set_margin_end(8);
+
+        let loading = gtk::Label::new(Some(events_strings::create_blocked::LOADING));
+        loading.add_css_class("dim-label");
+        loading.set_wrap(true);
+        root.append(&loading);
+
+        let reason = gtk::Label::new(None);
+        reason.set_wrap(true);
+        reason.set_xalign(0.0);
+        crate::testid::set_test_id(&reason, ids::CALENDAR_LIST_EMPTY_STATE);
+        reason.set_visible(false);
+        root.append(&reason);
+
+        let none = gtk::Label::new(Some(events_strings::NO_CALENDARS));
+        none.add_css_class("dim-label");
+        none.set_visible(false);
+        root.append(&none);
+
+        Self {
+            root,
+            loading,
+            reason,
+            none,
+        }
+    }
+
+    /// Paint the empty state from the page's gate. `listed` is whether any
+    /// calendar row is painted (the placeholder is then not shown anyway).
+    pub fn paint(&self, gate: &super::calendar_view::CreateGate, listed: bool) {
+        use fauna_client_caldav::CalendarsReadState;
+        let (loading, reason, none) = match (&gate.read, listed) {
+            (_, true) => (false, None, false),
+            (CalendarsReadState::Unresolved, false) => (true, None, false),
+            (CalendarsReadState::Loaded, false) => (false, None, true),
+            (CalendarsReadState::ProvisionFailed { .. }, false) => (
+                false,
+                crate::form_gate::reason_text(&gate.possibility()),
+                false,
+            ),
+        };
+        self.loading.set_visible(loading);
+        self.none.set_visible(none);
+        match &reason {
+            Some(text) => {
+                self.reason.set_text(text);
+                self.reason.set_visible(true);
+            }
+            None => self.reason.set_visible(false),
+        }
+    }
+}
+
+/// The sidebar's calendar-write doors (`ui/events.md` § Errors & edge cases →
+/// *The other calendar writes*): `new-calendar-btn` and
+/// `calendar-import-button`, painted from the shared
+/// `calendar_write_possibility` by
+/// [`super::calendar_view::paint_create_gate`]. `create-calendar` lives in the
+/// dialog `new-calendar-btn` opens, so it asks the predicate at its press.
+#[derive(Clone)]
+pub struct WriteDoors {
+    pub new_calendar_btn: gtk::Button,
+    pub import_btn: gtk::Button,
+}
+
+/// Ask the shared write predicate at the act (rule 1: each action asks it
+/// again before it sends): `None` when the write may go, else the reason in
+/// words — the press refuses with it on `error-message`.
+pub(crate) fn write_refusal(state: &CalendarViewState) -> Option<String> {
+    crate::form_gate::reason_text(&state.create_gate.write_possibility())
+}
+
 /// Build the calendar sidebar container and its inner `ListBox`.
 ///
 /// The container is a vertical `gtk::Box` with a "Calendars" label, the
@@ -102,7 +198,7 @@ pub fn build_calendar_sidebar(
     state: &Rc<RefCell<CalendarViewState>>,
     client: &Rc<FaunaClient>,
     on_visibility_changed: impl Fn() + Clone + 'static,
-) -> (gtk::Box, gtk::ListBox) {
+) -> (gtk::Box, gtk::ListBox, EmptyState, WriteDoors) {
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 6);
 
     // Section label.
@@ -116,11 +212,8 @@ pub fn build_calendar_sidebar(
     list_box.set_selection_mode(gtk::SelectionMode::None);
     list_box.add_css_class("boxed-list");
 
-    let placeholder = gtk::Label::new(Some(events_strings::NO_CALENDARS));
-    placeholder.add_css_class("dim-label");
-    placeholder.set_margin_top(8);
-    placeholder.set_margin_bottom(8);
-    list_box.set_placeholder(Some(&placeholder));
+    let empty_state = EmptyState::new();
+    list_box.set_placeholder(Some(&empty_state.root));
 
     let scrolled = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
@@ -136,8 +229,16 @@ pub fn build_calendar_sidebar(
     crate::testid::set_test_id(&new_btn, ids::NEW_CALENDAR_BTN);
     {
         let c = Rc::clone(client);
+        let st = Rc::clone(state);
         new_btn.connect_clicked(move |btn| {
-            let dialog = build_new_calendar_dialog(&c);
+            // The door asks the predicate again (rule 1): the paint keeps it
+            // insensitive while blocked; a press racing a repaint opens nothing
+            // and says why.
+            if let Some(reason) = write_refusal(&st.borrow()) {
+                c.report_localized_error(reason);
+                return;
+            }
+            let dialog = build_new_calendar_dialog(&c, &st);
             if let Some(root) = btn.root()
                 && let Some(win) = root.downcast_ref::<gtk::Window>()
             {
@@ -262,6 +363,12 @@ pub fn build_calendar_sidebar(
         let st = Rc::clone(state);
         let file_entry = file_entry.clone();
         import_btn.connect_clicked(move |_| {
+            // The predicate first (rule 1), then the no-file refusal, which
+            // stays at the press (rule 2).
+            if let Some(reason) = write_refusal(&st.borrow()) {
+                c.report_localized_error(reason);
+                return;
+            }
             // Import lands in the currently selected calendar — same rule as
             // export above (goal/ui/events.md § Import / Export).
             let cal_id = st.borrow().authoring_target();
@@ -296,7 +403,11 @@ pub fn build_calendar_sidebar(
     let _ = state;
     let _ = on_visibility_changed;
 
-    (outer, list_box)
+    let doors = WriteDoors {
+        new_calendar_btn: new_btn,
+        import_btn,
+    };
+    (outer, list_box, empty_state, doors)
 }
 
 /// Re-populate the calendar sidebar list from `calendars`.
@@ -383,11 +494,21 @@ pub fn mark_selected_calendar(list_box: &gtk::ListBox, selected: Option<&str>) {
         let Some(name_btn) = find_calendar_item_button(row.upcast_ref::<gtk::Widget>()) else {
             continue;
         };
-        if is_selected {
-            name_btn.add_css_class("cal-selected");
-        } else {
-            name_btn.remove_css_class("cal-selected");
-        }
+        paint_selected(&name_btn, is_selected);
+    }
+}
+
+/// Paint a `calendar-item` button's selection: the `cal-selected` style, and
+/// the `selected` test attr the automation frame publishes — the selection is
+/// a one-of-N choice, so a walk must see it change (`events.md` § State & data
+/// shape; the button is no `ListBoxRow`, so the registry cannot infer it).
+fn paint_selected(name_btn: &gtk::Button, selected: bool) {
+    if selected {
+        name_btn.add_css_class("cal-selected");
+        crate::testid::set_test_attr(name_btn, "selected", "true");
+    } else {
+        name_btn.remove_css_class("cal-selected");
+        crate::testid::clear_test_attr(name_btn, "selected");
     }
 }
 
@@ -458,9 +579,7 @@ fn build_sidebar_row(
         lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
     }
     crate::testid::set_test_id(&name_btn, ids::CALENDAR_ITEM);
-    if selected {
-        name_btn.add_css_class("cal-selected");
-    }
+    paint_selected(&name_btn, selected);
     {
         let id = cal_id.to_string();
         let on_select = on_select.clone();
@@ -540,12 +659,16 @@ fn unused_export_path(dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// Build a transient dialog for creating a new calendar.
-fn build_new_calendar_dialog(client: &Rc<FaunaClient>) -> adw::Window {
+fn build_new_calendar_dialog(
+    client: &Rc<FaunaClient>,
+    state: &Rc<RefCell<CalendarViewState>>,
+) -> adw::Window {
     let dialog = adw::Window::builder()
         .title(events_strings::NEW_CALENDAR)
         .default_width(340)
         .modal(true)
         .build();
+    crate::modal_escape::close_on_escape(&dialog);
 
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let header = adw::HeaderBar::new();
@@ -590,7 +713,14 @@ fn build_new_calendar_dialog(client: &Rc<FaunaClient>) -> adw::Window {
         let c = Rc::clone(client);
         let d = dialog.clone();
         let entry_ref = name_entry.clone();
+        let st = Rc::clone(state);
         create_btn.connect_clicked(move |_| {
+            // The submit asks the same predicate (rule 1); refused, the dialog
+            // stays open with the name typed.
+            if let Some(reason) = write_refusal(&st.borrow()) {
+                c.report_localized_error(reason);
+                return;
+            }
             let name = entry_ref.text().to_string();
             if !name.is_empty() {
                 c.create_calendar(&name, "private");

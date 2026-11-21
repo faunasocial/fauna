@@ -130,11 +130,29 @@ class MailExportContentTest {
     @Test
     fun confirmStepShowsStartButton() {
         var started = false
-        render(snap(ExportStep.CONFIRM), onStart = { started = true })
+        render(
+            snap(ExportStep.CONFIRM, mailboxes = listOf(MailboxOption(name = "INBOX", selected = true))),
+            onStart = { started = true },
+        )
         composeTestRule.onNodeWithTag("mail-export-confirm-summary").assertExists()
         composeTestRule.onNodeWithTag("wizard-back-button").assertExists()
         composeTestRule.onNodeWithTag("mail-export-start-button").performScrollTo().performClick()
         assert(started)
+    }
+
+    /** `MailExportSnapshot::start_possibility`: with no mailbox selected the
+     *  Start is painted blocked and a press never starts an export
+     *  (`mail-export.md` § Wizard steps, *Next and Start offer only an export
+     *  that can start*). */
+    @Test
+    fun confirmStepBlocksStartWithNoMailboxSelected() {
+        var started = false
+        render(
+            snap(ExportStep.CONFIRM, mailboxes = listOf(MailboxOption(name = "INBOX", selected = false))),
+            onStart = { started = true },
+        )
+        composeTestRule.onNodeWithTag("mail-export-start-button").performScrollTo().assertIsNotEnabled()
+        assert(!started)
     }
 
     @Test

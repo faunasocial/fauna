@@ -588,6 +588,12 @@ pub fn conflict_badge_label(
     if conflict_type == fauna_protocol::folders::CONFLICT_TYPE_CATCHUP_FAILED {
         return LocalizedText::key("devices.conflicts.type_catchup_failed");
     }
+    // A local file refused because the nest cannot store it: unresolved
+    // until the file uploads, changes or is deleted (`conflicts.md`
+    // § Refused uploads reach the review list).
+    if conflict_type == fauna_protocol::folders::CONFLICT_TYPE_TOO_LARGE_FOR_NEST {
+        return LocalizedText::key("devices.conflicts.type_too_large_for_nest");
+    }
     match resolution {
         Some("merged") => LocalizedText::key("devices.conflicts.resolved_merged"),
         // Any other resolution stamp, or a chooser-resolved row (no

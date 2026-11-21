@@ -3,6 +3,7 @@ package com.fauna.app.ui.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.fauna.app.core.ShellLog
+import com.fauna.app.core.atproto.AtprotoPossibilities
 import com.fauna.app.core.atproto.AtprotoSettingsHost
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.StateFlow
@@ -37,6 +38,12 @@ class AtprotoVM @Inject constructor(
     /** The whole renderable AT Protocol page, shared across every mount via [host]. */
     val snapshot: StateFlow<uniffi.fauna_atproto_settings_machine.AtprotoSettingsSnapshot>
         get() = host.snapshot
+
+    /** What the page may offer now: the machine's own `Possibility` answers
+     *  (`rung_possibility`, `authorize_possibility`), or the pending /
+     *  unavailable constants while no machine can answer. */
+    val possibilities: StateFlow<AtprotoPossibilities>
+        get() = host.possibilities
 
     fun refresh() {
         val m = host.machine() ?: return

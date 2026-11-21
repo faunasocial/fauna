@@ -559,9 +559,7 @@ impl Page {
         }
 
         match snap.phase {
-            RetirePhase::Credentials | RetirePhase::Listing => {
-                self.creds.repaint(&self.machine, &snap)
-            }
+            RetirePhase::Credentials | RetirePhase::Listing => self.creds.repaint(&self.machine),
             RetirePhase::List => self.list.repaint(self, &snap),
             RetirePhase::Confirm => self.confirm.repaint(&self.machine, &snap),
             RetirePhase::Running => self.running.repaint(&self.machine, &snap),
@@ -705,7 +703,7 @@ impl Credentials {
         }
     }
 
-    fn repaint(&self, m: &Arc<NestRetireMachine>, snap: &RetireSnapshot) {
+    fn repaint(&self, m: &Arc<NestRetireMachine>) {
         let selected = m.selected_provider();
         for (id, btn) in &self.provider_buttons {
             let on = selected.as_deref() == Some(id.as_str());
@@ -722,11 +720,10 @@ impl Credentials {
         }
         for (field_id, button) in self.hosted.borrow().iter() {
             button.set_label(&m.hosted_auth_button_text(field_id.clone()));
-            button.set_sensitive(m.hosted_auth_can_begin(field_id.clone()));
+            crate::possible::paint(button, None, m.hosted_auth_possibility(field_id.clone()));
         }
-        self.verify.set_visible(selected.is_some());
-        self.verify
-            .set_sensitive(m.can_verify() && snap.phase == RetirePhase::Credentials);
+        // The machine's answer alone decides, its phase check included.
+        crate::possible::paint(&self.verify, None, m.verify_possibility());
     }
 
     fn rebuild_section(&self, m: &Arc<NestRetireMachine>, selected: Option<&str>) {
@@ -1142,7 +1139,7 @@ struct StepRows {
 }
 
 struct StepRow {
-    glyph: Label,
+    glyph: super::nest_provisioning::StepCheckbox,
     label: Label,
     substep: Label,
     error: Label,
@@ -1159,9 +1156,8 @@ impl StepRows {
                 .accessible_role(gtk::AccessibleRole::Group)
                 .build();
             set_test_id(&row, ids::PROVISIONING_STEP_ROW);
-            let glyph = Label::new(None);
-            set_test_id(&glyph, ids::PROVISIONING_STEP_CHECKBOX);
-            row.append(&glyph);
+            let glyph = super::nest_provisioning::StepCheckbox::new();
+            row.append(glyph.widget());
             let label = Label::new(None);
             label.set_halign(gtk::Align::Start);
             set_test_id(&label, ids::PROVISIONING_STEP_LABEL);
@@ -1190,10 +1186,7 @@ impl StepRows {
 
     fn repaint(&self, m: &NestRetireMachine, snap: &RetireSnapshot) {
         for (row, step) in self.rows.iter().zip(snap.steps.iter()) {
-            row.glyph
-                .set_text(&fauna_provisioning::progress::status_glyph(
-                    step.state.progress_status(),
-                ));
+            row.glyph.paint(step.state.progress_status());
             row.label.set_text(&localized(&m.step_label(step.step)));
             match m.step_note(step.state.clone()) {
                 Some(note) => {

@@ -78,6 +78,21 @@ pub fn build(m: Arc<OnboardingMachine>, append: bool) -> (gtk::Box, Rc<dyn Fn()>
 
     content.append(&action_row);
 
+    // The submit is painted from the shared draft answer as the secret is
+    // pasted (`ui/README.md` § Offer only what is possible, rule 4's form
+    // case): blank or malformed → disabled, its reason on the tooltip.
+    let paint_import = {
+        let import_btn = import_btn.clone();
+        move |raw: &str| {
+            crate::possible::paint(&import_btn, None, import_answer(raw));
+        }
+    };
+    paint_import("");
+    {
+        let paint_import = paint_import.clone();
+        paste_entry.connect_changed(move |e| paint_import(&e.text()));
+    }
+
     // Error label (hidden by default, populated from `m.error_message()` in refresh).
     let error_label = gtk::Label::new(None);
     error_label.set_visible(false);
@@ -91,16 +106,18 @@ pub fn build(m: Arc<OnboardingMachine>, append: bool) -> (gtk::Box, Rc<dyn Fn()>
         let error_label = error_label.clone();
         import_btn.connect_clicked(move |_| {
             let raw = paste_entry.text().to_string();
+            // The press asks the answer it was painted from again (rule 6);
+            // a blocked draft's reason goes on `error-message`, nothing sent.
+            if crate::possible::refused_at_press(&import_answer(&raw), &error_label) {
+                return;
+            }
             // Route the pasted field through the shared union parser
             // (`fauna_core::identity_qr`) — the same grammar web/android/iOS/macOS
             // adopted (bare 64-hex secret · `fauna://identity?secret=&handle=`
             // query form · colon form) instead of hand-rolling it here
-            // (priority #2/#4). A parse failure surfaces the localized parse error
-            // WITHOUT touching the machine, so the user sees `invalid_secret`
-            // rather than the machine's `secret_key_invalid`. Mirrors the apple
-            // `OnboardingVM.importIdentity` flow.
+            // (priority #2/#4). The draft answer above already refused a paste
+            // the parser rejects, with its `invalid_secret` line.
             let Some(parsed) = fauna_core::identity_qr::parse_import_input(raw.trim()) else {
-                crate::settings::render_error_label(&error_label, Some(strings::INVALID_SECRET));
                 return;
             };
             // Pre-fill the handle step when the payload carried one (QR payload is
@@ -142,8 +159,15 @@ pub fn build(m: Arc<OnboardingMachine>, append: bool) -> (gtk::Box, Rc<dyn Fn()>
         if !paste_entry.text().is_empty() && m.error_message().is_none() {
             paste_entry.set_text("");
         }
+        paint_import(&paste_entry.text());
         let msg = m.error_message().filter(|msg| !msg.is_empty());
         crate::settings::render_error_label(&error_label, msg.as_deref());
     });
     (page, refresh)
+}
+
+/// `import-submit-button`'s answer: the shared draft predicate over the paste
+/// as the press reads it.
+fn import_answer(raw: &str) -> fauna_core::possibility::Possibility {
+    fauna_onboarding_machine::identity_import_possibility(raw.trim().to_string())
 }

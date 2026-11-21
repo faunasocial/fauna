@@ -24,6 +24,7 @@ struct MacEventListView: View {
                     .controlSize(.small)
                     .accessibilityIdentifier(Ids.eventsPrevMonth)
                     .automationActivate(Ids.eventsPrevMonth) { vm.previousPeriod() }
+                    .faunaPossible(vm.panPossibility)
 
                 automationText(Ids.calendarDateLabel, vm.currentDateLabel)
                     .font(.subheadline)
@@ -33,14 +34,19 @@ struct MacEventListView: View {
                     .controlSize(.small)
                     .accessibilityIdentifier(Ids.eventsNextMonth)
                     .automationActivate(Ids.eventsNextMonth) { vm.nextPeriod() }
+                    .faunaPossible(vm.panPossibility)
 
                 Spacer()
+                // Painted from the shared create predicate (ruling 3): disabled
+                // with the reason while no calendar can hold an event; an open
+                // compose can always be cancelled.
                 Button(vm.showNewEvent ? L.common.cancel : L.events.newEvent) {
-                    vm.showNewEvent.toggle()
+                    vm.toggleNewEvent()
                 }
                 .controlSize(.small)
                 .accessibilityIdentifier(Ids.newEventBtn)
-                .automationActivate(Ids.newEventBtn) { vm.showNewEvent.toggle() }
+                .automationActivate(Ids.newEventBtn) { vm.toggleNewEvent() }
+                .faunaPossible(vm.showNewEvent ? .possible : vm.createPossibility)
 
                 // Toggle order comes from the shared `calendarViewModes()`, not a
                 // local `allCases`, so the four apple modes cannot drift out of
@@ -52,7 +58,10 @@ struct MacEventListView: View {
                             .accessibilityIdentifier(mode.accessibilityId)
                             // The driver clicks the per-mode id (calendar-view-*),
                             // not the segmented control's own id, to switch views.
-                            .automationActivate(mode.accessibilityId) { vm.viewMode = mode }
+                            .automationActivate(
+                                mode.accessibilityId,
+                                attributes: { ["state": vm.viewMode == mode ? "on" : "off"] }
+                            ) { vm.viewMode = mode }
                     }
                 }
                 .pickerStyle(.segmented)
@@ -84,11 +93,8 @@ struct MacEventListView: View {
                     .padding(.horizontal)
             }
 
-            if vm.showNewEvent {
-                MacEventFormView(vm: vm)
-                    .padding(.horizontal)
-                Divider()
-            }
+            // The compose form is the trailing pane's (`EventSplitView`), so
+            // opening it no longer pushes the grid down.
 
             if vm.isLoading {
                 ProgressView()

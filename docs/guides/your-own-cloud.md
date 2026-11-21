@@ -1,6 +1,6 @@
 # Your own cloud — files, photos and backups on a server you control
 
-> **Status — this guide describes Fauna as it is taking shape.** Most of what you read here is built and tested today; some pieces are still being built or planned. Each companion guide ends with a **"Where this stands"** table that says plainly where each piece stands.
+> **Status — this guide describes Fauna as it is taking shape.** Most of what you read here is built and tested today. Each companion guide ends with a **"Where this stands"** table that says plainly where each piece stands.
 
 ---
 
@@ -89,9 +89,10 @@ allows; the real limit is the hardware you chose. Tiers matter when you host
 one person's photo library can't eat the whole disk. See
 [sharing & family](cloud-sharing-family.md).
 
-There is no per-file size ceiling worth worrying about: files are chunked, so
-even huge disk images sync fine; a single file is bounded only by the storage
-cap.
+In the Fauna apps there is no per-file size ceiling worth worrying about: files
+are chunked, so even huge disk images sync fine. A file saved through a network
+drive (WebDAV) is the exception: one up to 512 MiB saves, and a bigger one is
+refused.
 
 ## How it compares
 
@@ -117,4 +118,4 @@ to, without the subscription or the surveillance.
 
 ## Where this stands
 
-Fauna is in closed alpha. The per-feature status tables live at the end of each companion guide — [sync](cloud-sync.md#where-this-stands-today), [backup](cloud-backup.md#where-this-stands-today), [photos](cloud-photos.md#where-this-stands-today), [sharing & family](cloud-sharing-family.md#where-this-stands-today), [the file sync FAQ](file-sync-faq.md#where-this-stands-today). The short version: sync, photo backup, snapshots, backup copies on a nest you back up to — a friend's, say — or on one of your own devices, one-click restore from such a copy after losing your nest (from a nest's copy, once the lost nest is rebuilt with its own identity — **Recover a lost box** in the app does this, or gives a server you set up by hand the line to rebuild it), sharing — with other people, read-only or read-write, and by link — and the per-file version history browser are built and tested; the companion guides' tables name what is not available yet.
+Fauna is in closed alpha. The per-feature status tables live at the end of each companion guide — [sync](cloud-sync.md#where-this-stands-today), [backup](cloud-backup.md#where-this-stands-today), [photos](cloud-photos.md#where-this-stands-today), [sharing & family](cloud-sharing-family.md#where-this-stands-today), [the file sync FAQ](file-sync-faq.md#where-this-stands-today). The short version: sync, photo backup, snapshots, backup copies on a nest you back up to — a friend's, say — or on one of your own devices, one-click restore from such a copy after losing your nest (from a nest's copy, once the lost nest is rebuilt with its own identity — **Recover a lost box** in the app does this, or gives a server you set up by hand the line to rebuild it), sharing — with other people, read-only or read-write, and by link — and the per-file version history browser are built and tested; the companion guides' tables name what is not available.

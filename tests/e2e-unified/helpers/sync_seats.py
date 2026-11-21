@@ -698,6 +698,7 @@ def make_seat(
     sign_in,
     request,
     rescan_secs: int | None = None,
+    paging_rule: str | None = None,
 ):
     """One seat, driven by ``mode`` — the single construction point.
 
@@ -728,6 +729,13 @@ def make_seat(
     it). Since phase 5 of the folders re-model made the production cadence a
     constant, this seam is the ONLY way a run chooses it; ``None`` leaves the
     seat on the drivers' 60 s harness default.
+
+    ``paging_rule`` is the manifest paging rule this seat's engine cuts under —
+    the engine's compile-gated ``FAUNA_E2E_PAGING_RULE`` seam
+    (``inline,page_min,page_max,cut_bits``, read once at engine construction),
+    reached the same way. It lets a few-megabyte file take the paged-manifest
+    path (`file-sync.md` § Paged manifests); ``None`` leaves the seat on the
+    standard rule, which no test-sized file reaches.
     """
     if mode in ("tui", "native"):
         from conftest import _build_app_config
@@ -752,6 +760,8 @@ def make_seat(
             config.setdefault("environment", {})["FAUNA_E2E_RESCAN_MS"] = str(
                 int(rescan_secs) * 1000
             )
+        if paging_rule is not None:
+            config.setdefault("environment", {})["FAUNA_E2E_PAGING_RULE"] = paging_rule
         agent_data_dir = None
         if app_name == "windows":
             # Windows is the one platform whose agent is NOT isolated by the

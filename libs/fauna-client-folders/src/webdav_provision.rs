@@ -47,9 +47,11 @@ use crate::principal_grants::PrincipalFolderGrants;
 /// [`reconcile_webdav_keys_blob`] seals the `WebdavKeysBlob` under.
 ///
 /// This is the predicate the `folder-webdav-toggle` is gated on
-/// (`webdav-server.md` § Independent enablement point 2): an actor with no mail
-/// credential sees the toggle **disabled with a "set up mail first" hint**
-/// rather than clicking it and collecting a [`WebdavProvisionError::NoMsek`].
+/// (`webdav-server.md` § Independent enablement point 2): every account holds
+/// the MSEK once its connect-time mint lands, so an actor whose custody holds
+/// none yet sees the toggle **disabled "still loading"**
+/// ([`webdav_serve_possibility`]) rather than clicking it and collecting a
+/// [`WebdavProvisionError::NoMsek`].
 /// That is not merely cosmetic — [`FoldersAuthor::serve_set`] flips the nest
 /// flag *before* it reconciles, so a doomed enable would commit the flag and
 /// then fail, leaving the set served-but-blobless until the next reconcile
@@ -78,7 +80,105 @@ pub fn can_serve_webdav(mail: &MailConfig) -> bool {
 /// query spuriously on a page that has not wired the rail yet, and a failed
 /// capability read is indistinguishable from "cannot serve".
 pub async fn owner_can_serve_webdav(mail: &dyn MailStore) -> Result<bool, StoreError> {
+    // Test-only: while a test holds custody reads, every read parks HERE,
+    // before the custody is loaded, until the release. A no-op unless held.
+    CUSTODY_READ_HOLD.park_while_closed().await;
     Ok(can_serve_webdav(&mail.load().await?))
+}
+
+/// The process-wide hold on [`owner_can_serve_webdav`] reads — an
+/// account-store read, which no nest reply hold can park. Closed only through
+/// [`hold_custody_reads_for_test`]; open, the park returns at once. A gate, not
+/// a one-shot: a page re-reads the custody on a store-change notice, and that
+/// second read must not answer ahead of the release.
+static CUSTODY_READ_HOLD: fauna_core::test_hold::GateHold = fauna_core::test_hold::GateHold::new();
+
+/// Test-only: park every [`owner_can_serve_webdav`] read in this process until
+/// [`release_custody_reads_for_test`] — the one way an e2e journey reads
+/// `folder-webdav-toggle` while the custody read is out (`folders.md` § Errors
+/// & edge cases, *Own-tier and mail gates*: blocked "still loading"). An app's
+/// e2e agent reads [`custody_reads_held_for_test`] to START the op that reads
+/// it rather than await it while held.
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+pub fn hold_custody_reads_for_test() {
+    CUSTODY_READ_HOLD.close();
+}
+
+/// Test-only: release every read [`hold_custody_reads_for_test`] parked; later
+/// reads pass. A no-op when nothing is held.
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+pub fn release_custody_reads_for_test() {
+    CUSTODY_READ_HOLD.open();
+}
+
+/// Test-only: whether custody reads are held.
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+pub fn custody_reads_held_for_test() -> bool {
+    CUSTODY_READ_HOLD.is_closed()
+}
+
+/// `folder-webdav-toggle`'s answer (`docs/goal/ui/README.md` § Offer only what
+/// is possible; the ruling is `docs/goal/ui/folders.md` § Errors & edge cases,
+/// *Own-tier and mail gates*): blocked "still loading" while the custody read
+/// [`owner_can_serve_webdav`] answers is out (or no account store exists yet to
+/// read) AND when it answered that no MSEK is held — every account holds the
+/// key, so no key is the connect-time mint in flight, a wait
+/// (`docs/goal/behavior/mail-credentials.md` § Every account holds the key);
+/// blocked "failed to load" when the read failed; possible otherwise.
+pub fn webdav_serve_possibility(
+    read: fauna_core::possibility::ReadState,
+    holds_msek: bool,
+) -> fauna_core::possibility::Possibility {
+    use fauna_core::possibility::{Possibility, ReadState};
+    match read {
+        ReadState::Resolved if !holds_msek => Possibility::from_read(ReadState::Pending),
+        other => Possibility::from_read(other),
+    }
+}
+
+#[cfg(test)]
+mod webdav_serve_possibility_tests {
+    use super::*;
+    use fauna_core::possibility::ReadState;
+
+    fn key(read: ReadState, holds: bool) -> Option<String> {
+        webdav_serve_possibility(read, holds)
+            .reason()
+            .map(|r| r.key.clone())
+    }
+
+    #[test]
+    fn an_unanswered_custody_read_is_loading() {
+        assert_eq!(
+            key(ReadState::Pending, false).as_deref(),
+            Some("common.still_loading")
+        );
+    }
+
+    #[test]
+    fn a_failed_custody_read_says_so() {
+        assert_eq!(
+            key(ReadState::Failed, false).as_deref(),
+            Some("common.load_failed")
+        );
+        assert_eq!(
+            key(ReadState::Failed, true).as_deref(),
+            Some("common.load_failed")
+        );
+    }
+
+    #[test]
+    fn an_answered_read_without_the_key_is_the_mint_in_flight_still_loading() {
+        assert_eq!(
+            key(ReadState::Resolved, false).as_deref(),
+            Some("common.still_loading")
+        );
+    }
+
+    #[test]
+    fn an_answered_read_with_the_key_is_possible() {
+        assert!(webdav_serve_possibility(ReadState::Resolved, true).is_possible());
+    }
 }
 
 /// A failure from [`reconcile_webdav_keys_blob`], generic over the transport

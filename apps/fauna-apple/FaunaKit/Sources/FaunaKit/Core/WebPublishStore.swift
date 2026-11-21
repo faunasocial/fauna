@@ -65,9 +65,39 @@ public final class WebPublishStore {
     /// (`WebPublishStore.kt:73`).
     private var generation = 0
 
+    /// Where the page's hydrate read stands — pending until the first answer,
+    /// failed after a refused first read, resolved once one landed (a later
+    /// failed re-read keeps the earlier answer). The subdomain toggle waits on
+    /// it (`web-content-hosting.md` § Published-post management, the toggle
+    /// ruling).
+    public private(set) var read = PageRead()
+
     public init() {}
 
     public var isHydrated: Bool { view != nil }
+
+    /// `web-settings-subdomain-toggle`'s answer, from the shared
+    /// `fauna_client_web::subdomain_toggle_possibility`: not enabled before
+    /// the read resolves, ON absent with no serving domain and blocked with
+    /// the step on no or a reserved handle, OFF always possible.
+    public var subdomainToggleAnswer: Possibility {
+        webSubdomainTogglePossibility(read: read.state, view: view)
+    }
+
+    /// Both published-post copy buttons' answer, from the shared
+    /// `fauna_client_web::site_link_copy_possibility` over ``siteLink``:
+    /// blocked with the shared disabled reason when there is no origin.
+    public var copyLinkAnswer: Possibility {
+        webSiteLinkCopyPossibility(link: siteLink)
+    }
+
+    /// A copy press asks ``copyLinkAnswer`` again: a refusal says why on
+    /// `error-message` and nothing reaches the clipboard (rule 7). `true`
+    /// when refused.
+    @MainActor
+    func refuseCopy() -> Bool {
+        refusePress(copyLinkAnswer, errorMessage: &errorMessage)
+    }
 
     /// Where this actor's published content is reachable — precedence
     /// **active custom domain > enabled subdomain** — resolved fresh on every
@@ -98,6 +128,7 @@ public final class WebPublishStore {
         renderedPagesDown = false
         servingDomain = ""
         errorMessage = nil
+        read = PageRead()
         client = nil
         handle = ""
         generation &+= 1
@@ -188,6 +219,7 @@ public final class WebPublishStore {
         self.posts = posts
         self.renderedPagesDown = renderedPagesDown
         self.view = view
+        read.resolved()
         errorMessage = nil
         return true
     }
@@ -197,6 +229,7 @@ public final class WebPublishStore {
     @MainActor
     func landHydrateFailure(generation: Int, error: Error) {
         guard generation == self.generation else { return }
+        read.failed()
         errorMessage = DisplayError.message(error)
     }
 
@@ -246,6 +279,12 @@ public final class WebPublishStore {
     /// (non-optimistic — the toggle's own state is the round-trip proof).
     @MainActor
     public func setSubdomainEnabled(_ enabled: Bool) async {
+        // The press asks what the paint asked (`ui/README.md` § Offer only
+        // what is possible, rule 7): a refusal says why on `error-message`
+        // and nothing reaches the nest. The answer is about the flip from the
+        // current state, so asking it for the requested direction only.
+        if enabled != (view?.enabled ?? false),
+           refusePress(subdomainToggleAnswer, errorMessage: &errorMessage) { return }
         guard let client else { return }
         // Same generation guard as `hydrate` (see `generation`'s doc comment
         // above): `reset()` may run while this await is suspended, and a

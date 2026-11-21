@@ -34,7 +34,8 @@ Fauna is built so that nothing of yours rests with us:
   account of yours, no credentials, and no copies. We maintain three servers of
   our own, used to test new releases of the nest software and to let reviewers
   from the app stores try the apps; only one of them, fauna.build, has accounts
-  that people sign in to: reviewers and our own testers.
+  that people sign in to: reviewers and our own testers; the other two hold
+  only accounts that our automated tests use.
 - **No telemetry.** The app sends us no usage data, crash reports, or
   identifiers.
 - **Encrypted on your own nest.** Your content is stored encrypted on the
@@ -69,32 +70,38 @@ range only declared is checked and not kept); on a supervised account, the
 minutes of use a guardian's screen-time limit counts, with your device's
 time-zone offset and, when the guardian has switched it on, how many items their
 category rules filtered in each category, never what; from the web, Android,
-iPhone, Linux, Windows and terminal apps today, a registration so your nest can
-wake the app with a notification (an iPhone's is used only by a nest holding our
-key for Apple's service, which no nest you run holds); and, if you look after a
-child's account, which of their devices is yours. To your device's own services:
-on the web app the browser's notification service, and on an Android phone the
-notification app you chose, which carry those notifications encrypted; on an
-iPhone Apple's notification service, which carries them encrypted apart from a
-generic alert and the number of unread items; on an Android phone, or an iPhone
-on iOS 26 and later, the store's age signal — from an iPhone with an attestation
-of the app whenever the phone can make one, and from an Android phone with one
-once nests can check it — read on the device and sent only to your nest; and, on
-an iPhone, a copy of your identity — its key, with your handle and your nest's
-address — to Apple's iCloud Keychain if you turn that on, which is off by
-default. When the app rents a server, manages your domain or imports your old
+iPhone, iPad, Linux, Windows and terminal apps today, a registration so your nest
+can wake the app with a notification (an iPhone's or iPad's is used only by a
+nest holding our key for Apple's service, which no nest you run holds); and, if
+you look after a child's account, which of their devices is yours. To your
+device's own services: on the web app the browser's notification service, and on
+an Android phone the notification app you chose, which carry those notifications
+encrypted; on an iPhone or iPad Apple's notification service, which carries them
+encrypted apart from a generic alert and the number of unread items; on an
+Android phone, or an iPhone or iPad on iOS or iPadOS 26 and later, the store's
+age signal — from an iPhone or iPad with an attestation of the app whenever the
+device can make one, and from an Android phone with one once nests can check it
+— read on the device and sent only to your nest; and, on an iPhone or iPad, a
+copy of your identity — its key, with your handle and your nest's address — to
+Apple's iCloud Keychain if you turn that on, which is off by default. When the
+app rents a server, manages your domain or imports your old
 mailbox for you, to the provider you chose, with the credential you gave it (on
 the web app, where a provider refuses calls from a browser, such a call will
 pass through a relay of ours, which parses and keeps nothing it forwards); and
 when you link a Bluesky account, your browser signs in at the server that holds
 that account. And, from the desktop and terminal apps, to the site that
 publishes our releases — only to learn whether a newer version is out, when you
-ask. And, directly, from the Linux, Windows, Mac and terminal apps, and from the
+ask. And, from the Linux, Windows, Mac and terminal apps, and from the
 Android app while it is open, to your own other devices and to the devices of
-people you share a folder with; from the iPhone app, while it is open, to your
-own other devices and to no one else's; and, when you pair in person on the
-Android app, to the device in front of you only what the pairing itself
-exchanges, never a file. And, when you enter a handle or retire a nest — and, on the web app, when
+people you share a folder with; from the iPhone and iPad app, while it is open,
+to your own other devices and to no one else's — directly from one device to the
+other
+or, while the two have no direct path, and only where your nest runs a relay
+and both devices belong to accounts on your nest, through that relay, which
+passes their traffic on encrypted from one device to the other, cannot read it
+and keeps none of it; and, when you pair in person on the Android app, directly
+to the device in front of you only what the pairing itself exchanges, never a
+file. And, when you enter a handle or retire a nest — and, on the web app, when
 it reconnects to your nest — to a public DNS service (Cloudflare's), only to
 look up that domain's records. And, when you load the pictures a message or mail
 links to from elsewhere, or open an article from someone you follow or a nest's
@@ -120,9 +127,8 @@ runs on a company's servers. Nothing stays with us.
 
 **Your nest.** The nest is the server program that you, or the admin of the
 nest you joined, run — on a rented machine, on a computer at home, or as the
-optional nest service in the Windows installer (and in the Mac installer, once
-it is published). It talks only to the kinds of place named below, and it never
-reports to us.
+optional nest service in the Windows installer. It talks only to the kinds of
+place named below, and it never reports to us.
 
 To other Fauna nests, only for what its users and its admin do there and for
 the upkeep between nests — among them these, over a connection it signs with

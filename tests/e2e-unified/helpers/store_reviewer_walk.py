@@ -55,6 +55,16 @@ also hides); two reviewers share no edge and no content. Every leg signs in on
 a reset app instance and ends signed out (``helpers.org_account_session``), so
 the accounts' 3-device free tier is left as found. Never a factory reset of the
 nest, and none must be added.
+
+The main use cases a reviewer's session is made of (`reviewer: true` in
+`use-cases.yaml`; main-use-cases.md § The journeys, point 4), by step group:
+group 2 reads the feed and group 4 publishes a post — `read-feed-and-post`,
+asserted walked after group 4; group 3 replies in an existing conversation,
+which is not `message-someone`'s path (that one starts a new conversation);
+groups 5–6 report and block, but reach the profile by a state write and never
+tick the report sheet's block, so `report-and-block` is not walked here; group 8 only reads the
+Sessions page, so `sign-out-other-devices` is not walked either. Each group
+names its use case where it begins.
 """
 
 from __future__ import annotations
@@ -63,6 +73,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from helpers.org_account_session import poll, sign_in_fresh, sign_out
+from helpers.use_case_walk import assert_use_case_walked
 from helpers.staging_box import (
     REVIEWER_ACCOUNTS,
     SEED_MESSAGE,
@@ -181,6 +192,7 @@ def _walk_as_reviewer(app, reviewer, other, run: _Run, nest: Nest) -> None:
     note = f"store reviewer journey {run.token}"
 
     # ── 2. The first run is not empty ────────────────────────────────────
+    # Use case: read-feed-and-post, its reading half (asserted after group 4).
     _enter_feed(app)
     for text in (*SEED_POSTS, run.tester_post):
         assert app.feed.wait_for_post_text(text, timeout_s=FEED_BUDGET_S), (
@@ -194,6 +206,8 @@ def _walk_as_reviewer(app, reviewer, other, run: _Run, nest: Nest) -> None:
     _assert_knock_notification(app, reviewer)
 
     # ── 3. Messaging: read the tester's conversation, reply ──────────────
+    # Use case: message-someone's neighbour — a reply in an existing thread, not
+    # its new-conversation path, so nothing is asserted.
     thread = _thread_with(app, lambda t: run.tester_message in t.snippet,
                           f"{reviewer} seeing {SEEDING_ACCOUNT}'s conversation")
     app.conversations.open_thread_by_id(thread.thread_id)
@@ -203,6 +217,8 @@ def _walk_as_reviewer(app, reviewer, other, run: _Run, nest: Nest) -> None:
     run.created["own_reply"] = True
 
     # ── 5a. Report the tester's message from its ⋯ menu ──────────────────
+    # Use case: report-and-block (groups 5a–6), not walked here — see the module
+    # docstring.
     app.conversations.open_message_actions(
         message_index=_bubble_index(app, run.tester_message, "the message to report"))
     _assert_menu_item(app, "dm-message-report-button",
@@ -216,6 +232,8 @@ def _walk_as_reviewer(app, reviewer, other, run: _Run, nest: Nest) -> None:
     _enter_feed(app)
     app.feed.create_post(run.own_post, timeout=SEND_BUDGET_S)
     run.created["own_post"] = True
+    # Use case: read-feed-and-post — its two steps, walked by this group.
+    assert_use_case_walked(app.driver, "read-feed-and-post")
 
     # ── 5b. Report the tester's post from its ⋯ menu ─────────────────────
     _enter_feed(app)
@@ -268,6 +286,7 @@ def _walk_as_reviewer(app, reviewer, other, run: _Run, nest: Nest) -> None:
          SEND_BUDGET_S, interval=2.0)
 
     # ── 8. Settings: terms, version, the nest's name, Sessions, deletion, mail ─
+    # Use case: sign-out-other-devices' page, read only (never pressed): not walked.
     app.settings.navigate_to_about()
     assert app.driver.is_visible_scrolled("settings-terms-link"), (
         f"the terms link in Settings: {app.driver.diagnose('settings-terms-link')}"

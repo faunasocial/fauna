@@ -18,7 +18,8 @@ that the admin of the nest you joined runs. {legalName} holds no account of
 yours and no copy of your data, so the deletion happens on that nest. The one
 exception is fauna.build, the server we keep so that app-store reviewers and our
 own testers can try the apps. The accounts on it are ones we created, and we
-delete them ourselves.
+delete them ourselves. We maintain two other servers, used to test releases
+of the nest software; they hold only accounts that our automated tests use.
 
 ## Deleting it in the app
 
@@ -32,8 +33,8 @@ delete them ourselves.
    **Pending actions** on the same page.
 
 After the 14 days your nest deletes your account: your handle, your posts, your
-messages and mail, your files and folders, your contacts, your calendar and your
-settings. Where your posts went out to other networks, your nest asks those
+messages and mail, your own files and folders, your contacts, your calendar and
+your settings. Where your posts went out to other networks, your nest asks those
 networks to delete them too. Each network decides whether to honour that.
 
 A few records stay on the nest. The software sets no end date for them; they
@@ -42,7 +43,12 @@ last as long as the nest's own records do:
 - the nest's log of account and admin actions;
 - records of moderation and of removals made under a legal obligation;
 - records of paid subscriptions;
-- the record of any change of your key.
+- the record of any change of your key;
+- a group you owned and had not handed over: it stays with its members and
+  what they hold, and its record still names you as its owner;
+- in a folder someone shared with you as a writer, what you added or changed
+  there and the mark that you were a writer there: they stay in that folder,
+  with its owner and its members, for as long as they keep them.
 
 What you sent to other people (messages, mail, posts they already received)
 stays with them, as a letter does once it is delivered. Deleting the account

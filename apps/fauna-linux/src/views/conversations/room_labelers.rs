@@ -8,7 +8,10 @@
 //! whether a row may act (`labeler_toggle_live`: a full set greys only the rows
 //! it does not name) are `fauna_conversations`'; the catalog and its inspect view
 //! are the Community labelers page's own `LabelerCatalogMachine`. This paints
-//! them and adds the one capability term (`can_set_policy`).
+//! them from the one role answer, the shared `SetPolicy` possibility: a viewer
+//! it is absent for reads each row as a line, with no toggle
+//! (`ui/conversations.md` § Errors & edge cases → *Controls this person can
+//! never use*).
 //!
 //! The inspect view opens **in place**, inside the editor, so the staged draft
 //! survives; its own Close returns to the rows. The section is absent where the
@@ -21,6 +24,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use fauna_conversations::{RoomSettingsDraft, room_may_name_labeler_kind};
+use fauna_core::possibility::Possibility;
 use fauna_labeler_catalog_machine::{LabelerCatalogEntry, LabelerCatalogMachine};
 
 use crate::async_helper::spawn_with_snapshot;
@@ -39,7 +43,7 @@ pub struct LabelerSection {
     inspect: InspectPanel,
     draft: Rc<RefCell<RoomSettingsDraft>>,
     seams: LabelerSeams,
-    can_set_policy: bool,
+    set_policy: Possibility,
     entries: RefCell<Vec<LabelerCatalogEntry>>,
 }
 
@@ -49,7 +53,7 @@ impl LabelerSection {
     pub fn new(
         draft: &Rc<RefCell<RoomSettingsDraft>>,
         seams: LabelerSeams,
-        can_set_policy: bool,
+        set_policy: Possibility,
     ) -> Rc<Self> {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 4);
         let rows = gtk::Box::new(gtk::Orientation::Vertical, 4);
@@ -62,7 +66,7 @@ impl LabelerSection {
             inspect,
             draft: Rc::clone(draft),
             seams,
-            can_set_policy,
+            set_policy,
             entries: RefCell::new(entries),
         });
 
@@ -147,27 +151,48 @@ impl LabelerSection {
             let short_id: String = id.chars().take(16).collect();
 
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            let text = format!("{} · {short_id}… · {mark}", entry.artifact_kind);
 
-            let toggle = gtk::ToggleButton::with_label(&format!(
-                "{} · {short_id}… · {mark}",
-                entry.artifact_kind
-            ));
-            toggle.set_hexpand(true);
-            toggle.set_active(staged);
-            toggle.set_sensitive(self.can_set_policy && live);
-            crate::testid::set_test_id(&toggle, ids::ROOM_LABELER_TOGGLE);
-            crate::testid::set_test_attr(&toggle, "checked", if staged { "true" } else { "false" });
-            {
-                let weak = Rc::downgrade(self);
-                let id = id.clone();
-                toggle.connect_clicked(move |_| {
-                    if let Some(section) = weak.upgrade() {
-                        section.draft.borrow_mut().toggle_labeler(&id);
-                        section.paint_rows();
-                    }
-                });
+            if self.set_policy.is_shown() {
+                let toggle = gtk::ToggleButton::with_label(&text);
+                toggle.set_hexpand(true);
+                toggle.set_active(staged);
+                crate::possible::paint(&toggle, None, self.set_policy.clone());
+                if !live {
+                    toggle.set_sensitive(false);
+                }
+                crate::testid::set_test_id(&toggle, ids::ROOM_LABELER_TOGGLE);
+                crate::testid::set_test_attr(
+                    &toggle,
+                    "checked",
+                    if staged { "true" } else { "false" },
+                );
+                {
+                    let weak = Rc::downgrade(self);
+                    let id = id.clone();
+                    toggle.connect_clicked(move |_| {
+                        if let Some(section) = weak.upgrade()
+                            && section.set_policy.is_possible()
+                        {
+                            section.draft.borrow_mut().toggle_labeler(&id);
+                            section.paint_rows();
+                        }
+                    });
+                }
+                row.append(&toggle);
+            } else {
+                // A viewer who can never stage the set reads the row as a line.
+                let line = gtk::Label::new(Some(&text));
+                line.set_hexpand(true);
+                line.set_halign(gtk::Align::Start);
+                crate::testid::set_test_id(&line, ids::ROOM_LABELER_LINE);
+                crate::testid::set_test_attr(
+                    &line,
+                    "checked",
+                    if staged { "true" } else { "false" },
+                );
+                row.append(&line);
             }
-            row.append(&toggle);
 
             // Inspecting is a read any member may make.
             let inspect = gtk::Button::with_label(crate::i18n::strings::labeler_catalog::INSPECT);

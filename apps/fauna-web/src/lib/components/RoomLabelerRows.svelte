@@ -25,13 +25,16 @@
   let {
     manager,
     draft,
-    canSetPolicy,
+    setPolicy,
     ontoggle,
   }: {
     manager: WasmConversationsManager;
     /** The editor's staged draft (opaque; shared Rust owns it). */
     draft: unknown;
-    canSetPolicy: boolean;
+    /** The paint of the shared `set_policy` answer
+     *  (`ThreadCapabilities::possibility`): a viewer it is absent for reads
+     *  each row as a line, with no toggle. */
+    setPolicy: { shown: boolean; disabled: boolean };
     /** Stage the toggle for this labeler id — the page owns the draft. */
     ontoggle: (labelerId: string) => void;
   } = $props();
@@ -93,11 +96,12 @@
       {@const staged = manager.roomSettingsLabelerStaged(draft, entry.labeler_id)}
       <div class="room-row">
         <span>{entry.publisher_actor} · {entry.factor}</span>
+        {#if setPolicy.shown}
         <button
           data-testid={IDS.ROOM_LABELER_TOGGLE}
           class="action-btn"
           data-checked={staged ? 'true' : 'false'}
-          disabled={!canSetPolicy ||
+          disabled={setPolicy.disabled ||
             !manager.roomSettingsLabelerToggleLive(draft, entry.labeler_id)}
           onclick={() => ontoggle(entry.labeler_id)}
         >
@@ -108,6 +112,15 @@
             ? t.conversations.unified.room_labeler_on
             : t.conversations.unified.room_labeler_off}
         </button>
+        {:else}
+          <!-- A viewer who may never stage the set reads the row as a line. -->
+          <span data-testid={IDS.ROOM_LABELER_LINE} data-checked={staged ? 'true' : 'false'}>
+            {entry.labeler_id.slice(0, 16)} ·
+            {staged
+              ? t.conversations.unified.room_labeler_on
+              : t.conversations.unified.room_labeler_off}
+          </span>
+        {/if}
         <button
           data-testid={IDS.ROOM_LABELER_INSPECT_BUTTON}
           class="action-btn"

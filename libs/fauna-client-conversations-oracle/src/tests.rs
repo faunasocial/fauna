@@ -138,6 +138,8 @@ fn custodian(
 ) {
     let manager = ConversationsManager::new();
     manager.register_backend(Arc::new(MockRailBackend::new(Rail::FaunaMls)));
+    // The page has read its rooms, as a receive loop's first sweep marks it.
+    manager.mark_rooms_loaded(manager.identity_epoch());
     (
         ConversationsCustodian::new(account, manager.clone()),
         manager,
@@ -226,6 +228,29 @@ async fn the_ceiling_binds_per_principal_and_a_refused_operation_is_not_recorded
         c.perform_op(&principal(holder), OracleOp::ListRooms)
             .await
             .is_ok()
+    );
+}
+
+/// Before the page has read its rooms a listing is refused, never answered
+/// empty (`apps/cli.md` § A tool that cannot run, rule 4); once read, an
+/// empty list is an empty list.
+#[tokio::test]
+async fn a_listing_before_the_rooms_load_is_refused_and_an_empty_loaded_list_answers_empty() {
+    let (_, holder) = fauna_mls::wrapped_blob::generate_x25519_keypair();
+    let manager = ConversationsManager::new();
+    manager.register_backend(Arc::new(MockRailBackend::new(Rail::FaunaMls)));
+    let c = ConversationsCustodian::new(
+        FakeAccount::with(holder, &[IdentityOpClass::ConversationRead]),
+        manager.clone(),
+    );
+    assert_eq!(
+        c.perform_op(&principal(holder), OracleOp::ListRooms).await,
+        Err(OracleRefusal::NotLoaded)
+    );
+    manager.mark_rooms_loaded(manager.identity_epoch());
+    assert_eq!(
+        c.perform_op(&principal(holder), OracleOp::ListRooms).await,
+        Ok(OracleReply::Rooms(vec![]))
     );
 }
 

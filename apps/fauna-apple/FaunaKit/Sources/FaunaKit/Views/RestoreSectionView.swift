@@ -170,18 +170,19 @@ private struct LocalRestoreAction: View {
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier(Ids.restoreConfirmInput)
                 .automationField(Ids.restoreConfirmInput, text: $vm.confirmText)
+                .faunaPossible(vm.inputsPossibility)
 
             Button(L.backups.restoreConfirmButton) { Task { await vm.restore() } }
-                .disabled(!vm.confirmEnabled)
                 .accessibilityIdentifier(Ids.restoreConfirmButton)
-                .automationActivate(Ids.restoreConfirmButton,
-                                    isEnabled: { vm.confirmEnabled }) {
+                .automationActivate(Ids.restoreConfirmButton) {
                     Task { await vm.restore() }
                 }
+                .faunaPossible(vm.confirmPossibility)
                 // Typing the confirm phrase is local; the restore itself is
                 // `fauna.filesync.snapshot.restore_message_kind`, so only the
                 // commit gates.
                 .faunaGate("fauna.filesync.snapshot.restore_message_kind")
+            FaunaPossibilityReason(vm.confirmPossibility)
 
             automationText(Ids.restoreProgress, vm.progress.text)
                 .font(.caption)
@@ -254,7 +255,8 @@ private struct LocalRestoreAction: View {
     /// `restore-kinds-checkboxes` container + the five `restore-kind-checkbox`es
     /// (`RestoreKind.all`, the shared `KIND_ENTRIES` order), all checked by
     /// default; a picked snapshot of an unticked kind does not arm
-    /// `restore-confirm-button` (`RestoreVM.confirmEnabled`). Custom checkbox
+    /// `restore-confirm-button` (`RestoreVM.confirmPossibility`); the boxes
+    /// themselves wait for a snapshot (`RestoreVM.inputsPossibility`). Custom checkbox
     /// buttons (uniform on both platforms); the automation text reads the label,
     /// the value "on"/"off". Stacked, so five fit an iPhone width; one eager
     /// `ForEach` so each box registers exactly once, in order.
@@ -266,6 +268,9 @@ private struct LocalRestoreAction: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(Ids.restoreKindsCheckboxes)
+        // Inner `restore-kind-checkbox` registrations read the container's
+        // disable through `\.isEnabled`.
+        .faunaPossible(vm.inputsPossibility)
         .automationValue(Ids.restoreKindsCheckboxes, text: { "" })
     }
 

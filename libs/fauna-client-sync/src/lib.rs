@@ -1965,6 +1965,7 @@ mod tests {
                 "fauna.sync.changes.record" => {
                     fauna_protocol::encode_canonical(&SyncChangeRecordReply {
                         seq: 42,
+                        prev_set_seq: None,
                         extra: Default::default(),
                     })
                 }
@@ -2152,6 +2153,7 @@ mod tests {
             "fauna.sync.changes.record" => {
                 fauna_protocol::encode_canonical(&SyncChangeRecordReply {
                     seq: 1,
+                    prev_set_seq: None,
                     extra: Default::default(),
                 })
             }

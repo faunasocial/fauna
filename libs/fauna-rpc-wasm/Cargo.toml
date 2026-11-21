@@ -17,9 +17,13 @@ crate-type = ["rlib"]
 # `fauna_e2e_agent::RECONNECT_BACKOFF` and the connection-report counter behind
 # `fauna_e2e_agent::CONNECTION_REPORTS_KEY`. Off by default and never named by a
 # consumer's dep line — `fauna-wasm`'s own `test-helpers` forwards it, so a
-# production bundle compiles both out.
+# production bundle compiles both out. It also forwards
+# `fauna-protocol/e2e-agent`: the shared dispatcher this transport drives
+# honours the nest's held-read announce only under it
+# (`e2e-latency-independent-assertions.md` § The convention, *The held-read
+# announce*), and wasm-pack builds release, so `debug_assertions` never opens it.
 [features]
-test-helpers = ["dep:fauna-e2e-contract"]
+test-helpers = ["dep:fauna-e2e-contract", "fauna-protocol/e2e-agent"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # default-features = false drops native-only `p2p` (wireguard); `js` forwards

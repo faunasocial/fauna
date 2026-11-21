@@ -454,6 +454,25 @@ pub struct LocalDomainsSnapshot {
 }
 
 impl LocalDomainsSnapshot {
+    /// The snapshot one domains read answers, with no rename in flight and no
+    /// dialog armed — for a reader that asks a [`crate::domain_forms`]
+    /// predicate off a single read rather than driving the machine (the cli's
+    /// domain tools, `apps/cli.md` § A tool that cannot run, rule 5). The same
+    /// derivation [`LocalDomainMachine`]'s refresh applies.
+    pub fn from_rows(active: Vec<MailDomainRow>, soft_deleted: Vec<MailDomainRow>) -> Self {
+        let active: Vec<LocalDomainView> = active.into_iter().map(LocalDomainView::from).collect();
+        Self {
+            adding_first_domain: active.is_empty(),
+            rename_available: rename_available(&active),
+            soft_deleted: soft_deleted
+                .into_iter()
+                .map(LocalDomainView::from)
+                .collect(),
+            active,
+            ..Self::empty()
+        }
+    }
+
     fn empty() -> Self {
         Self {
             active: Vec::new(),

@@ -131,7 +131,8 @@ def test_tui_names_no_count_while_the_registry_read_is_held(admin_app, nest_inst
         f"visit to the page in this module; state={_answer()!r}"
     )
 
-    arm_rpc_hold(port, _LIST_KIND)
+    # The read the client gives up on at its own deadline is this test's subject.
+    arm_rpc_hold(port, _LIST_KIND, client_deadline=True)
     open_error: list[BaseException] = []
     try:
         def _open():

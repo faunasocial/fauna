@@ -16,6 +16,8 @@
 //!   manager's error verbatim as an MCP tool error.
 //! - [`mcp`] — the JSON-RPC 2.0 method layer (initialize, tools/list,
 //!   tools/call, ping), a minimal in-tree layer (§ Test surface).
+//! - [`reach`] — what a shell lists: the tools its held connections'
+//!   granted scopes reach (§ A tool that cannot run, rule 2).
 //! - [`argv`] — the `argv` shell: the command tree derived from the catalog,
 //!   its help, the terminal rendering, the exit codes and the
 //!   destructive-tool confirmation.
@@ -27,6 +29,7 @@
 pub mod argv;
 pub mod catalog;
 pub mod mcp;
+pub mod reach;
 pub mod tools;
 
 #[cfg(feature = "device")]
@@ -40,4 +43,5 @@ pub mod stdio;
 
 pub use catalog::{Annotations, CATALOG, Tool, ToolId, consent_scope};
 pub use mcp::Server;
+pub use reach::Reach;
 pub use tools::{Host, SessionUnavailable, ToolError};

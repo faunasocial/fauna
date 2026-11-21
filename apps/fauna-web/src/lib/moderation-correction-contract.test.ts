@@ -54,3 +54,26 @@ Deno.test("no per-app copy of the sealed-write early return survives", () => {
     }
   }
 });
+
+Deno.test("a local-row correction trains FIRST and keeps the flag when the train fails", () => {
+  // `moderation.md` § Errors & edge cases (tui twin `Op::Correct`): the
+  // client-side train is awaited before the flag is dropped, so a rejected
+  // dispatch propagates to the caller's `error-message` with the flag still
+  // in the store. Removing first (as web once did) lost the correction.
+  const body = correctionBody();
+  const local = body.slice(body.indexOf("source === 'Local'"));
+  const train = local.indexOf("await trainSpamModelClientSide(");
+  const remove = local.indexOf("moderationRemoveLocalDetection(contentId)");
+  if (train < 0 || remove < 0) {
+    throw new Error("the local branch no longer trains and removes — re-point this contract");
+  }
+  if (train > remove) {
+    throw new Error(
+      "trainModerationCorrection drops the local flag before the train — a " +
+        "failed train would lose the correction instead of keeping the flag.",
+    );
+  }
+  if (/try\s*\{/.test(local.slice(0, remove))) {
+    throw new Error("the local train's failure is caught inside the flow — it must reach error-message");
+  }
+});

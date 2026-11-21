@@ -56,13 +56,13 @@ A friend from your archive who is one of your contacts on Fauna, and has importe
 Once you have both said yes, your comments and reactions on each other's posts come back on Fauna where Fauna can match them to the post they were on (a comment's words, not its photos), each at its original date and signed by the person who wrote it:
 
 - only on a post its writer can see on Fauna;
-- today only on Facebook posts that shared a link, and no Instagram ones yet;
+- today only on Facebook posts that shared a link, and no Instagram ones;
 - a comment on a Friends-only post only when you each follow the other, and then it can be seen by the people who follow its writer.
 
 Where your friend's comment already showed beneath your post for you alone, their own signed one takes its place. The contact's row then says you are linked ("Linked: Facebook", for a Facebook link), and adds how many could not be matched to a post when there are any.
 
 **Unlink** on the same row stops anything more coming back. What already came back stays: it is its writer's own post, deleted like any other.
 
-## Not yet
+## Comments Fauna cannot place
 
-A comment under one of your posts that Fauna cannot match to it is kept in the archive but shown nowhere, and the Done step says how many there were ("3 comments could not be placed under a post"). Today Fauna can match only comments on Facebook posts that shared a link, and no Instagram comments yet.
+A comment under one of your posts that Fauna cannot match to it is kept in the archive but shown nowhere, and the Done step says how many there were ("3 comments could not be placed under a post"). Today Fauna can match only comments on Facebook posts that shared a link, and no Instagram comments.

@@ -41,10 +41,11 @@ public struct MutedWordsView: View {
                         .automationField(Ids.mutedWordInput, text: $newWord)
                         .onSubmit { submitAdd() }
                     Button(L.mutedWords.add) { submitAdd() }
-                        .disabled(vm.busy)
                         .accessibilityIdentifier(Ids.mutedWordAddButton)
                         .automationActivate(Ids.mutedWordAddButton) { submitAdd() }
+                        .faunaPossible(vm.addAnswer(newWord))
                 }
+                FaunaPossibilityReason(vm.addAnswer(newWord))
 
                 // Two conditions, not one (README.md § List pages: loading is
                 // not empty): a page still reading paints neither rows nor this.
@@ -79,9 +80,11 @@ public struct MutedWordsView: View {
         .onStoreChange { await vm.resync() }
     }
 
+    /// The button and the input's Enter: a refused press keeps the draft
+    /// (the VM paints the refusal on `error-message`).
     private func submitAdd() {
         let word = newWord
-        newWord = ""
+        if vm.addAnswer(word).isPossible { newWord = "" }
         Task { await vm.add(word) }
     }
 

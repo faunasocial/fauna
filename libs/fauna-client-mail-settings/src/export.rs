@@ -294,6 +294,109 @@ struct ExportDateRange {
     until_exclusive: Option<i64>,
 }
 
+/// The scope's two date drafts as whole UTC days, or the reason they cannot
+/// be: empty is unbounded; anything else must be a strict `YYYY-MM-DD` naming
+/// a real day, and `from` may not fall after `to`. The one check the scope
+/// step's answer ([`MailExportSnapshot::scope_possibility`]) and the Start's
+/// range resolution share.
+fn export_date_days(
+    date_from: &str,
+    date_to: &str,
+) -> Result<(Option<i64>, Option<i64>), LocalizedText> {
+    let day = |key: &str, value: &str| -> Result<Option<i64>, LocalizedText> {
+        if value.is_empty() {
+            return Ok(None);
+        }
+        fauna_core::caltime::days_from_ymd(value)
+            .map(Some)
+            .ok_or_else(|| LocalizedText::key(key))
+    };
+    let since = day("mail_export.scope_date_from_invalid", date_from)?;
+    let until = day("mail_export.scope_date_to_invalid", date_to)?;
+    if let (Some(s), Some(u)) = (since, until)
+        && s > u
+    {
+        return Err(LocalizedText::key("mail_export.scope_date_range_inverted"));
+    }
+    Ok((since, until))
+}
+
+impl MailExportSnapshot {
+    /// Whether the scope step's choices can be exported
+    /// (`mail-export.md` § UX shape, step 2; `docs/goal/ui/README.md` § Offer
+    /// only what is possible, rules 2, 4 and 6): blocked with its reason while
+    /// no mailbox is selected, and while a date draft is not a real
+    /// `YYYY-MM-DD` day or the range is inverted; possible otherwise.
+    pub fn scope_possibility(&self) -> fauna_core::possibility::Possibility {
+        use fauna_core::possibility::Possibility;
+        if !self.mailboxes.iter().any(|m| m.selected) {
+            return Possibility::blocked(LocalizedText::key("mail_export.scope_needs_mailbox"));
+        }
+        match export_date_days(&self.date_from, &self.date_to) {
+            Ok(_) => Possibility::Possible,
+            Err(reason) => Possibility::blocked(reason),
+        }
+    }
+
+    /// `wizard-next-button`: on the scope step it waits on
+    /// [`Self::scope_possibility`] (the gate is at the step's exit, so the
+    /// Confirm step never shows an export that cannot start); every other
+    /// step's Next is possible.
+    pub fn next_possibility(&self) -> fauna_core::possibility::Possibility {
+        if self.step == ExportStep::Scope {
+            self.scope_possibility()
+        } else {
+            fauna_core::possibility::Possibility::Possible
+        }
+    }
+
+    /// `mail-export-start-button`: the scope's answer again — the Start
+    /// re-asks it, so a scope changed after Next is still refused before a
+    /// session key is minted.
+    pub fn start_possibility(&self) -> fauna_core::possibility::Possibility {
+        self.scope_possibility()
+    }
+
+    /// The snapshot with the Scope step's typed date drafts folded in
+    /// (trimmed) — what the machine will hold once Next commits them, so the
+    /// answer an app paints over its drafts is the one the machine then asks.
+    /// Off the Scope step the drafts are not the machine's yet and the
+    /// snapshot comes back unchanged.
+    #[must_use]
+    pub fn with_scope_drafts(&self, date_from: &str, date_to: &str) -> Self {
+        let mut s = self.clone();
+        if s.step == ExportStep::Scope {
+            s.date_from = date_from.trim().to_string();
+            s.date_to = date_to.trim().to_string();
+        }
+        s
+    }
+}
+
+/// `wizard-next-button`'s answer over FFI (a UniFFI record carries no
+/// methods): [`MailExportSnapshot::next_possibility`] over the snapshot with
+/// the Scope step's typed date drafts folded in
+/// ([`MailExportSnapshot::with_scope_drafts`]).
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn mail_export_next_possibility(
+    snapshot: MailExportSnapshot,
+    date_from: &str,
+    date_to: &str,
+) -> fauna_core::possibility::Possibility {
+    snapshot
+        .with_scope_drafts(date_from, date_to)
+        .next_possibility()
+}
+
+/// `mail-export-start-button`'s answer over FFI
+/// ([`MailExportSnapshot::start_possibility`]).
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn mail_export_start_possibility(
+    snapshot: MailExportSnapshot,
+) -> fauna_core::possibility::Possibility {
+    snapshot.start_possibility()
+}
+
 impl ExportDateRange {
     /// Resolve a scope's two date strings. Empty is unbounded; anything else
     /// must be a strict `YYYY-MM-DD` naming a real day, and `since` may not
@@ -301,27 +404,8 @@ impl ExportDateRange {
     /// "no range": silently exporting everything in its place is exactly the
     /// under-delivering control this type exists to end.
     fn from_scope(scope: &ExportScope) -> Result<Self, DispatchError> {
-        let day = |label: &str, value: &str| -> Result<Option<i64>, DispatchError> {
-            if value.is_empty() {
-                return Ok(None);
-            }
-            fauna_core::caltime::days_from_ymd(value)
-                .map(Some)
-                .ok_or_else(|| {
-                    DispatchError::InvalidState(format!(
-                        "the export's {label} date must be a real date written YYYY-MM-DD"
-                    ))
-                })
-        };
-        let since = day("since", &scope.date_from)?;
-        let until = day("until", &scope.date_to)?;
-        if let (Some(s), Some(u)) = (since, until)
-            && s > u
-        {
-            return Err(DispatchError::InvalidState(
-                "the export's since date is after its until date".into(),
-            ));
-        }
+        let (since, until) = export_date_days(&scope.date_from, &scope.date_to)
+            .map_err(|r| DispatchError::InvalidState(r.resolve(fauna_i18n::strings::lookup)))?;
         Ok(Self {
             since: since.map(|d| d * 86_400),
             until_exclusive: until.map(|d| (d + 1) * 86_400),
@@ -2419,6 +2503,22 @@ impl MailExportMachine {
     pub async fn dispatch(&self, action: MailExportAction) -> Result<(), DispatchError> {
         // Clear any prior error before the new action runs.
         self.inner.lock().expect("snapshot mutex").error = None;
+        // Next and Start ask the answer their buttons paint from, and refuse
+        // with its reason (`docs/goal/ui/README.md` § Offer only what is
+        // possible, rule 6).
+        let answer = {
+            let snap = self.inner.lock().expect("snapshot mutex");
+            match action {
+                MailExportAction::Next => Some(snap.next_possibility()),
+                MailExportAction::Start => Some(snap.start_possibility()),
+                _ => None,
+            }
+        };
+        if let Some(reason) = answer.as_ref().and_then(|a| a.reason()) {
+            let message = reason.resolve(fauna_i18n::strings::lookup);
+            self.inner.lock().expect("snapshot mutex").error = Some(message.clone());
+            return Err(DispatchError::InvalidState(message));
+        }
         // Client-side wizard mutations never touch the seam.
         if self.apply_client_action(&action) {
             return Ok(());
@@ -2444,6 +2544,83 @@ impl MailExportMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scope_snap(selected: bool, from: &str, to: &str) -> MailExportSnapshot {
+        let mut s = MailExportSnapshot::empty();
+        s.step = ExportStep::Scope;
+        s.mailboxes = vec![MailboxOption {
+            name: "INBOX".into(),
+            selected,
+            message_count: 0,
+            sealed_bytes: 0,
+        }];
+        s.date_from = from.into();
+        s.date_to = to.into();
+        s
+    }
+
+    fn reason_key(p: fauna_core::possibility::Possibility) -> Option<String> {
+        p.reason().map(|r| r.key.clone())
+    }
+
+    /// The scope step's answer: zero mailboxes, a malformed date and an
+    /// inverted range each block Next and Start with their reason.
+    #[test]
+    fn the_scope_blocks_next_and_start_on_zero_mailboxes_and_a_bad_range() {
+        assert_eq!(
+            reason_key(scope_snap(false, "", "").next_possibility()),
+            Some("mail_export.scope_needs_mailbox".into())
+        );
+        assert_eq!(
+            reason_key(scope_snap(true, "2026-13-01", "").next_possibility()),
+            Some("mail_export.scope_date_from_invalid".into())
+        );
+        assert_eq!(
+            reason_key(scope_snap(true, "", "nope").start_possibility()),
+            Some("mail_export.scope_date_to_invalid".into())
+        );
+        assert_eq!(
+            reason_key(scope_snap(true, "2026-05-02", "2026-05-01").start_possibility()),
+            Some("mail_export.scope_date_range_inverted".into())
+        );
+        assert!(
+            scope_snap(true, "2026-05-01", "2026-05-02")
+                .next_possibility()
+                .is_possible()
+        );
+        // Off the scope step, Next is not the scope's to block.
+        let mut format = scope_snap(false, "", "");
+        format.step = ExportStep::Format;
+        assert!(format.next_possibility().is_possible());
+    }
+
+    /// The FFI face asks the answer over the typed drafts (trimmed), on the
+    /// Scope step only — the projection every app paints Next from.
+    #[test]
+    fn the_next_face_folds_the_typed_drafts_in_on_the_scope_step_only() {
+        let committed = scope_snap(true, "", "");
+        assert_eq!(
+            reason_key(mail_export_next_possibility(
+                committed.clone(),
+                " 2026-05-02 ",
+                "2026-05-01"
+            )),
+            Some("mail_export.scope_date_range_inverted".into())
+        );
+        assert!(
+            mail_export_next_possibility(committed.clone(), " 2026-05-01", "2026-05-02 ")
+                .is_possible()
+        );
+        let mut format = committed;
+        format.step = ExportStep::Format;
+        assert_eq!(format.with_scope_drafts("nope", "nope").date_from, "");
+        assert!(mail_export_next_possibility(format, "nope", "").is_possible());
+        assert_eq!(
+            reason_key(mail_export_start_possibility(scope_snap(false, "", ""))),
+            Some("mail_export.scope_needs_mailbox".into())
+        );
+    }
+
     use fauna_mail::export::{
         ExportMessage, ExportOptions, build_blob, open_export_blob, serialize_all,
     };
@@ -4168,7 +4345,7 @@ mod tests {
         for (from, to, needle) in [
             ("14/11/2023", "", "YYYY-MM-DD"),
             ("", "2023-02-30", "YYYY-MM-DD"),
-            ("2023-11-15", "2023-11-14", "after its until"),
+            ("2023-11-15", "2023-11-14", "after the to date"),
         ] {
             let nest = Arc::new(FakeNest::new(&corpus()));
             let m = machine_over(nest.clone());

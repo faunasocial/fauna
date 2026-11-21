@@ -656,6 +656,16 @@ class MailSettingsActions:
         # once for the session-scoped nest, and every later call sees "on").
         self.driver.wait_for(self.ENABLED_TOGGLE_ID, timeout=10.0)
         if not self.wait_for_enabled_toggle_state("on", timeout=15.0):
+            # The toggle is also painted BLOCKED until the page's first read
+            # lands (the shared loading answer; every app paints a nest-bound
+            # control blocked while its connection is down too), reading off
+            # meanwhile — and under load that read outlasts the poll above
+            # (measured 2026-11-19 on a saturated host: the press refused as
+            # disabled). Wait
+            # for the toggle to be live, then ask again: a read that lands
+            # showing on needs no gesture.
+            self.driver.wait_until_enabled(self.ENABLED_TOGGLE_ID, timeout=self.ENABLE_SETTLE_S)
+        if self.enabled_toggle_state() != "on":
             from helpers.waiting import retry_through_first_listing
 
             retry_through_first_listing(

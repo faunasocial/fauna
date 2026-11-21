@@ -24,9 +24,22 @@ pub(crate) fn parse_decimal_to_cents(s: &str) -> Option<u64> {
     Some(whole * 100 + frac)
 }
 
+/// Render integer cents as the decimal amount (`973` → `"9.73"`) — the inverse
+/// of [`parse_decimal_to_cents`], for a price named in an error message.
+pub(crate) fn format_cents(cents: u64) -> String {
+    format!("{}.{:02}", cents / 100, cents % 100)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn formats_cents_as_a_decimal_amount() {
+        assert_eq!(format_cents(973), "9.73");
+        assert_eq!(format_cents(1100), "11.00");
+        assert_eq!(format_cents(5), "0.05");
+    }
 
     #[test]
     fn parses_whole_and_fractional_cents() {

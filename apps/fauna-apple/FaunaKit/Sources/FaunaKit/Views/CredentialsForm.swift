@@ -16,12 +16,14 @@ public struct CredentialsForm: View {
     public let kind: String
     public let getCred: (String) -> String
     public let setCred: (String, String) -> Void
-    /// The `hosted-auth` field's can-begin / state / begin-then-wait calls
+    /// The `hosted-auth` field's possibility / state / begin-then-wait calls
     /// (onboarding.md § 4) — every other field type never touches them. Closures
     /// rather than a machine so the `nest_retire` page's own machine drives the
     /// same form (priority #2); the `OnboardingMachine` init below is the
     /// wizard's one-line adapter.
-    public let hostedAuthCanBegin: (String) -> Bool
+    /// The sign-in button's shared answer (`ui/README.md` § Offer only what is
+    /// possible, rules 2 and 6) — painted through `faunaPossible`, never a bool.
+    public let hostedAuthPossibility: (String) -> Possibility
     public let hostedAuthState: (String) -> HostedAuthState
     public let hostedAuthBegin: (String) async -> HostedAuthPrompt?
     public let hostedAuthWait: (String) async -> Void
@@ -31,7 +33,7 @@ public struct CredentialsForm: View {
         kind: String,
         getCred: @escaping (String) -> String,
         setCred: @escaping (String, String) -> Void,
-        hostedAuthCanBegin: @escaping (String) -> Bool,
+        hostedAuthPossibility: @escaping (String) -> Possibility,
         hostedAuthState: @escaping (String) -> HostedAuthState,
         hostedAuthBegin: @escaping (String) async -> HostedAuthPrompt?,
         hostedAuthWait: @escaping (String) async -> Void
@@ -40,7 +42,7 @@ public struct CredentialsForm: View {
         self.kind = kind
         self.getCred = getCred
         self.setCred = setCred
-        self.hostedAuthCanBegin = hostedAuthCanBegin
+        self.hostedAuthPossibility = hostedAuthPossibility
         self.hostedAuthState = hostedAuthState
         self.hostedAuthBegin = hostedAuthBegin
         self.hostedAuthWait = hostedAuthWait
@@ -56,7 +58,7 @@ public struct CredentialsForm: View {
     ) {
         self.init(
             fields: fields, kind: kind, getCred: getCred, setCred: setCred,
-            hostedAuthCanBegin: { machine.hostedAuthCanBegin(form: form, fieldId: $0) },
+            hostedAuthPossibility: { machine.hostedAuthPossibility(form: form, fieldId: $0) },
             hostedAuthState: { machine.hostedAuthState(form: form, fieldId: $0) },
             hostedAuthBegin: { try? await machine.hostedAuthBegin(form: form, fieldId: $0) },
             hostedAuthWait: { _ = try? await machine.hostedAuthWait(form: form, fieldId: $0) }
@@ -107,17 +109,22 @@ public struct CredentialsForm: View {
     /// fallback once this renders (that degradation stays for an app that
     /// hasn't lifted this yet).
     private func hostedAuthButton(field: FieldMetaPlain, fieldId: String) -> some View {
-        Button(hostedAuthLabel(field: field)) {
-            beginHostedAuth(field: field)
-        }
-        .disabled(!hostedAuthCanBegin(field.id))
-        .accessibilityIdentifier(fieldId)
-        .automationActivate(
-            fieldId,
-            isEnabled: { hostedAuthCanBegin(field.id) },
-            text: { hostedAuthLabel(field: field) }
-        ) {
-            beginHostedAuth(field: field)
+        let answer = hostedAuthPossibility(field.id)
+        return VStack(alignment: .leading) {
+            Button(hostedAuthLabel(field: field)) {
+                beginHostedAuth(field: field)
+            }
+            .accessibilityIdentifier(fieldId)
+            .automationActivate(
+                fieldId,
+                text: { hostedAuthLabel(field: field) }
+            ) {
+                beginHostedAuth(field: field)
+            }
+            // Outside `automation*`, so the registry reads the same
+            // enabled-ness (`Possibility.swift`).
+            .faunaPossible(answer)
+            FaunaPossibilityReason(answer)
         }
     }
 

@@ -802,6 +802,32 @@ pub struct FfiFileProviderItem {
     pub share_link_eligible: bool,
 }
 
+/// One change enumeration's answer ([`FfiFileProviderHost::changes_since`]).
+#[derive(uniffi::Record)]
+pub struct FfiFileProviderChanges {
+    /// The items new or changed since the anchor (files and the directories
+    /// their paths imply).
+    pub updated: Vec<FfiFileProviderItem>,
+    /// The identifiers gone since the anchor.
+    pub deleted: Vec<String>,
+    /// The anchor to finish the enumeration at.
+    pub anchor: Vec<u8>,
+}
+
+impl From<provider_face::ChangeReport> for FfiFileProviderChanges {
+    fn from(r: provider_face::ChangeReport) -> Self {
+        FfiFileProviderChanges {
+            updated: r
+                .updated
+                .into_iter()
+                .map(FfiFileProviderItem::from)
+                .collect(),
+            deleted: r.deleted,
+            anchor: r.anchor,
+        }
+    }
+}
+
 impl From<provider_face::ProviderItem> for FfiFileProviderItem {
     fn from(i: provider_face::ProviderItem) -> Self {
         FfiFileProviderItem {
@@ -955,6 +981,13 @@ enum Request {
     TakeKeptFlips {
         reply: oneshot::Sender<Result<Vec<FfiFileProviderItem>, String>>,
     },
+    ChangesSince {
+        anchor: Vec<u8>,
+        reply: oneshot::Sender<Result<FfiFileProviderChanges, String>>,
+    },
+    CurrentChangeAnchor {
+        reply: oneshot::Sender<Result<Vec<u8>, String>>,
+    },
     ReadOnly {
         reply: oneshot::Sender<Result<bool, String>>,
     },
@@ -1092,6 +1125,190 @@ pub fn on_demand_host(
         .unwrap_or_else(|e| e.into_inner())
         .get(&(actor_id, folder_id))
         .and_then(std::sync::Weak::upgrade))
+}
+
+/// The process's Apple File Provider hosts, held STRONGLY by account and set —
+/// one host per domain for the life of the extension's process, not of one
+/// extension instance (`relay-serving.md` § Relay serving → *Apple's File
+/// Provider replica*, point (2)).
+///
+/// fileproviderd invalidates an `NSFileProviderReplicatedExtension` instance
+/// seconds after the request it was launched for ends (every iOS lease
+/// renewal's services lookup launches one), while the process lives on. A
+/// host built per instance died with it, and with it the lease the app had
+/// just granted and the seat it gated: the seat never announced. Held here, the
+/// instance only adopts the domain's host, so the lease, the seat and the
+/// engine outlive it — and two instances of one domain alive at once share
+/// one engine over the set's state DB instead of opening two.
+///
+/// A host is replaced when what it was built from changes (a new nest, device
+/// enrollment, key or chain — [`HeldHosts::adopt_or_build`]'s fingerprint),
+/// and dropped by [`retain_held_domain_hosts`]: the extension calls it at sign
+/// out (no account provisioned), at an account switch (the provisioned account
+/// differs) and with the OS's live domain list (a removed domain).
+static HELD_DOMAIN_HOSTS: std::sync::LazyLock<HeldHosts<FfiFileProviderHost>> =
+    std::sync::LazyLock::new(HeldHosts::default);
+
+/// The strong per-domain registry behind [`HELD_DOMAIN_HOSTS`], generic over
+/// the host so its holding rules are tested without a nest.
+struct HeldHosts<T> {
+    hosts: std::sync::Mutex<std::collections::HashMap<OnDemandHostKey, HeldHost<T>>>,
+}
+
+/// One held host and the fingerprint of what it was built from.
+type HeldHost<T> = ([u8; 32], Arc<T>);
+
+impl<T> Default for HeldHosts<T> {
+    fn default() -> Self {
+        Self {
+            hosts: Default::default(),
+        }
+    }
+}
+
+impl<T> HeldHosts<T> {
+    /// The held host for `key` when it was built from `fingerprint`; else
+    /// `build` one, hold it in the old one's place and return it. The lock is
+    /// held across `build`, so two instances of one domain racing here never
+    /// build two hosts (the build only spawns the worker).
+    fn adopt_or_build(
+        &self,
+        key: OnDemandHostKey,
+        fingerprint: [u8; 32],
+        build: impl FnOnce() -> Result<Arc<T>, FfiError>,
+    ) -> Result<Arc<T>, FfiError> {
+        let mut hosts = self.hosts.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((held, host)) = hosts.get(&key)
+            && *held == fingerprint
+        {
+            return Ok(Arc::clone(host));
+        }
+        let host = build()?;
+        hosts.insert(key, (fingerprint, Arc::clone(&host)));
+        Ok(host)
+    }
+
+    /// Drop every held host not of `actor_id` (all of them with `None`) and,
+    /// with `folder_ids`, every one whose set is not among them.
+    fn retain(&self, actor_id: Option<[u8; 32]>, folder_ids: Option<&[String]>) {
+        let mut hosts = self.hosts.lock().unwrap_or_else(|e| e.into_inner());
+        hosts.retain(|(actor, folder), _| {
+            actor_id == Some(*actor)
+                && folder_ids.is_none_or(|keep| keep.iter().any(|f| f == folder))
+        });
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.hosts.lock().unwrap().len()
+    }
+}
+
+/// What an app-dead host is built from, as one digest: a held host whose
+/// inputs moved is rebuilt rather than adopted.
+#[allow(clippy::too_many_arguments)]
+fn app_dead_fingerprint(
+    nest_url: &str,
+    device_id: &[u8],
+    device_label: &str,
+    backup_key: &[u8],
+    state_dir: &str,
+    root_dir: &str,
+    predecessor_chain: Option<&crate::accounts_registry::FfiPredecessorChain>,
+) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new_derive_key("fauna file-provider held host v1");
+    for part in [
+        nest_url.as_bytes(),
+        device_id,
+        device_label.as_bytes(),
+        backup_key,
+        state_dir.as_bytes(),
+        root_dir.as_bytes(),
+    ] {
+        hasher.update(&(part.len() as u64).to_le_bytes());
+        hasher.update(part);
+    }
+    if let Some(chain) = predecessor_chain {
+        for part in chain.actor_ids.iter().chain(chain.keys.iter()) {
+            hasher.update(&(part.len() as u64).to_le_bytes());
+            hasher.update(part);
+        }
+    }
+    *hasher.finalize().as_bytes()
+}
+
+/// The File Provider extension's host for one domain — the process's held one
+/// when it was built from the same inputs, else a fresh
+/// [`FfiFileProviderHost::app_dead`] held in its place ([`HELD_DOMAIN_HOSTS`]).
+/// The extension's `init(domain:)` calls this, never `app_dead` itself, so the
+/// host — its engine, its relay seat and the app's lease on it — lives as long
+/// as the process, not one extension instance. Same arguments as `app_dead`.
+#[uniffi::export(default(predecessor_chain = None))]
+#[allow(clippy::too_many_arguments)]
+pub fn held_app_dead_host(
+    nest_url: String,
+    actor_id: Vec<u8>,
+    device_id: Vec<u8>,
+    device_label: String,
+    backup_key: Vec<u8>,
+    bearer: Arc<dyn FfiBearerProvider>,
+    signer: Arc<dyn FfiChangeSignerProvider>,
+    state_dir: String,
+    folder_id: String,
+    root_dir: String,
+    predecessor_chain: Option<crate::accounts_registry::FfiPredecessorChain>,
+) -> Result<Arc<FfiFileProviderHost>, FfiError> {
+    let key = (
+        bytes32(&actor_id, "actor_id")?,
+        parse_folder_id(&folder_id)?.to_wire(),
+    );
+    let fingerprint = app_dead_fingerprint(
+        &nest_url,
+        &device_id,
+        &device_label,
+        &backup_key,
+        &state_dir,
+        &root_dir,
+        predecessor_chain.as_ref(),
+    );
+    HELD_DOMAIN_HOSTS.adopt_or_build(key, fingerprint, || {
+        FfiFileProviderHost::app_dead(
+            nest_url,
+            actor_id,
+            device_id,
+            device_label,
+            backup_key,
+            bearer,
+            signer,
+            state_dir,
+            folder_id,
+            root_dir,
+            predecessor_chain,
+        )
+    })
+}
+
+/// Release the held File Provider hosts the extension no longer serves: every
+/// one not of `actor_id` (the provisioned account; `None` — signed out —
+/// releases all), and, given the OS's live domains as `folder_ids` (each a
+/// set's `FolderRef` wire string), every one whose domain is gone. A released
+/// host's worker ends once no extension instance still holds it, and its seat
+/// withdraws.
+#[uniffi::export]
+pub fn retain_held_domain_hosts(
+    actor_id: Option<Vec<u8>>,
+    folder_ids: Option<Vec<String>>,
+) -> Result<(), FfiError> {
+    let actor_id = actor_id.map(|id| bytes32(&id, "actor_id")).transpose()?;
+    let folder_ids = folder_ids
+        .map(|ids| {
+            ids.iter()
+                .map(|id| parse_folder_id(id).map(|r| r.to_wire()))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
+    HELD_DOMAIN_HOSTS.retain(actor_id, folder_ids.as_deref());
+    Ok(())
 }
 
 /// The per-domain File Provider host handed to the extension.
@@ -1812,6 +2029,26 @@ impl FfiFileProviderHost {
     /// same way, so the OS re-reads the `userInfo` Finder's Share action gates on.
     pub async fn take_kept_flips(&self) -> Result<Vec<FfiFileProviderItem>, FfiError> {
         self.call(|reply| Request::TakeKeptFlips { reply }).await
+    }
+
+    /// `enumerateChanges(from: anchor)` → the items new or changed since
+    /// `anchor`, the identifiers gone since it, and the anchor to finish at
+    /// (`provider_face::serve_changes_since`). A replicated File Provider
+    /// learns of a change to a container it already lists ONLY from this
+    /// feed — a signal never makes it re-list one — so a pulled or
+    /// peer-landed row lists in Files through here (`on-demand-files-apple.md`
+    /// § Apple File Provider binding, *the change feed*). An anchor the feed
+    /// did not mint (or no longer holds) gets every item and no deletions.
+    pub async fn changes_since(&self, anchor: Vec<u8>) -> Result<FfiFileProviderChanges, FfiError> {
+        self.call(|reply| Request::ChangesSince { anchor, reply })
+            .await
+    }
+
+    /// `currentSyncAnchor` → the change feed's anchor for the tree as it
+    /// stands now (`provider_face::serve_current_change_anchor`).
+    pub async fn current_change_anchor(&self) -> Result<Vec<u8>, FfiError> {
+        self.call(|reply| Request::CurrentChangeAnchor { reply })
+            .await
     }
 
     /// Whether this host serves its set read-only — the account holds it as a
@@ -2955,6 +3192,19 @@ async fn serve(
             let out = engine.restore_retained_version(conflict_id).await;
             let _ = reply.send(out.map_err(|e| format!("{e:#}")));
         }
+        Request::ChangesSince { anchor, reply } => {
+            let out = provider_face::serve_changes_since(engine, &anchor)
+                .await
+                .map(FfiFileProviderChanges::from)
+                .map_err(|e| e.to_string());
+            let _ = reply.send(out);
+        }
+        Request::CurrentChangeAnchor { reply } => {
+            let out = provider_face::serve_current_change_anchor(engine)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = reply.send(out);
+        }
         Request::TakeKeptFlips { reply } => {
             let mut items = Vec::with_capacity(kept_flips.len());
             for rel in std::mem::take(kept_flips) {
@@ -3267,6 +3517,12 @@ impl Request {
             Request::TakeKeptFlips { reply, .. } => {
                 let _ = reply.send(Err(msg));
             }
+            Request::ChangesSince { reply, .. } => {
+                let _ = reply.send(Err(msg));
+            }
+            Request::CurrentChangeAnchor { reply, .. } => {
+                let _ = reply.send(Err(msg));
+            }
             Request::ReadOnly { reply, .. } => {
                 let _ = reply.send(Err(msg));
             }
@@ -3453,6 +3709,82 @@ mod tests {
         assert!(!runs_own_seat(Some(std::path::Path::new("/cache"))));
         assert_eq!(seat_needs_lease(), cfg!(target_os = "ios"));
         assert!(RELAY_LEASE_RENEWAL * 2 < RELAY_LEASE);
+    }
+
+    /// The held registry keeps one host per domain across extension
+    /// instances: a second instance adopts the first one's host (one engine
+    /// over the set's state DB), a changed input rebuilds it, and sign out,
+    /// an account switch and a removed domain release it.
+    #[test]
+    fn a_held_domain_host_outlives_the_instance_until_released() {
+        struct Host;
+        let held = HeldHosts::<Host>::default();
+        let (a, b) = ([1u8; 32], [2u8; 32]);
+        let key = |actor, set: &str| (actor, set.to_string());
+        let built = std::cell::Cell::new(0);
+        let build = || {
+            built.set(built.get() + 1);
+            Ok(Arc::new(Host))
+        };
+
+        let first = held.adopt_or_build(key(a, "s1"), [0; 32], build).unwrap();
+        let again = held.adopt_or_build(key(a, "s1"), [0; 32], build).unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &again),
+            "the next instance adopts the held host"
+        );
+        assert_eq!(built.get(), 1);
+
+        let moved = held.adopt_or_build(key(a, "s1"), [9; 32], build).unwrap();
+        assert!(!Arc::ptr_eq(&first, &moved), "a changed input rebuilds");
+        assert_eq!((built.get(), held.len()), (2, 1));
+
+        held.adopt_or_build(key(a, "s2"), [0; 32], build).unwrap();
+        held.adopt_or_build(key(b, "s1"), [0; 32], build).unwrap();
+        assert_eq!(held.len(), 3);
+        held.retain(Some(a), Some(&["s2".to_string()]));
+        assert_eq!(held.len(), 1, "another account's and a removed domain's go");
+        held.retain(Some(a), None);
+        assert_eq!(held.len(), 1);
+        held.retain(None, None);
+        assert_eq!(held.len(), 0, "sign out releases every host");
+
+        let failed = held.adopt_or_build(key(a, "s1"), [0; 32], || {
+            Err(FfiError::General { msg: "x".into() })
+        });
+        assert!(
+            failed.is_err() && held.len() == 0,
+            "a failed build holds nothing"
+        );
+    }
+
+    /// The fingerprint moves with every input a host is built from.
+    #[test]
+    fn the_held_fingerprint_moves_with_every_input() {
+        let base = || app_dead_fingerprint("n", &[1], "l", &[2], "s", "r", None);
+        assert_eq!(base(), base());
+        for other in [
+            app_dead_fingerprint("m", &[1], "l", &[2], "s", "r", None),
+            app_dead_fingerprint("n", &[3], "l", &[2], "s", "r", None),
+            app_dead_fingerprint("n", &[1], "k", &[2], "s", "r", None),
+            app_dead_fingerprint("n", &[1], "l", &[4], "s", "r", None),
+            app_dead_fingerprint("n", &[1], "l", &[2], "t", "r", None),
+            app_dead_fingerprint("n", &[1], "l", &[2], "s", "q", None),
+            app_dead_fingerprint(
+                "n",
+                &[1],
+                "l",
+                &[2],
+                "s",
+                "r",
+                Some(&crate::accounts_registry::FfiPredecessorChain {
+                    actor_ids: vec![vec![5]],
+                    keys: vec![vec![6]],
+                }),
+            ),
+        ] {
+            assert_ne!(base(), other);
+        }
     }
 
     /// What a leased seat did, as [`serve_under_lease`]'s two closures saw it.

@@ -166,8 +166,17 @@ def test_web_sealed_identity_store_journey(nest_instance, spa_url):
             "the passphrase input must read back as a same-length bullet mask"
         )
 
-        # 3. Two entries that differ are refused, nothing created.
-        _submit(driver, FIRST, confirm="something-else")
+        # 3. Two entries that differ are not offered (README § Offer only what
+        # is possible, rule 4's form case): the submit is disabled with the
+        # mismatch as its reason, and the Enter key — the same submit, asked
+        # again — refuses on `error-message`. Nothing created.
+        driver.clear_and_type(PASSPHRASE_INPUT, FIRST)
+        driver.clear_and_type(CONFIRM_INPUT, "something-else")
+        wait_until(lambda: not driver.is_enabled(SUBMIT), 30,
+                   diagnose=lambda: f"a mismatch must disable the submit: {driver.diagnose(SUBMIT)}")
+        title = driver.eval_js(f"document.querySelector('[data-testid=\"{SUBMIT}\"]').title")
+        assert title == S.unlock.error_mismatch, f"the disabled submit names its reason: {title!r}"
+        driver.press_key(CONFIRM_INPUT, "Enter")
         _refused(driver, S.unlock.error_mismatch, "a mismatched confirm must be refused")
         assert driver.is_visible(CONFIRM_INPUT), "a mismatch stays in create mode"
         assert driver.eval_js("localStorage.getItem('fauna/seal')") is None, (

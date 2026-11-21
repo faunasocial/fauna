@@ -1742,6 +1742,12 @@ const NON_ACTOR_OPAQUE_COLUMNS: &[(&str, &str, &str)] = &[
          own segment store numbered, naming no actor",
     ),
     (
+        "materialize_receipts",
+        "manifest_anchor",
+        "a content address: the restored copy's `manifest.<kind>` custody manifest hash, or for a \
+         covered folder a BLAKE3 over its (path_hash, manifest_hash) pairs -- naming no actor",
+    ),
+    (
         "materialize_deleted_collections",
         "collection_id",
         "as `bridge_carddav_addressbooks.addressbook_id`: the id of a collection a door deleted \

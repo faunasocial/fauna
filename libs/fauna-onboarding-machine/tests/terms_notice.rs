@@ -55,8 +55,6 @@ fn the_getter_derives_the_field_from_the_outcome() {
             args: Default::default(),
         },
         continue_enabled: true,
-        control_checkbox_visible: false,
-        control_checkbox_checked: false,
         terms_notice_visible: stored,
     };
     m.set_handle_check_snapshot_for_test(snap(

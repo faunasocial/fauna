@@ -224,6 +224,7 @@ pub mod mail_export_blobs;
 pub(crate) mod mail_from_ownership;
 pub mod mail_import_tunnel;
 pub(crate) mod mail_submitter_proof;
+pub(crate) mod manifest_walk;
 #[cfg(feature = "test-hooks")]
 pub mod mass_mailing_test_hook;
 pub mod materializer;
@@ -343,6 +344,9 @@ pub mod room_seat_key_test_hook;
 pub mod spam_baseline_cadence_test_hook;
 #[cfg(feature = "test-hooks")]
 pub mod spam_history_gc_test_hook;
+/// Test-only: script the outbound-STARTTLS probe's outcome (a blocked port 25).
+#[cfg(feature = "test-hooks")]
+pub mod starttls_probe_test_hook;
 #[cfg(feature = "test-hooks")]
 pub mod trending_test_hook;
 // pairing_routes deleted — `fauna.pair.list` is the sole surface (pair_handlers).
@@ -1035,11 +1039,20 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
         )
         // The segment byte-source (sibling of /api/v1/chunks) is mounted on
         // `public_bytes` below — its open, credential-less CORS.
-        // Manifest routes. Manifests are small (a list of 32-byte hashes) but
-        // share the chunk body limit for uniformity with the chunk route.
+        // Manifest routes, both under the chunk body limit. A paged root is
+        // small (under 50 bytes a page); a single manifest grows with its file
+        // and may reach the limit — a file past the inline bound is written
+        // paged instead, its pages carrying the chunk list
+        // (`file-sync.md` § Paged manifests). Pages are fetched back, like a
+        // root, from `GET /api/v1/manifests/{hash}`.
         .route(
             "/api/v1/manifests",
             post(chunk_routes::upload_manifest)
+                .layer(axum::extract::DefaultBodyLimit::max(CHUNK_BLOB_BODY_LIMIT)),
+        )
+        .route(
+            "/api/v1/manifest-pages",
+            post(chunk_routes::upload_manifest_page)
                 .layer(axum::extract::DefaultBodyLimit::max(CHUNK_BLOB_BODY_LIMIT)),
         )
         // Share route (no auth — token is self-authorising)
@@ -1318,6 +1331,8 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
     let router = router.merge(outbound_clock_test_hook::routes());
     #[cfg(feature = "test-hooks")]
     let router = router.merge(mail_health_state_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
+    let router = router.merge(starttls_probe_test_hook::routes());
     #[cfg(feature = "test-hooks")]
     let router = router.merge(outbound_drain_test_hook::routes());
     #[cfg(feature = "test-hooks")]
@@ -2730,6 +2745,11 @@ pub async fn start_server(
         }),
     )));
 
+    // The outbound-STARTTLS probe's test script: one cell shared by the
+    // `ScriptedStarttlsProber` and the route that sets it.
+    #[cfg(feature = "test-hooks")]
+    let starttls_probe_script = Arc::new(std::sync::Mutex::new(None));
+
     let state = Arc::new(AppState {
         ws: Arc::new(ws::WsState::with_durable(Arc::clone(&db))),
         db,
@@ -2939,6 +2959,8 @@ pub async fn start_server(
         #[cfg(feature = "test-hooks")]
         mail_health_state_override: Arc::new(std::sync::Mutex::new(None)),
         #[cfg(feature = "test-hooks")]
+        starttls_probe_script: starttls_probe_script.clone(),
+        #[cfg(feature = "test-hooks")]
         rescore_worklist_serves: Arc::new(Default::default()),
         #[cfg(feature = "test-hooks")]
         post_fanout_initiations: Arc::new(Default::default()),
@@ -2985,12 +3007,15 @@ pub async fn start_server(
         tlsa_override: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         // Deliverability-diagnostic outbound-STARTTLS prober (the gmail `:25`
         // posture probe). Stateless; no fallible construction. The e2e/test-hooks
-        // build installs the Null prober so a tier_3 run is deterministic + never
-        // reaches out to gmail; production installs the live prober.
+        // build installs the scripted prober (the Null prober's answer until a
+        // test scripts one) so a tier_3 run is deterministic + never reaches out
+        // to gmail; production installs the live prober.
         #[cfg(not(feature = "test-hooks"))]
         starttls_prober: Arc::new(crate::mail_deliverability::LiveStarttlsProber),
         #[cfg(feature = "test-hooks")]
-        starttls_prober: Arc::new(crate::mail_deliverability::NullStarttlsProber),
+        starttls_prober: Arc::new(crate::mail_deliverability::ScriptedStarttlsProber {
+            script: starttls_probe_script,
+        }),
         // D4 link-preview resolver: real SSRF-safe fetcher + by-url cache +
         // per-actor limiter in both prod and the e2e build; the `test-hooks`
         // fixture override below is what lets the e2e resolve a served OG page.

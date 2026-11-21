@@ -134,11 +134,12 @@ NDK_CLANG = {
 # --- The generator's own wording: a public text --------------------------------
 # The wording the public-texts process landed for it (round 8, package
 # shipped-notices; the header's last sentence and
-# the fallback line round 9, package shipped-notices-fallback); it changes only through a request.
+# the fallback line round 9, package shipped-notices-fallback; the licences
+# sentence round 14, package shipped-notices-licence-names); it changes only through a request.
 # public-text: shipped-notices-wording
 HEADER = """Third-party notices for {name} {version}
 
-Fauna is free, open-source software made by Fauna Social. It is provided under your choice of the MIT licence or the Apache License, Version 2.0. The full text of both licences is beside this file (LICENSE-MIT, LICENSE-APACHE).
+Fauna is free, open-source software made by Fauna Social. It is provided under your choice of the MIT licence or the Apache License, Version 2.0. The full text of both licences comes with this file, as LICENSE-MIT and LICENSE-APACHE (LICENSE-MIT.txt and LICENSE-APACHE.txt on Windows and in the web app); where this file is a release's notices file for a single server binary, they are separate downloads of the same release.
 
 This software includes the third-party components listed below, across the systems it is published for; a copy built for one system may not contain every one of them. Each remains under its own licence, named in its entry with the licence and notice files copied from its package; a text several components share is printed once and referred to after that. A text marked as a licence's standard text stands in for a licence file that could not be copied from the component's package.
 """

@@ -123,7 +123,7 @@ private func vmListingMeetingA(_ api: ScriptedEventsAPI) async -> EventsVM {
     // `queryEventItems` now resolves the selection against `vm.calendars`
     // (the stale-selection fallback, events.md § Where logic lives), so
     // skipping this would make every selection here read as "vanished".
-    vm.calendars = [calendar1]
+    vm.seedLoadedCalendars([calendar1])
     await vm.selectCalendar(calendar1)
     #expect(vm.events.map(\.id) == ["ev-a"])
     return vm
@@ -149,7 +149,8 @@ func createDoesNotClobberNewerRefresh() async {
     // Let `createEvent` reach its gated re-query before the refresh starts, so the
     // interleaving under test is the real one (create's query is the OLDER of the
     // two) rather than whichever the scheduler happens to pick.
-    while api.queryCallCount < 2 { await Task.yield() }
+    guard await yieldUntil("the create's gated re-query (query call 1)", { api.queryCallCount >= 2 })
+    else { return }
 
     await vm.refreshFromPush()
     #expect(vm.events.map(\.id) == ["ev-a", "ev-b"],
@@ -238,7 +239,8 @@ func staleUnionDoesNotReWidenSelection() async {
     let vm = EventsVM()
     vm.configure(api: api)
     let load = Task { await vm.loadCalendars() }
-    while api.queryCallCount < 1 { await Task.yield() }
+    guard await yieldUntil("the union's gated first query (call 0)", { api.queryCallCount >= 1 })
+    else { return }
 
     await vm.selectCalendar(calendar1)
     #expect(vm.events.isEmpty)

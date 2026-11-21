@@ -60,7 +60,7 @@ public sealed partial class RuleEditorPanel : UserControl
 
     /// <summary>The host's save: handed <see cref="FfiRuleEditor.DocumentBytes"/>,
     /// it answers the status line's text (and, for the admin, the editor reloaded from
-    /// what the nest stored). Called only while the view's <c>canSave</c> holds.</summary>
+    /// what the nest stored). Called only while the editor's save answer is possible.</summary>
     internal Func<byte[], Task<RuleEditorSaveOutcome>>? SaveHandler { get; set; }
 
     /// <summary><c>rule-editor-save-button</c>, for the host's offline-gate
@@ -338,6 +338,8 @@ public sealed partial class RuleEditorPanel : UserControl
     private async void SaveButton_Click(object sender, RoutedEventArgs e)
     {
         if (_model.Saving || SaveHandler is not { } save) return;
+        // The save asks the same shared answer the button painted from.
+        if (!_model.SaveAnswer().IsPossible) return;
         byte[] document;
         try
         {

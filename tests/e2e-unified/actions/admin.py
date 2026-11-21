@@ -553,6 +553,23 @@ class AdminActions:
         self.driver.click("admin-dns-domain-mode", index=index)
         time.sleep(1)
 
+    def try_toggle_domain_mode(self, index: int = 0) -> bool:
+        """Flip the mode control only if it is offered; return whether it was
+        (`ui/README.md` § Offer only what is possible; `dns-management.md`
+        § Errors & edge cases). An app on the shared `set_mode_possibility`
+        paints the switch to managed disabled, its reason beside it, while no
+        held credential covers the domain — that disabled control IS the
+        refusal. An app not yet lifted still offers it and refuses on the
+        press, naming the reason on `error-message`; the caller checks that
+        path when this returns True."""
+        self.driver.wait_for("admin-dns-domain-mode", timeout=10.0)
+        if not self.driver.is_enabled(
+            "admin-dns-domain-mode", scope=f"admin-dns-domain[{index}]"
+        ):
+            return False
+        self.toggle_domain_mode(index=index)
+        return True
+
     def toggle_manage_all(self) -> None:
         """Flip the deployment "Fauna controls all domains" master switch
         (`admin-dns-manage-all-toggle`) — sets every active domain's mode at once
@@ -1414,7 +1431,15 @@ class AdminActions:
         Deliberately NO settle sleep (convention 14): every caller already polls
         the state it cares about to a deadline, and a fixed delay here would be
         both slower on a quiet box and too short on a loaded one."""
+        self.set_region_draft(code)
+        self.save_region()
+
+    def set_region_draft(self, code: str) -> None:
+        """Type into `admin-nest-region-input` without saving."""
         self.driver.clear_and_type("admin-nest-region-input", code)
+
+    def save_region(self) -> None:
+        """Press `admin-nest-region-save-button`."""
         self.driver.click("admin-nest-region-save-button")
 
     # ── Feature limits (admin.md § N Nest → Feature limits; the editor itself is
@@ -1617,10 +1642,36 @@ class AdminActions:
     def save_mail_microsoft_registration(self, client_id: str, tenant: str) -> None:
         """Type the deployment's own Microsoft registration into its two
         `admin-mail` fields and press `admin-mail-microsoft-save-button` (both
-        empty clears it back to the default)."""
+        empty clears it back to the default).
+
+        Waits for an armed Save before the press: every app but windows paints
+        it from the draft's shared answer (`admin_policy::microsoft_draft_possibility`,
+        `ui/README.md` § Offer only what is possible) after the page's read
+        gate, so a click sent straight after typing can reach a Save still held
+        for the read or for the previous draft, and every agent refuses a click
+        on a disabled control. A malformed draft is never pressed here — a
+        journey types it with `type_mail_microsoft_registration` and reads the
+        painted reason (`microsoft_save_blocked_reason`)."""
+        self.type_mail_microsoft_registration(client_id, tenant)
+        self.driver.wait_until_enabled("admin-mail-microsoft-save-button", timeout=30.0)
+        self.press_mail_microsoft_save()
+
+    def type_mail_microsoft_registration(self, client_id: str, tenant: str) -> None:
+        """Type the two Microsoft-registration drafts, without pressing Save."""
         self.driver.clear_and_type("admin-mail-microsoft-client-id-input", client_id)
         self.driver.clear_and_type("admin-mail-microsoft-tenant-input", tenant)
+
+    def press_mail_microsoft_save(self) -> None:
+        """One press of `admin-mail-microsoft-save-button`, armed or not."""
         self.driver.click("admin-mail-microsoft-save-button")
+
+    def microsoft_save_enabled(self) -> bool:
+        """Whether the Microsoft-registration Save is armed."""
+        return self.driver.is_enabled("admin-mail-microsoft-save-button")
+
+    def microsoft_save_blocked_reason(self) -> str | None:
+        """The reason painted beside a disabled Microsoft-registration Save."""
+        return self.driver.blocked_reason("admin-mail-microsoft-save-button")
 
     def save_mail_spam(self) -> None:
         """Click the Spam/inbound-perimeter Save button (full PUT via
@@ -2213,6 +2264,16 @@ class AdminActions:
         ``18+``) — enabled only once a guardian is selected, so it is picked
         after the guardian (`family-safety.md` § App surface → *Age-band
         surfaces*)."""
+        self.fill_admit_form(actor_hex, handle, tier, guardian, age_band)
+        self.press_admit()
+
+    def fill_admit_form(self, actor_hex: str, handle: str | None = None,
+                        tier: str = "free", guardian: str | None = None,
+                        age_band: str | None = None) -> None:
+        """Type the Admit section's drafts without pressing Admit — the half a
+        draft-validity test reads the paint after (`admin.md` § Errors & edge
+        cases → *A form's submit is live only for a draft the nest would
+        accept*)."""
         self.driver.clear_and_type("admin-users-admit-actor-input", actor_hex)
         if handle is not None:
             self.driver.clear_and_type("admin-users-admit-handle-input", handle)
@@ -2221,8 +2282,11 @@ class AdminActions:
             self.driver.select("admin-users-admit-guardian-select", guardian)
         if age_band is not None:
             self.driver.select("admin-users-admit-age-band-select", age_band)
-        # The page renders Admit always-enabled; what desensitizes it is the
-        # app's offline gate (`account-offline-mutation.md` § The offline-mutation
+
+    def press_admit(self) -> None:
+        """Press `admin-users-admit-button` once it is live."""
+        # The page renders Admit enabled for a well-formed draft; what else
+        # desensitizes it is the app's offline gate (`account-offline-mutation.md` § The offline-mutation
         # contract, class 3 — `fauna.admin.users.create` is online-only) while
         # the admin's transport is not `connected`. A full feature run can
         # catch the app mid-reconnect here (tui, 2026-10-13: the click was
@@ -2527,6 +2591,15 @@ class AdminActions:
         the row is an admin's. See `user_make_admin_available` for why
         `is_visible_scrolled`."""
         return self.driver.is_visible_scrolled(
+            "admin-users-remove-admin-button", scope=f"user-row[{index}]"
+        )
+
+    def user_remove_admin_enabled(self, index: int = 0) -> bool:
+        """True when row `index`'s `admin-users-remove-admin-button` is live —
+        False on the nest's last superadmin, where the shared
+        `remove_admin_possibility` paints it blocked with its reason (`admin.md`
+        § 2 → *What a row offers*)."""
+        return self.driver.is_enabled(
             "admin-users-remove-admin-button", scope=f"user-row[{index}]"
         )
 

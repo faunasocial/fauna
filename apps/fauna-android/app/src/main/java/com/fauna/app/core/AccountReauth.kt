@@ -10,6 +10,7 @@ import androidx.fragment.app.FragmentActivity
 import com.fauna.app.testing.TestAgent
 import java.io.File
 import kotlin.coroutines.resume
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 
 /**
@@ -156,6 +157,38 @@ object AccountReauth {
             return block()
         } finally {
             TestAgent.recordActivationGesture()
+        }
+    }
+
+    /**
+     * One switcher-row tap through the Stage-2 gate — the ONE gate every
+     * switcher runs (the Settings switcher and `launch_retry`'s, `onboarding.md`
+     * § Wizard exit handling → *The finished wizard holds*). A require-confirm
+     * target demands [confirmActivation] BEFORE [switch] (mutation-first:
+     * nothing is torn down until the confirmed switch); declining is a pure
+     * no-op. An unflagged target switches straight through
+     * (`long-term-store.md` § Per-account re-auth). Each arm is one
+     * [activationGesture], its completion counted whatever the gate decided.
+     *
+     * @param switch the caller's switch, handed `confirmed` (`true` only after
+     *   an approved re-auth — the registry's `setActiveConfirmed` path).
+     */
+    fun gatedSwitch(
+        scope: kotlinx.coroutines.CoroutineScope,
+        requiresConfirm: Boolean,
+        activity: FragmentActivity?,
+        title: String,
+        subtitle: String,
+        switch: (confirmed: Boolean) -> Unit,
+    ) {
+        if (requiresConfirm) {
+            scope.launch {
+                activationGesture {
+                    if (confirmActivation(activity, title, subtitle)) switch(true)
+                }
+            }
+        } else {
+            activationGesture { switch(false) }
         }
     }
 }

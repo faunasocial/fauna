@@ -40,6 +40,7 @@ uniffi::setup_scaffolding!("fauna_backups_machine");
 pub mod machine;
 pub mod nest_api;
 pub mod observer;
+pub mod possibility;
 pub mod snapshots;
 
 pub use machine::BackupsMachine;

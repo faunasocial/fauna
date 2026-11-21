@@ -134,6 +134,30 @@ class SessionsContentTest {
         composeTestRule.onNodeWithTag(Ids.SESSIONS_EMPTY).assertExists()
     }
 
+    /** `ui/sessions.md` § Errors & edge cases: a blocked answer disables
+     *  *Sign out everywhere else* with its reason beside it, and a refused
+     *  press's reason rides `error-message`. */
+    @Test
+    fun aBlockedRevokeOthersAnswerDisablesTheButtonWithWhy() {
+        val blocked = uniffi.fauna_core.Possibility.Blocked(LocalizedText("sessions.no_other_sessions", emptyMap()))
+        composeTestRule.setContent {
+            SessionsContent(
+                state = SessionsUiState(
+                    snapshot = two,
+                    revokeOthersAnswer = blocked,
+                    refusal = LocalizedText("sessions.no_other_sessions", emptyMap()),
+                ),
+                lockConfirmWord = "LOCK",
+                onBack = {}, onRevoke = {},
+                onArmRevokeOthers = {}, onCancelRevokeOthers = {}, onConfirmRevokeOthers = {},
+                onLockWordChange = {}, onLock = {},
+            )
+        }
+        composeTestRule.onNodeWithTag(Ids.SESSIONS_REVOKE_OTHERS_BUTTON).assertIsNotEnabled()
+        composeTestRule.onNodeWithTag(Ids.ERROR_MESSAGE)
+            .assertTextEquals(getString(R.string.sessions_no_other_sessions))
+    }
+
     private fun getString(resId: Int): String =
         androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
             .getString(resId)

@@ -25,7 +25,9 @@ import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.components.rememberCopyToClipboard
 import com.fauna.app.ui.components.rememberTwoClickArm
 import com.fauna.app.ui.navigation.LocalAppMessages
+import com.fauna.app.ui.util.faunaFormGate
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.isPossible
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.MailAliasesVM
@@ -39,7 +41,17 @@ import uniffi.fauna_client_mail_settings.aliasExpiryLabel
 import uniffi.fauna_client_mail_settings.aliasHitsLabel
 import uniffi.fauna_client_mail_settings.aliasIsExtendable
 import uniffi.fauna_client_mail_settings.aliasKindBadge
+import uniffi.fauna_client_mail_settings.mailAliasesCreatePossibility
+import uniffi.fauna_core.Possibility
+import uniffi.fauna_core.ReadState
+import com.fauna.ffi.readPossibility
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.AssistChip
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.FilterChip
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.TextButton
 
 /**
  * The per-account `mail-aliases` page (`mail-aliases.md`): list, create, edit,
@@ -69,7 +81,11 @@ fun MailAliasesScreen(
 
     MailAliasesContent(
         aliases = snapshot.aliases,
-        defaultDomain = snapshot.defaultDomain,
+        // Every create path's shared answer
+        // (`MailAliasesSnapshot::create_possibility`): blocked waiting before
+        // the first read (`Possibility::once_read(false)`, rule 5), then the
+        // snapshot's own. FFI lives here, off the testable Content.
+        createAnswer = if (hydrated) mailAliasesCreatePossibility(snapshot) else readPossibility(ReadState.PENDING),
         hydrated = hydrated,
         working = snapshot.status == AliasesStatus.WORKING,
         lastImportResult = snapshot.lastImportResult,
@@ -135,7 +151,11 @@ private fun formatLastHitDate(epochMs: Long): String =
 @Composable
 fun MailAliasesContent(
     aliases: List<AliasView>,
-    defaultDomain: String?,
+    // Whether a new alias can be created now — add, import and the disposable
+    // mint all create on the default domain, so this one shared answer
+    // (`MailAliasesSnapshot::create_possibility`, `ui/README.md` § Offer only
+    // what is possible, rule 6) paints all three; never re-derived here.
+    createAnswer: Possibility,
     // Loading-vs-resolved-empty (`ui/README.md` rule 5). Defaults true so
     // existing/other-purpose call sites keep rendering the resolved state.
     hydrated: Boolean = true,
@@ -184,7 +204,7 @@ fun MailAliasesContent(
     // prior import can't be mistaken for the outcome of a fresh paste; any
     // other dispatch also clears the underlying snapshot field server-side.
     var importResultDismissed by remember { mutableStateOf(false) }
-    val canAdd = defaultDomain != null && !working
+    val canAdd = createAnswer.isPossible && !working
     val copyToClipboard = rememberCopyToClipboard()
     LaunchedEffect(lastMintedAddress) { lastMintedAddress?.let(copyToClipboard) }
 
@@ -222,21 +242,16 @@ fun MailAliasesContent(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
-            if (defaultDomain == null) {
-                Text(
-                    stringResource(R.string.mail_aliases_no_default_domain),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
-            }
-
             // Of these three, only Generate dispatches. Add and Import merely
             // REVEAL their sheets (arming is local), so they stay live with no
             // nest — and they are the live siblings that stop a blanket grey
             // from passing this page's test.
-            val generateGate = faunaGate(
-                "fauna.bridges.generate_disposable_alias",
-                enabled = canAdd,
+            // The create answer's reason (no default domain yet; waiting
+            // before the first read) wins over the offline gate's, so the one
+            // line under the row explains all three (rule 2).
+            val generateGate = faunaFormGate(
+                createAnswer,
+                faunaGate("fauna.bridges.generate_disposable_alias", enabled = canAdd),
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
@@ -278,6 +293,7 @@ fun MailAliasesContent(
             when (val mode = sheet) {
                 is SheetMode.Add -> AliasSheet(
                     editing = null,
+                    createAnswer = createAnswer,
                     kindLabel = kindLabel,
                     parseCount = parseCount,
                     parseCountI64 = parseCountI64,
@@ -292,6 +308,7 @@ fun MailAliasesContent(
                 )
                 is SheetMode.Edit -> AliasSheet(
                     editing = mode.alias,
+                    createAnswer = createAnswer,
                     kindLabel = kindLabel,
                     parseCount = parseCount,
                     parseCountI64 = parseCountI64,
@@ -303,6 +320,7 @@ fun MailAliasesContent(
                     onCancel = { sheet = SheetMode.Closed },
                 )
                 SheetMode.Import -> ImportSheet(
+                    createAnswer = createAnswer,
                     lastImportResult = if (importResultDismissed) null else lastImportResult,
                     onSubmit = { lines -> importResultDismissed = false; onImport(lines) },
                     onCancel = { sheet = SheetMode.Closed },
@@ -360,6 +378,9 @@ fun MailAliasesContent(
 @Composable
 private fun AliasSheet(
     editing: AliasView?,
+    // The page's create answer: an edit needs no domain (the row already has
+    // one), a create does.
+    createAnswer: Possibility,
     kindLabel: (AliasKind) -> String,
     parseCount: (String) -> UInt?,
     parseCountI64: (String) -> Long?,
@@ -495,6 +516,7 @@ private fun AliasSheet(
                     isDisposable -> "fauna.bridges.generate_disposable_alias"
                     else -> "fauna.bridges.create_account_alias"
                 },
+                enabled = editing != null || createAnswer.isPossible,
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
@@ -532,6 +554,8 @@ private fun AliasSheet(
  */
 @Composable
 private fun ImportSheet(
+    // The page's create answer: an import creates exact aliases too.
+    createAnswer: Possibility,
     lastImportResult: ImportResultView?,
     onSubmit: (List<String>) -> Unit,
     onCancel: () -> Unit,
@@ -561,7 +585,10 @@ private fun ImportSheet(
                 modifier = Modifier.fillMaxWidth().testTag(Ids.MAIL_ALIASES_IMPORT_TEXTAREA),
             )
             // The textarea and cancel are buffer and escape; only Import commits.
-            val importGate = faunaGate("fauna.bridges.import_account_aliases")
+            val importGate = faunaFormGate(
+                createAnswer,
+                faunaGate("fauna.bridges.import_account_aliases", enabled = createAnswer.isPossible),
+            )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = { onSubmit(text.split("\n")) },

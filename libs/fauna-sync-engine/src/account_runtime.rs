@@ -1906,6 +1906,16 @@ mod tests {
                 .copied()
                 .unwrap_or(0)
         }
+        /// Walks of every scope but `scope`, read under ONE lock. "Nothing
+        /// but this scope was listed" compared as `list_calls()` against
+        /// `list_calls_for(scope)` reads the two counters at two instants, so
+        /// a background pass walking `scope` between the reads looks like a
+        /// walk of another scope (the flake of 2026-11-18 in
+        /// `a_cap_refused_machine_removes_a_dead_devices_principal_carrying_row`).
+        fn list_calls_outside(&self, scope: &str) -> usize {
+            let s = self.state.lock().unwrap();
+            s.list_calls - s.list_calls_by_scope.get(scope).copied().unwrap_or(0)
+        }
         fn put_calls(&self) -> usize {
             self.state.lock().unwrap().put_calls
         }
@@ -6908,8 +6918,8 @@ mod tests {
             report.errors
         );
         assert_eq!(
-            fx.fake.list_calls(),
-            fx.fake.list_calls_for(ACCOUNT_STATE_FLEET_SCOPE),
+            fx.fake.list_calls_outside(ACCOUNT_STATE_FLEET_SCOPE),
+            0,
             "and nothing else was listed"
         );
         let targets =
@@ -6967,9 +6977,12 @@ mod tests {
         let c = AccountStoreRuntime::start(fx.params("c"))
             .await
             .expect("start c");
+        // c's start-up pass lists on its own task; the counts below are taken
+        // only once it has ended, so they measure the one pass this test runs.
+        c.settled().await;
         let c_id = fleet_id_of(&c).await;
         let fleet_lists = fx.fake.list_calls_for(ACCOUNT_STATE_FLEET_SCOPE);
-        let lists = fx.fake.list_calls();
+        let other_lists = fx.fake.list_calls_outside(ACCOUNT_STATE_FLEET_SCOPE);
         let delegable_lists = fx.fake.list_calls_for(ACCOUNT_STATE_SCOPE);
         let report = c.reconcile_now().await.expect("pass");
         assert_eq!(report.enrollment, Some(EnrollmentPass::DeviceLimitExceeded));
@@ -6978,9 +6991,11 @@ mod tests {
             fleet_pages > 0,
             "the fleet scope is listed over the app session"
         );
+        // One-lock reads: a fleet walk landing between two separate counter
+        // reads would read as a walk of another scope.
         assert_eq!(
-            fx.fake.list_calls(),
-            lists + fleet_pages,
+            fx.fake.list_calls_outside(ACCOUNT_STATE_FLEET_SCOPE),
+            other_lists,
             "and no other scope is listed"
         );
         assert_eq!(

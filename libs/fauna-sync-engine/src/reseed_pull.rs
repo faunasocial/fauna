@@ -265,10 +265,39 @@ pub async fn pull_back_from_destination(
     let leg = NativePullBackLeg(pull);
 
     let nest_key = NestBackupKey::derive(&input.owner_secret);
-    let outcome = fauna_client_backup::reseed::run_reseed(
+    // A lived-in segment set goes to the nest end of the recovery leg in the
+    // same run (`backup-destinations.md` § Third destination kind → *A lived-in
+    // segment set is completed by record in the same gesture*, rule (1)): the
+    // same destination connection and byte routes, the same target and grant.
+    // No notice record stands for a restore, so none is cleared; the leg's
+    // destination tombstones retire the copy's paths the target does not name,
+    // retained and reversible, before the re-enrollment below makes the
+    // destination back the restored nest up.
+    let device_hex = hex::encode(input.device_id);
+    let dest_records = crate::reseed::NestRecords::new(&*dest);
+    let target_records = crate::reseed::NestRecords::new(&*target);
+    let recovery = crate::reseed::NativeRecoveryLeg(crate::reseed::RecoveryDelivery::new(
+        crate::reseed::RecoveryDestination {
+            seam: &seam,
+            bytes: &fetcher,
+            records: &dest_records,
+            device_id: device_hex.clone(),
+        },
+        crate::reseed::RecoverySource {
+            bytes: &sink,
+            nest: &*target,
+            records: &target_records,
+            device_id: device_hex,
+        },
+        keypair.actor_id().0,
+        &nest_key,
+        &crate::reseed::NoAcceptedRegressionRecord,
+    ));
+    let outcome = fauna_client_backup::reseed::run_reseed_with_recovery(
         &fauna_client_backup::BackupClient::new(Arc::clone(&target)),
         nest_key.to_bytes().to_vec(),
         &leg,
+        Some(&recovery),
     )
     .await
     .map_err(|e| e.to_string())?;

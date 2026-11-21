@@ -49,6 +49,7 @@ from pathlib import Path
 import pytest
 
 from helpers.app_surface import require_surface
+from i18n.strings import S
 
 # Mirror the sys.path bootstrap of the sibling local-onboarding e2e files so the
 # shared `common` package (tests/common/) and the e2e-unified helpers resolve.
@@ -168,14 +169,14 @@ def test_onboarding_handle_check_tolerates_self_signed_local_nest(
     ob.run_handle_check(timeout=45)
 
     # ── Primary regression assertion: the self-signed floor was REACHED. ──
-    # Pre-fix (strict-WebPKI probe) → ConnectionRefused → `RegisteredNoNest`:
-    #   Continue DISABLED + the "register anyway" `handle-control-checkbox` shown.
+    # Pre-fix (strict-WebPKI probe) → ConnectionRefused → at this LAN target
+    #   the no-nest-running line, Continue disabled.
     # Post-fix (AcceptProvisional probe) → Reachable → `UnregisteredUnclaimedNest`:
-    #   Continue ENABLED, no control checkbox (`machine.rs` complete()).
+    #   the claim message, Continue enabled (`machine.rs` complete()).
     msg = app.get_text("handle-message-area").strip()
-    assert app.is_absent("handle-control-checkbox"), (
-        "handle-check fell into the RegisteredNoNest dead-end (the 'register "
-        "anyway' control checkbox is shown) — the strict-WebPKI probe failed the "
+    no_nest = S.onboarding.handle_check.outcome.local_no_nest(domain=_LAN_IP_HANDLE_HOST)
+    assert msg != no_nest, (
+        "handle-check found no nest — the strict-WebPKI probe failed the "
         f"self-signed TLS handshake. message-area={msg!r} error={app.error_text()!r}"
     )
     assert app.is_enabled("handle-entry-continue-button"), (

@@ -32,6 +32,18 @@ public final class MemberReviewVM {
     public var rows: [MemberReviewRow] = []
     public var loaded = false
     public var errorMessage: String?
+    /// Whether the conversations session Remove evicts through is up — read
+    /// after every roster read and again at each Remove press.
+    public private(set) var conversationsReady = false
+
+    /// `member-review-remove-button`'s answer: the shared
+    /// `member_review_remove_possibility` — blocked with
+    /// `settings.recovery_kit.review_remove_not_ready` until the conversations
+    /// session is up (`succession-propagation.md` § Propagation). Keep, a
+    /// ledger write alone, is not gated by it.
+    public var removeAnswer: Possibility {
+        memberReviewRemovePossibility(conversationsReady: conversationsReady)
+    }
 
     private var api: APIClient?
     /// Refreshes the SHARED roster cache (`FaunaClient.memberReviewRoster`)
@@ -75,6 +87,7 @@ public final class MemberReviewVM {
                 }
                 rows = built
                 loaded = true
+                conversationsReady = await api.memberReviewConversationsReady()
                 return
             } catch {
                 if attempt == Self.hydrateAttempts - 1 {
@@ -115,6 +128,7 @@ public final class MemberReviewVM {
         }
         if built != rows { rows = built }
         loaded = true
+        conversationsReady = await api.memberReviewConversationsReady()
     }
 
     /// Drop the previous account's roster at an identity change.
@@ -122,6 +136,7 @@ public final class MemberReviewVM {
         rows = []
         loaded = false
         errorMessage = nil
+        conversationsReady = false
     }
 
     /// Record **Keep** — closes every open item for `person` with no group
@@ -151,6 +166,10 @@ public final class MemberReviewVM {
     /// the call — there is no seat left to read a handle off afterward.
     public func remove(person: Data) async {
         guard let api else { return }
+        // The press asks the paint's answer again: no conversations session
+        // is said on `error-message`, never a bare `Removed` or a silent return.
+        conversationsReady = await api.memberReviewConversationsReady()
+        if refusePress(removeAnswer, errorMessage: &errorMessage) { return }
         let who = rows.first { $0.person == person }.map { renderLocalizedText($0.text.who) }
             ?? L.settings.recoveryKit.reviewUnknownPerson
         do {

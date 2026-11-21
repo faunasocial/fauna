@@ -838,7 +838,8 @@ pub struct PulledPath {
 /// Move one custody path off the destination's open routes onto the target
 /// **as it rests there**, a chunk at a time: the manifest by its hash, then
 /// each chunk the target lacks fetched by its store key, verified against it
-/// and pushed before the next is fetched, then the manifest last — so the
+/// and pushed before the next is fetched, then a paged root's pages, then the
+/// manifest last — so the
 /// target never holds a manifest naming bytes it does not have, and the app
 /// never holds more than one chunk body of the path at once
 /// (`message-segment-store.md`'s streaming rule; a multi-GB covered-folder
@@ -855,19 +856,17 @@ pub async fn pull_as_is<P: BlobPushSink + ?Sized>(
     path: &str,
 ) -> Result<PulledPath> {
     let manifest_hex = hex::encode(manifest_hash.digest());
-    let manifest_bytes = fetcher
-        .fetch_manifest(&manifest_hash)
+    // The shared keyless walk: the manifest checked against its address and,
+    // for a paged root, every page against what the root names
+    // (`file-sync.md` § Paged manifests → *One walk*).
+    let fauna_core::file_download::ManifestBlobs {
+        manifest_bytes,
+        manifest,
+        pages,
+        store_keys: keys,
+    } = fauna_core::file_download::fetch_manifest_blobs(fetcher, &manifest_hash)
         .await
         .with_context(|| format!("pull-back: fetching {path}'s manifest {manifest_hex}"))?;
-    anyhow::ensure!(
-        ContentHash::of_raw(&manifest_bytes) == manifest_hash,
-        "pull-back: manifest {manifest_hex} for {path} failed hash verification"
-    );
-    let manifest: fauna_core::chunk::ChunkManifest =
-        fauna_core::encoding::canonical_decode(&manifest_bytes).map_err(|e| {
-            anyhow::anyhow!("pull-back: manifest {manifest_hex} does not decode: {e}")
-        })?;
-    let keys = manifest.store_keys();
     let mut missing: std::collections::HashSet<ContentHash> = sink
         .missing_chunks(&keys)
         .await
@@ -904,6 +903,14 @@ pub async fn pull_as_is<P: BlobPushSink + ?Sized>(
             .await
             .with_context(|| format!("pull-back: uploading {path}'s chunk {key_hex}"))?;
         pulled.chunks_uploaded += 1;
+    }
+    // Chunks, then pages, then the root: the target's root door admits a root
+    // only once every page it names is at rest (`file-sync.md` § Paged
+    // manifests → *Transport and order*).
+    for (index, (_, page)) in pages.iter().enumerate() {
+        sink.put_manifest_page(page)
+            .await
+            .with_context(|| format!("pull-back: uploading {path}'s manifest page {index}"))?;
     }
     sink.put_manifest(&manifest_bytes)
         .await
@@ -1136,6 +1143,7 @@ mod tests {
             Ok(fauna_protocol::decode_strict(
                 &fauna_protocol::encode_canonical(&SyncChangeRecordReply {
                     seq: 0,
+                    prev_set_seq: None,
                     extra: Default::default(),
                 })?,
             )?)
@@ -1989,6 +1997,76 @@ mod tests {
             self.log.lock().unwrap().push("manifest".into());
             Ok(())
         }
+
+        async fn put_manifest_page(&self, bytes: &[u8]) -> Result<()> {
+            self.log.lock().unwrap().push("page".into());
+            self.held
+                .lock()
+                .unwrap()
+                .insert(ContentHash::of_raw(bytes), bytes.to_vec());
+            Ok(())
+        }
+    }
+
+    /// **A paged root moves with its pages** (`file-sync.md` § Paged
+    /// manifests → *Compatibility*): the pull walks the root's pages for its
+    /// store keys, pushes every chunk, then every page, then the root — the
+    /// order the target's root door admits — and lands every byte identical.
+    #[tokio::test]
+    async fn a_paged_root_is_pulled_back_with_its_pages_before_the_root() {
+        let bodies: Vec<Vec<u8>> = (0..40u8).map(|t| body(t, 32 + usize::from(t))).collect();
+        let keys: Vec<ContentHash> = bodies.iter().map(|b| ContentHash::of_raw(b)).collect();
+        let view = fauna_core::chunk::ChunkManifest {
+            file_hash: ContentHash::of_raw(&bodies.concat()),
+            total_size: bodies.iter().map(|b| b.len() as u64).sum(),
+            chunk_hashes: keys.clone(),
+            chunk_sizes: bodies.iter().map(|b| b.len() as u64).collect(),
+            stored_hashes: None,
+            sealed_hashes: None,
+            min_reader: None,
+            pages: None,
+        };
+        let rule = fauna_core::manifest_paging::PagingRule::with_thresholds(16, 4, 32, 3);
+        let (root, pages) = view.into_wire_parts_with(&rule, None).unwrap();
+        assert!(pages.len() > 1, "the small rule must page 40 chunks");
+        let root_hash = ContentHash::of_raw(&root);
+        let dest = Arc::new(Destination::default());
+        {
+            let mut blobs = dest.blobs.lock().unwrap();
+            blobs.insert(root_hash, root);
+            for page in &pages {
+                blobs.insert(ContentHash::of_raw(page), page.clone());
+            }
+            for (key, body) in keys.iter().zip(&bodies) {
+                blobs.insert(*key, body.clone());
+            }
+        }
+        let plane = Streamed {
+            dest,
+            log: Arc::new(Mutex::new(Vec::new())),
+            held: Mutex::new(HashMap::new()),
+        };
+
+        let pulled = pull_as_is(&plane, &plane, root_hash, "huge.img")
+            .await
+            .unwrap();
+
+        assert_eq!(pulled.chunks_uploaded, 40);
+        let log = plane.log.lock().unwrap().clone();
+        let tail: Vec<&str> = log[log.len() - pages.len() - 1..]
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let mut want = vec!["page"; pages.len()];
+        want.push("manifest");
+        assert_eq!(tail, want, "every chunk, then the pages, then the root");
+        let held = plane.held.lock().unwrap();
+        for (key, body) in keys.iter().zip(&bodies) {
+            assert_eq!(held.get(key), Some(body));
+        }
+        for page in &pages {
+            assert_eq!(held.get(&ContentHash::of_raw(page)), Some(page));
+        }
     }
 
     /// **The pull streams chunk by chunk** (`message-segment-store.md`: a
@@ -2016,6 +2094,7 @@ mod tests {
             stored_hashes: None,
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
         let manifest_bytes = fauna_core::encoding::canonical_encode(&manifest).unwrap();
         let manifest_hash = ContentHash::of_raw(&manifest_bytes);

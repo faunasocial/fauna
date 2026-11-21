@@ -26,6 +26,7 @@ use crate::pages::Page;
 pub(super) fn aliases_elements(state: &AdminState) -> Vec<Element> {
     let snap = state.forwarders_snapshot.as_ref();
     let local_domains: Vec<String> = snap.map(|s| s.local_domains.clone()).unwrap_or_default();
+    let local_domains_all = local_domains.clone();
 
     let mut els = vec![
         Element::label(ids::ADMIN_ALIASES_HEADING, t::aliases_page::TITLE),
@@ -91,6 +92,21 @@ pub(super) fn aliases_elements(state: &AdminState) -> Vec<Element> {
         true,
         Gesture::Admin(Action::CreateForwarder),
     ));
+    // The one step that unblocks the form (`admin.md` § 4, *A forwarder needs
+    // a hosted domain*; `ui/README.md` § Offer only what is possible, rule 3):
+    // once the read resolved with no hosted domain, the jump to the DNS page
+    // where one is added. The form's own reason names it.
+    if snap.is_some()
+        && !fauna_client_mail_settings::forwarders::forwarder_form_possibility(&local_domains_all)
+            .is_possible()
+    {
+        els.push(Element::gesture_button(
+            ids::ADMIN_ALIASES_FORWARDER_ADD_DOMAINS_STEP,
+            t::aliases_page::OPEN_DOMAINS,
+            true,
+            Gesture::Admin(Action::Open(super::AdminPage::Dns)),
+        ));
+    }
 
     // The indexed forwarder rows — one address/target/delete triple per forwarder,
     // in registration (= visual) order. A delete carries the row's own hex alias id
@@ -223,6 +239,114 @@ mod tests {
             .find(|e| e.id == "admin-aliases-forwarder-add-domain-select")
             .expect("domain picker painted");
         assert_eq!(picker.text, "acme.test", "picker shows the picked domain");
+    }
+
+    /// A nest hosting `domains` and no forwarder — enough to resolve the read.
+    struct DomainsNest(Vec<String>);
+
+    #[async_trait::async_trait]
+    impl fauna_client_mail_settings::forwarders::ForwarderNest for DomainsNest {
+        async fn list_forwarders(
+            &self,
+        ) -> Result<
+            Vec<fauna_protocol::bridge_routing::AliasRow>,
+            fauna_client_mail_settings::NestError,
+        > {
+            Ok(vec![])
+        }
+        async fn list_local_domains(
+            &self,
+        ) -> Result<Vec<String>, fauna_client_mail_settings::NestError> {
+            Ok(self.0.clone())
+        }
+        async fn create_forwarder(
+            &self,
+            _: String,
+            _: String,
+            _: String,
+        ) -> Result<(), fauna_client_mail_settings::NestError> {
+            panic!("a create the page could not offer reached the nest")
+        }
+        async fn delete_forwarder(
+            &self,
+            _: Vec<u8>,
+        ) -> Result<(), fauna_client_mail_settings::NestError> {
+            Ok(())
+        }
+    }
+
+    fn app_with_domains(domains: &[&str]) -> crate::app::App {
+        let machine = fauna_client_mail_settings::forwarders::ForwarderMachine::new(
+            std::sync::Arc::new(DomainsNest(domains.iter().map(|d| d.to_string()).collect())),
+        );
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(machine.hydrate())
+            .unwrap();
+        let mut app = crate::app::tests::test_app();
+        app.admin.sub = super::super::AdminPage::Aliases;
+        app.admin.forwarders_snapshot = Some(machine.snapshot());
+        app.admin.forwarders = Some(std::sync::Arc::new(machine));
+        app.admin.forwarder_add_domain = domains.first().map(|d| d.to_string()).unwrap_or_default();
+        app
+    }
+
+    fn answer_of(app: &crate::app::App, id: &str) -> Option<fauna_core::possibility::Possibility> {
+        super::super::elements(app)
+            .into_iter()
+            .find(|e| e.id == id)
+            .and_then(|e| e.possibility)
+    }
+
+    /// `admin.md` § 4, *A forwarder needs a hosted domain*: with none hosted
+    /// the submit (and the form) is blocked naming DNS, the jump there is
+    /// offered, and a press never sends an empty `local_domain`.
+    #[test]
+    fn no_hosted_domain_blocks_the_form_and_offers_dns() {
+        use fauna_client_mail_settings::forwarders::NO_HOSTED_DOMAIN;
+        let mut app = app_with_domains(&[]);
+        for id in [
+            ids::ADMIN_ALIASES_FORWARDER_ADD_SUBMIT_BUTTON,
+            ids::ADMIN_ALIASES_FORWARDER_ADD_DOMAIN_SELECT,
+            ids::ADMIN_ALIASES_FORWARDER_ADD_PATTERN_INPUT,
+        ] {
+            let answer = answer_of(&app, id).unwrap_or_else(|| panic!("{id} answered"));
+            assert_eq!(
+                answer.reason().map(|r| r.key.as_str()),
+                Some(NO_HOSTED_DOMAIN),
+                "{id}"
+            );
+        }
+        let step = super::super::elements(&app)
+            .into_iter()
+            .find(|e| e.id == ids::ADMIN_ALIASES_FORWARDER_ADD_DOMAINS_STEP)
+            .expect("the Domains step is offered");
+        assert!(matches!(
+            step.gesture(),
+            Some(Gesture::Admin(Action::Open(super::super::AdminPage::Dns)))
+        ));
+        // The press asks again and refuses on `error-message`, sending nothing.
+        assert!(super::super::apply_local(&mut app, Action::CreateForwarder).is_none());
+        assert!(app.errors.contains_key(&Page::Admin));
+    }
+
+    #[test]
+    fn a_hosted_domain_unblocks_the_form_and_drops_the_step() {
+        let mut app = app_with_domains(&["acme.test"]);
+        // A complete draft, so the submit's draft half answers too
+        // (`ForwarderMachine::create_draft_possibility`).
+        app.admin.forwarder_add_pattern = "sales".to_string();
+        app.admin.forwarder_add_target = "team@example.org".to_string();
+        assert!(
+            answer_of(&app, ids::ADMIN_ALIASES_FORWARDER_ADD_SUBMIT_BUTTON)
+                .expect("submit answered")
+                .is_possible()
+        );
+        assert!(
+            super::super::elements(&app)
+                .iter()
+                .all(|e| e.id != ids::ADMIN_ALIASES_FORWARDER_ADD_DOMAINS_STEP)
+        );
     }
 
     /// A snapshot carrying an error paints the page-scoped `admin-aliases-action-error`

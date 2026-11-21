@@ -10042,6 +10042,33 @@ fn run_deliverability_diagnostics_handler() -> RpcHandler {
 /// nest itself rather than an admin.
 const SCHEDULED_DIAGNOSTICS_RAN_BY: [u8; 32] = [0u8; 32];
 
+/// The first diagnostics run on a box that has none, started in the background
+/// by the admin's mail enable (`set_mail_enabled(true)`). A fresh box otherwise
+/// waits for its first daily pass — up to a day — before the readout can say
+/// anything about its records or its outbound port 25, and a fresh cloud box is
+/// exactly the one whose provider most often blocks that port
+/// (`mail-deliverability.md` § Symptom diagnostics). Recorded as the enabling
+/// admin's run, so it never covers the daily pass's schedule. Does nothing
+/// once any run exists: a box that already has a reading keeps its own
+/// cadence, and a later run never races an earlier one for "latest".
+pub(crate) async fn run_first_diagnostics_if_none(state: Arc<AppState>, ran_by: [u8; 32]) {
+    match state.db.latest_diagnostic_run().await {
+        Ok(None) => {
+            if let Err(e) = run_and_record_diagnostics(&state, &ran_by).await {
+                tracing::warn!(
+                    target: "mail_deliverability",
+                    "first diagnostics run at mail enable failed: {e:?}"
+                );
+            }
+        }
+        Ok(Some(_)) => {}
+        Err(e) => tracing::warn!(
+            target: "mail_deliverability",
+            "first diagnostics run at mail enable: reading the latest run failed: {e:#}"
+        ),
+    }
+}
+
 /// Run the deliverability diagnostics and persist the audit row — the one path
 /// both the admin's `run_deliverability_diagnostics` and the 24 h self-check
 /// tick take, so the mail health readout's `records_failing` input always has a

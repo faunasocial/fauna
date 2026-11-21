@@ -367,6 +367,11 @@ impl RailBackend for BridgedBackend {
     /// *Delete for everyone* that reaches no one; the local remove, derived
     /// from the rail and never declared, is offered in its place
     /// (`bridged-adapter.md` § Removing bridged rows, rule 1).
+    ///
+    /// The declared `can_leave_room` is masked to `false` too: the bridged
+    /// rail has no leave door (`RailBackend::leave_room` stays
+    /// `NotSupported`), so a declared `true` would paint a live *Leave room*
+    /// that fails.
     fn capabilities(&self, thread: &ThreadDetail) -> ThreadCapabilities {
         let base = derive_capabilities(Rail::Bridged, thread.flavor.clone());
         match bridge_id_of(&thread.participants).and_then(|id| self.identity(id)) {
@@ -375,6 +380,7 @@ impl RailBackend for BridgedBackend {
                 can_send: base.can_send,
                 supports_local_remove: base.supports_local_remove,
                 supports_message_delete: false,
+                can_leave_room: false,
                 ..identity.capabilities
             },
             // No identity is the send's own refusal (`NotSupported`, below):
@@ -452,9 +458,10 @@ impl RailBackend for BridgedBackend {
     }
 
     /// Asks the nest, which matches `raw` against every bridge grammar serving
-    /// the account. A transport failure is `NotFound`, never `Error`: a bridge
-    /// that cannot be asked has not recognised the address as its own, and
-    /// claiming it would stop the probe chain on a guess.
+    /// the account (`conversation.address.admit` — no room, no far lookup). A
+    /// transport failure is `NotFound`, never `Error`: a bridge that cannot be
+    /// asked has not recognised the address as its own, and claiming it would
+    /// stop the probe chain on a guess.
     async fn resolve_address(&self, raw: &str) -> ResolveResult {
         match self.sink.resolve(raw.to_string()).await {
             Ok(Some(resolved)) => ResolveResult::Resolved(TypedAddress::Bridged {
@@ -466,6 +473,30 @@ impl RailBackend for BridgedBackend {
                 tracing::debug!(error = %e, "bridged resolve unavailable; not claiming the address");
                 ResolveResult::NotFound
             }
+        }
+    }
+
+    /// Opens the chip's room on its bridge (`conversation.rooms.open`, through
+    /// the sink) and answers the stable far id the nest keyed it on, so the
+    /// thread opened from the picker, its Sent copy and the peer's replies
+    /// are one thread. A spelling the far network does not know is refused
+    /// with `conversations.unified.recipient_resolve_not_found`
+    /// (`ui/conversations.md` § Errors & edge cases → *The picker tells the
+    /// truth*, rule 4 (b)).
+    async fn open_recipient(&self, address: TypedAddress) -> Result<TypedAddress, BackendError> {
+        let TypedAddress::Bridged { bridge_id, address } = address else {
+            return Ok(address);
+        };
+        match self.sink.open(bridge_id, address).await {
+            Ok(Some(opened)) => Ok(TypedAddress::Bridged {
+                bridge_id: opened.bridge_id,
+                address: opened.address,
+            }),
+            Ok(None) => Err(BackendError::Refusal(
+                fauna_i18n::strings::conversations::unified::RECIPIENT_RESOLVE_NOT_FOUND
+                    .to_string(),
+            )),
+            Err(e) => Err(BackendError::transport_from_seam(e)),
         }
     }
 
@@ -700,6 +731,11 @@ mod tests {
         rooms_removed: Mutex<Vec<BridgedRoomRef>>,
         /// The nest's refusal, when set: every remove answers it.
         refusal: Mutex<Option<String>>,
+        /// Every `rooms.open` asked of the nest, `(bridge_id, address)`.
+        opened: Mutex<Vec<(String, String)>>,
+        /// What `open` answers: the far id per typed spelling; a spelling
+        /// absent here is unknown to the far network (`Ok(None)`).
+        far_ids: Mutex<std::collections::HashMap<String, String>>,
     }
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -710,6 +746,26 @@ mod tests {
                 bridge_id: "matrix".into(),
                 address: raw,
             }))
+        }
+
+        async fn open(
+            &self,
+            bridge_id: String,
+            address: String,
+        ) -> Result<Option<BridgedResolved>, String> {
+            self.opened
+                .lock()
+                .unwrap()
+                .push((bridge_id.clone(), address.clone()));
+            Ok(self
+                .far_ids
+                .lock()
+                .unwrap()
+                .get(&address)
+                .map(|far| BridgedResolved {
+                    bridge_id,
+                    address: far.clone(),
+                }))
         }
 
         async fn send(&self, outbound: BridgedOutbound) -> Result<BridgedSent, String> {
@@ -822,6 +878,9 @@ mod tests {
                 // far-side delete is masked until the family carries one.
                 supports_local_remove: true,
                 supports_message_delete: false,
+                // The bridged rail has no leave door (`RailBackend::leave_room`
+                // is `NotSupported`), so a declared `true` is masked.
+                can_leave_room: false,
                 ..declared()
             }
         );
@@ -941,6 +1000,110 @@ mod tests {
                 .message
                 .is_own
         );
+    }
+
+    /// A new thread typed to `spelling` on the matrix bridge, with a body,
+    /// over a manager carrying `sink`.
+    fn compose_to(
+        spelling: &str,
+        sink: Arc<FakeSink>,
+    ) -> (Arc<ConversationsManager>, Arc<BridgedBackend>) {
+        let backend = Arc::new(BridgedBackend::new(sink));
+        backend.set_identities(vec![matrix()]);
+        let manager = ConversationsManager::new();
+        manager.register_backend(backend.clone());
+        manager.start_new_conversation();
+        manager.accept_new_thread_chip(TypedAddress::unresolved_bridged("matrix", spelling));
+        manager.set_new_thread_body("hi".into());
+        (manager, backend)
+    }
+
+    /// `conversations.md` § *The picker tells the truth*, rule 4 (b): the
+    /// keystroke probe never opens the room; Send does, on the chip's bridge,
+    /// and the thread is keyed on the far id the nest answered — so the Sent
+    /// copy's echo, which names that id, lands in the same thread.
+    #[tokio::test]
+    async fn a_new_thread_opens_its_room_at_send_and_keys_on_the_far_id() {
+        let sink = Arc::new(FakeSink::default());
+        sink.far_ids
+            .lock()
+            .unwrap()
+            .insert("alice.example".into(), "did:plc:alice".into());
+        let (manager, backend) = compose_to("alice.example", sink.clone());
+        assert!(matches!(
+            backend.resolve_address("@alice:exam").await,
+            ResolveResult::Resolved(_)
+        ));
+        assert!(
+            sink.opened.lock().unwrap().is_empty(),
+            "the probe opened a room"
+        );
+
+        let id = manager.send_new_thread().await.unwrap().expect("a thread");
+        assert_eq!(
+            *sink.opened.lock().unwrap(),
+            vec![("matrix".to_string(), "alice.example".to_string())]
+        );
+        let far = TypedAddress::unresolved_bridged("matrix", "did:plc:alice");
+        let detail = manager.thread_detail(id.clone()).unwrap();
+        assert_eq!(detail.participants, vec![far]);
+        assert_eq!(
+            sink.sent.lock().unwrap()[0].peers,
+            vec!["did:plc:alice".to_string()]
+        );
+
+        // The Sent copy's echo names the far id: one thread, not two.
+        let echo = BridgedRecord {
+            id: 41,
+            bridge_id: "matrix".into(),
+            sender: "@me:example.org".into(),
+            recipients: vec!["did:plc:alice".into()],
+            body: "hi".into(),
+            outbound: true,
+            timestamp_ms: 1,
+            undelivered: false,
+            removed: false,
+        };
+        let source = FakeSource {
+            rooms: Mutex::new(vec![BridgedRoomRecord {
+                participants: vec!["did:plc:alice".into()],
+                ..room("did:plc:alice", None)
+            }]),
+            rows: vec![echo],
+        };
+        let (mut after, mut seen) = (0i64, HashSet::new());
+        poll_inbound_bridged(&source, &backend, &manager, &mut after, &mut seen, 0)
+            .await
+            .unwrap();
+        let threads = manager.snapshot().threads;
+        assert_eq!(threads.len(), 1, "{threads:?}");
+        assert_eq!(threads[0].thread_id, id);
+    }
+
+    /// Rule 4 (b): a spelling the far network does not know sends nothing,
+    /// makes no thread, keeps the chip and stamps the draft `Failed` with
+    /// `recipient_resolve_not_found`.
+    #[tokio::test]
+    async fn a_refused_open_sends_nothing_and_keeps_the_chip() {
+        let sink = Arc::new(FakeSink::default());
+        let (manager, _backend) = compose_to("nobody.example", sink.clone());
+        let err = manager.send_new_thread().await.unwrap_err();
+        assert!(matches!(err, BackendError::Refusal(_)), "{err:?}");
+        assert!(sink.sent.lock().unwrap().is_empty());
+        let snapshot = manager.snapshot();
+        assert!(snapshot.threads.is_empty(), "{:?}", snapshot.threads);
+        let compose = snapshot.new_thread_compose.expect("the draft stays");
+        assert_eq!(
+            compose.recipient_picker.unwrap().chips,
+            vec![TypedAddress::unresolved_bridged("matrix", "nobody.example")]
+        );
+        match compose.send_state {
+            crate::compose::SendState::Failed { reason } => assert_eq!(
+                reason.args.get("message").map(String::as_str),
+                Some(fauna_i18n::strings::conversations::unified::RECIPIENT_RESOLVE_NOT_FOUND)
+            ),
+            other => panic!("not failed: {other:?}"),
+        }
     }
 
     #[tokio::test]

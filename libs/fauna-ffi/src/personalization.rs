@@ -104,6 +104,74 @@ impl From<TrainedTopicRow> for FfiTrainedTopicRow {
     }
 }
 
+// The trained-topic forms' answers (`docs/goal/ui/settings.md` § Errors &
+// edge cases, *Personal form submits paint from their draft*): each forwards
+// `fauna_client_personalization::drafts` untouched, painted on its button and
+// asked again by the press.
+
+/// `personalization-trained-factor-create-button` (create and save-name):
+/// [`fauna_client_personalization::drafts::factor_name_possibility`].
+#[uniffi::export]
+pub fn trained_factor_name_possibility(
+    name: String,
+    busy: bool,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_personalization::drafts::factor_name_possibility(&name, busy)
+}
+
+/// `personalization-trained-factor-publish-button` on one row:
+/// [`fauna_client_personalization::drafts::publish_open_possibility`] — absent
+/// with no addressable model, blocked while the live feed manager is not up,
+/// so no sheet opens onto nothing.
+#[uniffi::export]
+pub fn trained_factor_publish_open_possibility(
+    has_factor_key: bool,
+    manager_ready: bool,
+    busy: bool,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_personalization::drafts::publish_open_possibility(
+        has_factor_key,
+        manager_ready,
+        busy,
+    )
+}
+
+/// `personalization-trained-factor-publish-submit-button`:
+/// [`fauna_client_personalization::drafts::publish_submit_possibility`].
+#[uniffi::export]
+pub fn trained_factor_publish_submit_possibility(
+    name: String,
+    any_kept: bool,
+    busy: bool,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_personalization::drafts::publish_submit_possibility(&name, any_kept, busy)
+}
+
+// The engagement-cue controls' answers (`docs/goal/behavior/engagement-cues.md`
+// § Layer B): each forwards `fauna_client_personalization::engagement`
+// untouched, painted on its control and asked again by the press.
+
+/// `personalization-share-signals-toggle`:
+/// [`fauna_client_personalization::engagement::share_signals_possibility`] —
+/// blocked while the live feed manager is not up, and until the
+/// `signal_share.status` read resolved (an unread opt-in is never flipped on a
+/// guess).
+#[uniffi::export]
+pub fn share_signals_possibility(
+    manager_ready: bool,
+    read: fauna_core::possibility::ReadState,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_personalization::engagement::share_signals_possibility(manager_ready, read)
+}
+
+/// `personalization-clear-engagement-data-button`:
+/// [`fauna_client_personalization::engagement::clear_engagement_possibility`] —
+/// blocked while the live feed manager is not up.
+#[uniffi::export]
+pub fn clear_engagement_possibility(manager_ready: bool) -> fauna_core::possibility::Possibility {
+    fauna_client_personalization::engagement::clear_engagement_possibility(manager_ready)
+}
+
 fn service(nest: &Arc<FfiNestClient>) -> TrainedTopics<Arc<fauna_client::NestClient>> {
     TrainedTopics::new(nest.nest_arc())
 }

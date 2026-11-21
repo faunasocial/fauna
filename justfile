@@ -273,7 +273,9 @@ swiftpm_debug := "-debug-info-format none -Xlinker -S -Xlinker -exported_symbol 
 slot_build_wide := if path_exists(justfile_directory() / "scripts/build-slot.py") == "true" { py + " scripts/build-slot.py --pool build --cores 4-8 --" } else { "" }
 slot_build_ffi := if path_exists(justfile_directory() / "scripts/build-slot.py") == "true" { py + " scripts/build-slot.py --pool build --disk-gb 16 --" } else { "" }
 slot_build_swift := if path_exists(justfile_directory() / "scripts/build-slot.py") == "true" { py + " scripts/build-slot.py --pool build --disk-gb 10 --" } else { "" }
-slot_build_swift_test := if path_exists(justfile_directory() / "scripts/build-slot.py") == "true" { py + " scripts/build-slot.py --pool build --disk-gb 8 --" } else { "" }
+slot_build_swift_test := if path_exists(justfile_directory() / "scripts/build-slot.py") == "true" { py + " scripts/build-slot.py --pool build --disk-gb 2 --" } else { "" }
+slot_build_ffi_check := if path_exists(justfile_directory() / "scripts/build-slot.py") == "true" { py + " scripts/build-slot.py --pool build --disk-gb 22 --" } else { "" }
+slot_build_prev_ios := if path_exists(justfile_directory() / "scripts/build-slot.py") == "true" { py + " scripts/build-slot.py --pool build --disk-gb 24 --" } else { "" }
 slot_build_crate := if path_exists(justfile_directory() / "scripts/build-slot.py") == "true" { py + " scripts/build-slot.py --pool build --disk-gb 5 --" } else { "" }
 slot_tier_1 :=if path_exists(justfile_directory() / "scripts/build-slot.py") == "true" { py + " scripts/build-slot.py --pool tier_1 --" } else { "" }
 slot_focus :=if path_exists(justfile_directory() / "scripts/build-slot.py") == "true" { if os() == "linux" { "" } else { py + " scripts/build-slot.py --pool focus --" } } else { "" }
@@ -1578,6 +1580,8 @@ docker-build: i18n-generate providers-generate
 
 # Run nest Docker container locally (https://localhost:3443, web app at /app/).
 # The nest's own :3000 binds container loopback; the SNI router's :443 fronts it.
+# Joins no core fence: the recipe ships in the public repository, where a user
+# runs their own nest and there is no fence (core-bound.md § Per-core tokens).
 docker-run: docker-build
     -docker rm -f fauna-nest-local 2>/dev/null
     docker run -d --name fauna-nest-local -p 3443:443 -p 8080:8080 -v fauna-nest-local-data:/data -e FAUNA_PORT=3000 fauna-nest:local
@@ -2050,6 +2054,10 @@ e2e-prev-build *ARGS:
         # must not run inside an outer `--pool build` wrap (build-slot.py refuses it, the
         # AB-BA deadlock of 2026-09-26). prev_build.py slots its own cargo steps instead.
         {{py}} tests/e2e-unified/helpers/prev_build.py --build {{ARGS}}
+    elif [[ " {{ARGS}} " == *" --client ios "* ]]; then
+        # The iOS leg writes 22.8 G (2026-11-16), over the 15 G a generic grant is charged:
+        # its own declaration (mac-disk-budget.md § Reserving disk by what a grant writes).
+        {{slot_build_prev_ios}} {{py}} tests/e2e-unified/helpers/prev_build.py --build {{ARGS}}
     else
         {{slot_build}} {{py}} tests/e2e-unified/helpers/prev_build.py --build {{ARGS}}
     fi
@@ -2443,7 +2451,8 @@ nest-test-hooks *ARGS:
         --test index_survives_nest_restart \
         --test owed_web_render_drained_at_boot \
         --test echo_round_trip \
-        --test conformance_custody_hosting_pump_client {{ARGS}}
+        --test conformance_custody_hosting_pump_client \
+        --test conformance_paged_manifest_two_engines {{ARGS}}
 
 # Clippy-check the off-by-default cargo features that a session's `cargo build` /
 # `cargo clippy --workspace` never compile, so they rot silently on `main`: `nostr`
@@ -2794,6 +2803,11 @@ workspace-clippy-check:
         --exclude fauna-wasm-atproto-settings \
         --exclude fauna-wasm-launch \
         -- -D warnings
+    # fauna-linux's `e2e-agent` configuration (the one the e2e suite builds) is
+    # not in the default-feature pass above, so code gated on that feature —
+    # and its test targets — was linted by nothing until row 6443.
+    {{slot_build}} cargo clippy --locked -p fauna-linux --all-targets \
+        --features e2e-agent -- -D warnings
 
 # CHECK-tier, SCOPE-gated gate (merge-gate-check.md § Merge-gate check ->
 # "Fourteenth gate") — RUNS the in-crate test suite of every natively-buildable
@@ -3241,6 +3255,7 @@ nest-testhooks-check:
     cargo test --locked -p fauna-nest --test owed_web_render_drained_at_boot --features test-hooks
     cargo test --locked -p fauna-nest --test echo_round_trip --features test-hooks
     cargo test --locked -p fauna-nest --test conformance_custody_hosting_pump_client --features test-hooks
+    cargo test --locked -p fauna-nest --test conformance_paged_manifest_two_engines --features test-hooks
 
 # CHECK-tier gate (merge-gate-check.md § Merge-gate check) — RUNS the whole of
 # `bins/fauna-nest/tests/`: the 277 integration targets `nest-lib-test-check`
@@ -3619,6 +3634,19 @@ e2e-pebble-dns01 *ARGS:
 e2e-pebble-http01 *ARGS:
     {{slot_build}} cargo test -p fauna-acme-http01 --test pebble_http01 -- --ignored {{ARGS}}
 
+# The shared certificate-test venue on the Linux dev VM (docs/goal/architecture/e2e-gated-seeds.md
+# § The ACME directory seed → *The shared venue*): one standing pebble + fake name
+# server every machine's `acme_pebble`-marked walks order from, published on
+# that VM's loopback and its private-network address only, ports 14400/14453 (off
+# the 14000 the two recipes above bind). `ensure [--quiet]` creates it, starts
+# it, or recreates it when the tree's hash label moved — quiet and fast when
+# current; the VM's SessionStart hook and the harness's reach check both call it.
+# `status` reports both containers and the reach of both addresses (exit 1 when
+# unhealthy). `down` removes it — for the session that changes the venue, never
+# a routine step. That VM only (the minting needs the e2e venv's `cryptography`).
+acme-venue VERB="status" *ARGS:
+    /home/user/.venvs/fauna/bin/python tests/e2e-unified/helpers/acme_venue.py {{VERB}} {{ARGS}}
+
 # Build Android debug APK (+ androidTest APK for instrumented tests)
 #
 # The Gradle step is freshness-gated OUTSIDE the build slot (build-system.md §
@@ -3639,7 +3667,7 @@ e2e-pebble-http01 *ARGS:
 # this recipe's own output/cache, never a build input.
 #
 # Depends on `android-ffi-test`, NOT `android-ffi`: the debug variant is what
-# the e2e harness drives, and its `src/debug` TestAgent calls the `*ForTest`
+# the e2e harness drives, and its `src/agent` TestAgent calls the `*ForTest`
 # UniFFI seams, which exist only in the test-flavored bindings (testing.md
 # § convention 15 — see `_android-ffi-flavor`).
 android-debug: android-ffi-test i18n-generate providers-generate
@@ -3652,6 +3680,25 @@ android-debug: android-ffi-test i18n-generate providers-generate
         --source apps/fauna-android \
         --exclude '*/build/*' --exclude '*/.gradle/*' \
         -- {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android assembleDebug assembleDebugAndroidTest
+
+# The drivable Fauna Kids build for `--app android-kids` (feature-catalog.md
+# § Cell semantics): the `kidsDebug` build type — `debug` under the kids
+# identity, `BuildConfig.KIDS = true`, the kids shell twin and the e2e agent,
+# over the `kids-safe,kids-floor,test-helpers` FFI (`android-ffi-kids-test`).
+# Never shipped: `android-kids` builds the store artifact, and
+# `android-kids-check` fences that one. `-PfaunaTestBuildType=kidsDebug` points
+# the instrumentation APK (the harness bridge) at this build type, which AGP
+# builds an androidTest APK for only when it is the `testBuildType`.
+android-kids-debug: android-ffi-kids-test i18n-generate providers-generate
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{py}} scripts/build-if-stale.py --label android-kids-debug \
+        --stamp apps/fauna-android/.gradle-kids-debug.stamp \
+        --target apps/fauna-android/app/build/outputs/apk/kidsDebug/app-kidsDebug.apk \
+        --target apps/fauna-android/app/build/outputs/apk/androidTest/kidsDebug/app-kidsDebug-androidTest.apk \
+        --source apps/fauna-android \
+        --exclude '*/build/*' --exclude '*/.gradle/*' \
+        -- {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android -PfaunaTestBuildType=kidsDebug assembleKidsDebug assembleKidsDebugAndroidTest
 
 # The out-of-process store driver: a self-instrumenting UiAutomator test APK
 # that drives a Play-delivered install of the app through UiAutomation alone
@@ -3852,7 +3899,7 @@ android-release: android-ffi i18n-generate providers-generate
 #
 # The strip check afterwards is convention 15's release-artifact half (testing.md
 # § Cross-app e2e conventions point 15) applied to android's shipping artifact:
-# the real `TestAgent` lives in `src/debug` and the shipping flavors compile the
+# the real `TestAgent` lives in `src/agent` (taken by `debug` and `kidsDebug` only) and the shipping flavors compile the
 # inert `src/noAgent` twin instead, so the bridge poll loop's own strings must be
 # absent from the bundle's dex. It greps the DEX, not the `.aab`: dex string
 # constants are deflate-compressed inside the archive, and a `strings` over the
@@ -3925,7 +3972,7 @@ _android-bundle variant:
         fi
     done
     if [ "$rc" -ne 0 ]; then
-        echo "  the src/debug TestAgent reached a shipping flavor; see testing.md convention 15" >&2
+        echo "  the src/agent TestAgent reached a shipping flavor; see testing.md convention 15" >&2
         exit 1
     fi
     echo "android-bundle: automation surface absent from the $VARIANT dex (4 markers checked)"
@@ -4083,7 +4130,7 @@ android-ffi profile="release": i18n-generate providers-generate
 # injection seams (`OnboardingMachine::set_*_for_test` / `call_machine_method`,
 # `ConversationsManager::install_mock_backends_for_test` / `inject_inbound_for_test`,
 # `LaunchMachine::set_phase_for_test`, …) and exports them over UniFFI. Consumed
-# by `android-debug`, whose `src/debug` TestAgent calls them.
+# by `android-debug`, whose `src/agent` TestAgent calls them.
 android-ffi-test: i18n-generate providers-generate
     @just _android-ffi-flavor debug test-helpers
 
@@ -4120,11 +4167,21 @@ android-ffi-store-no-payments profile="release": i18n-generate providers-generat
 # carries no feed, search, bridge, web-publishing, monetization or catalog
 # export at all; `kids-floor` compiles the four guardian categories at `block`
 # into every render face. Stages into `src/kids/`, the `kids` build type's own
-# source set, beside the hand-written twin under `src/kids/java/com/fauna/app/`
-# (which the bindgen's wipe never touches — it clears only `uniffi/` and
-# `com/fauna/ffi/`).
+# source set; the hand-written twin beside it lives in `src/kidsTwin/`, which
+# `kids` and the drivable `kidsDebug` both take.
 android-ffi-kids profile="release": i18n-generate providers-generate
     @just _android-ffi-flavor kids "kids-safe,kids-floor" all "{{profile}}"
+
+# The `--app android-kids` e2e's FFI — the kids flavor PLUS `test-helpers`
+# (feature-catalog.md § Cell semantics: the `android-kids` column is the kids
+# build product on android's venue). The android twin of
+# `apple-ffi-kids-test-sim`. Stages into `src/kidsDebug/`, the drivable
+# `kidsDebug` build type's own source set, whose agent (`src/agent/`) calls the
+# seams. A TEST artifact only: no shipping recipe takes it, and `android-kids`
+# keeps restaging the production kids flavor into `src/kids/`, the set
+# `android-kids-check` fences.
+android-ffi-kids-test: i18n-generate providers-generate
+    @just _android-ffi-flavor kidsDebug "kids-safe,kids-floor,test-helpers"
 
 # Shared implementation of the two flavors above. `buildtype` is a Gradle
 # buildType name (`release` | `debug`) AND the source-set the artifacts stage
@@ -4211,6 +4268,11 @@ _android-ffi-flavor buildtype features abis="all" profile="release":
     # `kids-safe` build without the floor is not a flavor anything ships.
     elif [ "$FEATURES" = "kids-safe,kids-floor" ]; then
         FEATURE_FLAGS="--no-default-features --features kids-safe,kids-floor,file-provider-host"
+    # The kids flavor plus the e2e seams — `android-ffi-kids-test`, the drivable
+    # `kidsDebug` build type's bindings. A TEST flavor: staged only under
+    # `src/kidsDebug/`, never into the shipped `kids` set.
+    elif [ "$FEATURES" = "kids-safe,kids-floor,test-helpers" ]; then
+        FEATURE_FLAGS="--no-default-features --features kids-safe,kids-floor,test-helpers,file-provider-host"
     elif [ -z "$FEATURES" ]; then
         FEATURE_FLAGS="--features file-provider-host"
     else
@@ -4460,7 +4522,7 @@ _android-ffi-bindgen target_dir stage_java stage_jni abis="all" profile_dir="rel
       *)
         if [ "$SEAMS" -eq 0 ]; then
             echo "ERROR: test-flavored Android bindings export NO e2e seams — the e2e" >&2
-            echo "       TestAgent (src/debug) will not compile. Did 'test-helpers'" >&2
+            echo "       TestAgent (src/agent) will not compile. Did 'test-helpers'" >&2
             echo "       drop off the android-ffi-test feature list?" >&2
             exit 1
         fi
@@ -4520,8 +4582,21 @@ _android-ffi-bindgen target_dir stage_java stage_jni abis="all" profile_dir="rel
       # is exactly release's, so it differs from `debug` by `test-helpers`
       # ALONE and takes the same sibling as release.
       */src/foss/*)      FLAVOR_FLAG=--production-tree; SIBLING="${STAGE_JAVA%/foss/java}/debug/java";    SIBLING_REFRESH="just android-ffi-test" ;;
+      # `kidsDebug` (`android-ffi-kids-test`, the drivable `--app android-kids`
+      # build) is a PARTIAL test flavor: the seams, minus every seam whose plane
+      # `kids-safe` excises. The test-tree floor names those seams, so it cannot
+      # hold, and no sibling differs from it by `test-helpers` alone over the same
+      # vintage the `debug` pair does — the apple recipe's partial-flavor skip
+      # (`_apple-ffi-flavor`). The full test flavor (`android-ffi-test`) holds the
+      # floor; the production kids tree (`android-ffi-kids`) holds the bar.
+      */src/kidsDebug/*) FLAVOR_FLAG=skip;              SIBLING="";                                       SIBLING_REFRESH="" ;;
       *)                 FLAVOR_FLAG=--test-tree;       SIBLING="${STAGE_JAVA%/debug/java}/release/java"; SIBLING_REFRESH="just android-ffi" ;;
     esac
+    if [ "$FLAVOR_FLAG" = skip ]; then
+        echo "flavor-diff seam witness: skipped for the partial test flavor staged in $STAGE_JAVA (the full test flavor holds the floor)"
+        echo "Android FFI built: $STAGE_JNI + Kotlin bindings in $STAGE_JAVA"
+        exit 0
+    fi
     ARGS=(--lang kotlin)
     for d in "${GEN_ARGS[@]}"; do ARGS+=("$FLAVOR_FLAG" "$d"); done
     SIBLING_ARGS=()
@@ -5558,6 +5633,24 @@ _apple-ffi-host-flavor config features profile="":
     # exactly like a config switch always was (the marker comparison below is
     # unchanged — `$FLAVOR:$FEATURES`, testing.md § convention 15).
     FLAVOR="host-$PROFILE"
+    # THE DEBUG LINK SHAPE (owner-ruled 2026-11-16):
+    # the dev-profile production and test-helpers flavours — what `swift test`,
+    # `mac-debug` and so the macOS e2e driver link — stage the FFI as a DYLIB, so
+    # each debug product is ~0.11 G instead of carrying its own 0.69 G static
+    # copy. store-safe, kids and every release/dist flavour stay static: what
+    # ships never changes. The dylib's install name is its absolute path in this
+    # flavour's own $ARTIFACTS (`dylib/`), which survives every flavour switch, so
+    # no product needs an rpath and a binary copied elsewhere (the e2e driver's
+    # photo-library bundle) still finds it. FAUNA_APPLE_FFI_DEBUG_LINK=static
+    # restores the static link for the one run that must exercise it — the mac
+    # merge-gate check's daily static-link e2e (mac-disk-budget.md § What
+    # `swift test` writes → *The FFI as a dylib in debug*).
+    LINK=static
+    if [ "$PROFILE" = dev ] && { [ -z "$FEATURES" ] || [ "$FEATURES" = test-helpers ]; } \
+       && [ "${FAUNA_APPLE_FFI_DEBUG_LINK:-dylib}" != static ]; then
+        LINK=dylib
+        FLAVOR="host-$PROFILE-dylib"
+    fi
     # Only the macOS slice is built, so only its deployment-min matters (must match
     # Package.swift's `platforms:` macOS min — see `apple-ffi` for the full why).
     export MACOSX_DEPLOYMENT_TARGET=15.0
@@ -5609,8 +5702,14 @@ _apple-ffi-host-flavor config features profile="":
     # cargo stamp is no longer dropped here: the .a and its stamp live under
     # $ARTIFACTS, per flavor, so a fresh-reading stamp vouches for exactly this
     # flavor's .a, and the drop only bought a slotted cargo no-op per switch.
-    STASH="$ARTIFACTS/staged"
-    BINDGEN_STAMP="$ARTIFACTS/apple-ffi-host-bindgen.stamp"
+    # The link shape keys its own stash and bindgen stamp: the two shapes stage
+    # different xcframeworks from the same .a, and one shape's newer bindgen
+    # must not void the other's stash.
+    case "$LINK" in
+        dylib) STASH="$ARTIFACTS/staged-dylib" ;;
+        *)     STASH="$ARTIFACTS/staged" ;;
+    esac
+    BINDGEN_STAMP="$ARTIFACTS/apple-ffi-host-bindgen-$LINK.stamp"
     [ "$(cat apps/fauna-apple/.ffi-flavor 2>/dev/null)" = "$FLAVOR:$FEATURES" ] || {
         # The full flavor's fast-path stamp goes WITH the framework it vouches
         # for, here and not only at the end: a step below that fails (a refused
@@ -5663,12 +5762,31 @@ _apple-ffi-host-flavor config features profile="":
     # encodes both discriminators the label does ($CONFIG via $PROFILE_DIR,
     # $FEATURES directly), so the stamp needs no separate keying — it lives
     # beside `$CARGO_STAMP` above, same directory, same reasoning.
-    {{py}} scripts/build-if-stale.py --label "apple-ffi-host-$PROFILE-${FEATURES:-production}" \
+    # The dylib shape's link copy: a clone of cargo's dylib (never cargo's own
+    # file, which may be a hard link into deps/), its install name set to its
+    # absolute path and re-signed ad hoc (install_name_tool voids the linker's
+    # signature, and an unsigned arm64 dylib is killed at load). Re-made only
+    # when cargo wrote a newer dylib, or the checkout moved.
+    XCF_LIB="$SLICE"
+    if [ "$LINK" = dylib ]; then
+        XCF_LIB="$ARTIFACTS/dylib/libfauna_ffi.dylib"
+        XCF_LIB_ABS="$(pwd)/$XCF_LIB"
+        if [ ! -f "$XCF_LIB" ] || [ "$ARTIFACTS/libfauna_ffi.dylib" -nt "$XCF_LIB" ] || \
+           [ "$(otool -D "$XCF_LIB" 2>/dev/null | tail -n 1)" != "$XCF_LIB_ABS" ]; then
+            mkdir -p "$ARTIFACTS/dylib"
+            rm -f "$XCF_LIB.tmp"
+            cp -c "$ARTIFACTS/libfauna_ffi.dylib" "$XCF_LIB.tmp"
+            install_name_tool -id "$XCF_LIB_ABS" "$XCF_LIB.tmp"
+            codesign --force --sign - "$XCF_LIB.tmp"
+            mv "$XCF_LIB.tmp" "$XCF_LIB"
+        fi
+    fi
+    {{py}} scripts/build-if-stale.py --label "apple-ffi-host-$PROFILE-${FEATURES:-production}-$LINK" \
         --stamp "$BINDGEN_STAMP" \
         --target apps/fauna-apple/FaunaFFI.xcframework \
         --target apps/fauna-apple/FaunaFFISwift/Sources/FaunaFFI.swift \
-        --source "$SLICE" \
-        -- just _apple-ffi-bindgen "$FEATURES" "--profile $PROFILE ${FEATURE_ARGS[*]}" "$SLICE" "$SLICE"
+        --source "$SLICE" --source "$XCF_LIB" \
+        -- just _apple-ffi-bindgen "$FEATURES" "--profile $PROFILE ${FEATURE_ARGS[*]}" "$SLICE" "$XCF_LIB"
     # Re-stash whenever the gate above produced a newer generation than the
     # stash holds (see the flavor guard). Clones (`cp -c`), so it costs no disk
     # until a later bindgen replaces the staged files; non-fatal — without a
@@ -5685,6 +5803,10 @@ _apple-ffi-host-flavor config features profile="":
         ) || { rm -rf "$STASH.tmp" "$STASH"; echo "apple-ffi-host: stash failed (non-fatal) — the next flavor switch rebuilds"; }
     fi
     echo "$FLAVOR:$FEATURES" > apps/fauna-apple/.ffi-flavor
+    # The link shape, for `mac-debug`'s gate: written only when it changes, so
+    # its mtime moves exactly when the products must relink (`.ffi-flavor` is
+    # rewritten every call and is excluded there; this file is not).
+    [ "$(cat apps/fauna-apple/.ffi-link 2>/dev/null)" = "$LINK" ] || echo "$LINK" > apps/fauna-apple/.ffi-link
     # This path never populates the cross-checkout release cache; clear the release
     # fast-path stamp so a later `apple-ffi` rebuilds/restores its full release
     # artifact rather than fast-pathing against a host artifact.
@@ -5855,7 +5977,8 @@ _apple-ffi-bindgen features cargo_args bindgen_lib +slices:
 #      iOS-simulator build. Fauna-iOS/ uses iOS-only SwiftUI/UIKit API but the
 #      shims in FaunaKit/Utilities/CrossPlatformUI.swift make it typecheck for
 #      macOS; the iOS app never *runs* there. (Real iOS build: `xcodebuild
-#      -scheme FaunaiOS`; macOS app: `just mac-debug`.)
+#      -project apps/fauna-apple/Fauna.xcodeproj -scheme Fauna-iOS`; macOS
+#      app: `just mac-debug`.)
 #
 # Takes the TEST FFI flavor: `swift test` and the FaunaiOS typecheck build Swift
 # in DEBUG, so `#if DEBUG` compiles FaunaKit's TestAgent / in-process automation
@@ -5902,6 +6025,8 @@ _swift-test-impl:
 # host flavor's stash, mtimes kept) does not. Without them a warm re-check took a
 # `build` slot to prove nothing changed, which kept macOS out of the e2e warm
 # pass (build-slot-pool.md § Cross-pool acquisition order → the warm pass).
+# `.ffi-link` stays a source on purpose: the host flavour rewrites it only when
+# the debug link shape changes (dylib ↔ static), which relinks the app.
 mac-debug: (apple-ffi-host-test "debug")
     #!/usr/bin/env bash
     set -euo pipefail
@@ -5915,6 +6040,43 @@ mac-debug: (apple-ffi-host-test "debug")
         --exclude 'apps/fauna-apple/FaunaFFI.xcframework/*' --exclude 'apps/fauna-apple/generated/*' \
         --exclude '*/xcuserdata/*' --exclude 'apps/fauna-apple/.swiftpm/xcode/*' \
         -- {{slot_build}} swift build {{swiftpm_debug}} --package-path apps/fauna-apple --product FaunaMacOS
+
+# The debug app with the FFI linked STATICALLY, the way every release links it —
+# the one build that still exercises the shipped linkage now that `mac-debug`
+# links the FFI as a dylib (owner-ruled 2026-11-16,
+# option (b+)). For the mac merge-gate check's daily static-link e2e, which also
+# exports FAUNA_APPLE_FFI_DEBUG_LINK=static around the one macOS e2e test it runs
+# so the fixture's own `just mac-debug` keeps this shape. The next plain
+# `mac-debug` relinks back to the dylib (the `.ffi-link` source).
+[macos]
+mac-debug-static:
+    FAUNA_APPLE_FFI_DEBUG_LINK=static just mac-debug
+
+# Gate 10 of the mac merge-gate check — the daily run-time half of the (b+)
+# ruling's mitigation (scripts/merge-gate-check-mac.sh, STATIC_E2E_GATE;
+# merge-gate-check-mac.md, the gate 10 paragraph; mac-disk-budget.md § What
+# `swift test` writes → *The FFI as a dylib in debug*). Links the debug app
+# STATICALLY, proves the link took (otool names no libfauna_ffi dylib — else the
+# run would witness the dylib shape and read green), then runs ONE cheap macOS
+# e2e test against that build with the variable still exported, so the
+# fixture's own `just mac-debug` keeps the static shape. One test, never more:
+# every extra static debug product gives back the disk the dylib saved. The
+# test self-slots at collection and `mac-debug` takes its own `build` slot, so
+# the recipe takes none (an outer hold would be the AB-BA deadlock).
+[macos]
+mac-static-link-e2e-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export FAUNA_APPLE_FFI_DEBUG_LINK=static
+    just mac-debug-static
+    BIN="$(swift build --package-path apps/fauna-apple --product FaunaMacOS --show-bin-path)/FaunaMacOS"
+    LINKS="$(otool -L "$BIN")"
+    if grep -F libfauna_ffi <<<"$LINKS"; then
+        echo "mac-static-link-e2e-check: RED — $BIN links libfauna_ffi as a dylib: FAUNA_APPLE_FFI_DEBUG_LINK=static did not reach apple-ffi-host" >&2
+        exit 1
+    fi
+    echo "mac-static-link-e2e-check: $BIN carries the FFI statically (otool -L names no libfauna_ffi)"
+    pytest 'tests/e2e-unified/tests/test_navigation.py::TestPageLoads::test_page_loads[macos-settings]' --app macos -v
 
 # apple-swift-build-check — the mac merge-gate check's one gate (scripts/
 # merge-gate-check-mac.sh; merge-gate-check-mac.md § Merge-gate check (mac)): compile
@@ -6306,7 +6468,7 @@ mac-tui-archive suffix dir:
     DIR="{{dir}}"
     NAME="fauna-tui-{{suffix}}"
     for f in fauna-tui fauna-sync-agent fauna-cli install.sh LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES; do
-        [ -f "$DIR/$f" ] || { echo "$DIR/$f not found — stage the archive with apps/fauna-tui/packaging/assemble-archive.sh first" >&2; exit 1; }
+        [ -f "$DIR/$f" ] || { echo "$DIR/$f not found — stage the archive with installer/assemble-archive.sh --payload tui first" >&2; exit 1; }
     done
     mkdir -p build
     STAGE="build/$NAME"
@@ -7510,7 +7672,7 @@ _go-bridge-test-subset subset tags +patterns:
 # {{slot_build}} lines stay: under this one they are reentrant no-ops
 # (build-slot.py § FIFO ticket queue).
 ffi-store-safe-check: i18n-generate providers-generate
-    {{slot_build}} just _ffi-store-safe-check-impl
+    {{slot_build_ffi_check}} just _ffi-store-safe-check-impl
 
 _ffi-store-safe-check-impl:
     #!/usr/bin/env bash
@@ -8346,7 +8508,13 @@ _windows-excised-ffi-check-impl:
 # publish and the pack are one produce->consume chain, and the nested
 # `just windows-ffi` finds the slot held. Deliberately NOT build-if-stale gated,
 # like `windows-store-safe`: a flavour flip touches no source file.
-windows-store-package arch="arm64" flavor="full" identity_name="" publisher="": i18n-generate providers-generate
+#
+# `channel` is `store` (the default: the pack above) or `direct`: this recipe is
+# also the direct-download package's payload recipe (installers/windows.md § Direct
+# download — one template, one packer, one payload recipe), and for it builds and
+# stages the arch's payload in the `full` flavour, then stops — the direct channel
+# packs both arches into one bundle in one packer call, `just windows-direct-package`.
+windows-store-package arch="arm64" flavor="full" identity_name="" publisher="" channel="store": i18n-generate providers-generate
     #!/usr/bin/env bash
     set -euo pipefail
     {{slot_build_body}}
@@ -8368,6 +8536,14 @@ windows-store-package arch="arm64" flavor="full" identity_name="" publisher="": 
     case "$FLAVOR" in
         full|store-safe|store-no-payments) ;;
         *) echo "windows-store-package: flavor must be full, store-safe or store-no-payments, got '$FLAVOR'" >&2; exit 2 ;;
+    esac
+    CHANNEL="{{channel}}"
+    case "$CHANNEL" in
+        store) ;;
+        direct)
+            [ "$FLAVOR" = full ] || { echo "windows-store-package: the direct channel's flavour is full (installers/windows.md § Direct download, 4), got '$FLAVOR'" >&2; exit 2; }
+            [ -z "{{identity_name}}{{publisher}}" ] || { echo "windows-store-package: the direct channel's identity is the packer's; just windows-direct-package packs it" >&2; exit 2; } ;;
+        *) echo "windows-store-package: channel must be store or direct, got '$CHANNEL'" >&2; exit 2 ;;
     esac
     TARGET_ARG="--target $TARGET"
     CARGO_OUT="target/$TARGET/dist"
@@ -8423,12 +8599,71 @@ windows-store-package arch="arm64" flavor="full" identity_name="" publisher="": 
     just shipped-licences "$STAGE" .txt
     {{py}} scripts/shipped-notices.py "$NOTICES_ARTIFACT" "$STAGE/THIRD-PARTY-NOTICES.txt" --target "$TARGET"
 
+    # The direct channel's payload is staged; its pack is the bundle's.
+    if [ "$CHANNEL" = direct ]; then
+        echo "windows-store-package: staged $STAGE for the direct channel; just windows-direct-package packs and bundles it"
+        exit 0
+    fi
+
     # 5. Pack. The packer refuses a payload missing its native core or carrying
     #    the automation surface; this recipe never opts out of either.
     PACK=(--arch "$ARCH" --payload-root "$STAGE")
     [ -n "{{identity_name}}" ] && PACK+=(--identity-name "{{identity_name}}")
     [ -n "{{publisher}}" ] && PACK+=(--publisher "{{publisher}}")
     {{py}} scripts/build-store-package.py "${PACK[@]}"
+
+# Build the DIRECT-DOWNLOAD package — build/installer/Fauna.msixbundle, the x64 +
+# arm64 MSIX bundle a Windows user downloads from the organisation
+# (installers/windows.md § Direct download (MSIX app + nest MSI)). It is the Store
+# package's payload recipe, template and packer on the direct channel: each arch's
+# payload built and staged by `windows-store-package <arch> full "" "" direct` (the
+# `full` flavour, § Direct download, 4), then ONE packer call packs both arch
+# packages with the direct channel's identity (FaunaSocial.FaunaDesktop),
+# Properties/DisplayName `Fauna` and the write-virtualization opt-out for
+# %LocalAppData%\Fauna, bundles them at the product version, and the grade reads
+# the bundle back.
+#
+#   just windows-direct-package              # dev: the dev publisher, bundle self-signed
+#   just windows-direct-package production   # the recorded production publisher, unsigned
+#
+# `production` packs with installer/PackageIdentity.props's
+# FaunaDirectProductionPublisher and refuses, before anything builds, while it is
+# empty (no signer is chosen yet). Signing a production bundle and the executables
+# inside it is the release workflow's leg, never this recipe. ONE build slot for the
+# whole recipe, like `windows-store-package`, whose two nested runs find it held.
+windows-direct-package publisher="dev": i18n-generate providers-generate
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # The publisher is checked here, before anything builds; the bundle recipe
+    # checks it again for its own callers.
+    case "{{publisher}}" in
+        dev) ;;
+        production)
+            {{py}} scripts/_windows_package_identity.py direct-production >/dev/null ;;
+        *) echo "windows-direct-package: publisher must be dev or production, got '{{publisher}}'" >&2; exit 2 ;;
+    esac
+    {{slot_build_body}}
+    for ARCH in x64 arm64; do
+        just windows-store-package "$ARCH" full "" "" direct
+    done
+    just windows-direct-bundle "{{publisher}}"
+
+# The second half of `windows-direct-package`: pack the two arch payloads already
+# staged under build/installer/store-payload/<arch>/ into Fauna.msixbundle in ONE
+# packer call, then grade the bundle. Compiles nothing (so no slot). The public
+# release workflow runs it on its own, in the job that takes both arches' payloads
+# from the per-arch payload jobs (release.yml's `build-windows-direct`).
+windows-direct-bundle publisher="dev":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{publisher}}" in
+        dev) SIGN=(--self-sign); GRADE=() ;;
+        production) SIGN=(--production); GRADE=(--production)
+            {{py}} scripts/_windows_package_identity.py direct-production >/dev/null ;;
+        *) echo "windows-direct-bundle: publisher must be dev or production, got '{{publisher}}'" >&2; exit 2 ;;
+    esac
+    {{py}} scripts/build-store-package.py --channel direct "${SIGN[@]}"
+    {{py}} scripts/build-store-package.py --channel direct "${GRADE[@]}" --grade build/installer/Fauna.msixbundle
 
 # Publish the WinUI app self-contained at Release for one arch — the app the MSI
 # carries (`release.yml`'s `build-windows` job) and the Store package carries
@@ -8577,8 +8812,9 @@ _windows-store-safe-check-impl:
         'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button' 'gated-post-purchase-pending' \
         'feed-post-sale-price-')
     # `feed-post-sale-price-` (a sold post's Change price… dialog) is a true
-    # prefix, every id under it in the plane. windows renders none of it yet;
-    # its default column still reads it, from the `#if PAYMENTS` constants.
+    # prefix, every id under it in the plane. windows renders it from
+    # Views\Payments\SalePriceDialog.cs (removed in store-safe), so it reads 0 there
+    # and 1 in the default column, from the `#if PAYMENTS` constants.
     # The UniFFI faces the shell would call — the C# twin of web's wasm exports.
     PAY_FACE_PATS=('FfiPaymentsClient' 'PaymentsKnownKinds' 'PaymentsWebhookUrl' 'FfiNostrZapSignerClient' 'FfiZapSignerEntry')
     # Criterion 2 — kind strings, which live in the native cdylib, never in the C#.
@@ -8922,6 +9158,37 @@ android-store-safe-check: i18n-generate providers-generate
     bash scripts/android-apk-nsc-check.sh "$REL_APK"
     bash scripts/android-store-safe-scan.sh present "$REL_APK" "$WORK/rel"
     echo "android-store-safe-check: OK — payments/zaps/p2p-share UI + kinds present in default, absent in store-safe, p2p-share only in store-no-payments"
+
+# The store-no-payments column alone, as a daily heavy gate on Linux
+# (merge-gate-catalog.md § The heavy gate catalog, the 36th gate;
+# release-attempt.md § The release attempt, step 4). The Play upload since
+# `0.1.5` is `android-bundle-store-no-payments`, and until this gate its
+# flavour was built for real only by the release rehearsal — so a Kotlin
+# render calling payments glue (it failed to compile) and a Change price
+# surface the flavour did not compile away (six `feed-post-sale-price-` ids
+# in the artifact) each surfaced first at a release attempt. This builds the same build type and runs the same scan mode
+# over it: `android-store-safe-check`'s column 2 without its other two
+# columns, one ABI and an APK rather than the four-ABI bundle — the Kotlin
+# source sets, the shrinker and the dex the scan reads are the bundle's.
+# Self-slotted (the Gradle assemble here, the cargo half inside
+# `_android-ffi-flavor`), so the gate runs it bare.
+android-store-no-payments-check: i18n-generate providers-generate
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-21-openjdk-arm64}"
+    WORK="$(mktemp -d "{{tmp_root}}/android-store-no-payments-check.XXXXXX")"
+    trap 'rm -rf "$WORK"' EXIT
+    DIR="apps/fauna-android/app/build/outputs/apk/storeNoPayments"
+    # A stale APK from an earlier run must never stand in for a build that failed.
+    rm -rf "$DIR"
+    just _android-ffi-flavor storeNoPayments store-safe,p2p-share arm64
+    {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android assembleStoreNoPayments
+    APK=""
+    if [ -d "$DIR" ]; then APK="$(find "$DIR" -name '*.apk' -print -quit)"; fi
+    [ -n "$APK" ] || { echo "ERROR: no store-no-payments APK produced." >&2; exit 1; }
+    bash scripts/android-apk-nsc-check.sh "$APK"
+    bash scripts/android-store-safe-scan.sh no-payments "$APK" "$WORK/np"
+    echo "android-store-no-payments-check: OK — payments/zaps absent, p2p-share present  $APK"
 
 # The Fauna Kids witness (family-safety.md § The account age band, the kids-app
 # bullet, item (5); installers/android.md § Goal): the `kids` APK carries none of
@@ -9577,6 +9844,12 @@ apple-kids-check: i18n-generate providers-generate
             }
         local app="$SCRATCH/$name.xcarchive/Products/Applications/$scheme.app"
         strings -a "$app/$scheme" > "$SCRATCH/$name.strings"
+        # The element ids: only the `strings` lines that are exactly a generated
+        # UiIds value. A Rust literal run-together (`atproto-identitysubmission-token`)
+        # is a whole line too, so shape alone cannot tell it from an id.
+        grep -o '= "[a-z0-9-]*"$' apps/fauna-apple/FaunaKit/Sources/FaunaKit/Generated/UiIds.swift \
+            | sed -e 's/^= "//' -e 's/"$//' | sort -u > "$SCRATCH/$name.uiids"
+        grep -Fxf "$SCRATCH/$name.uiids" "$SCRATCH/$name.strings" > "$SCRATCH/$name.ids" || true
         plutil -extract CFBundleIdentifier raw "$app/Info.plist" > "$SCRATCH/$name.bundle-id"
         cp "$app/Info.plist" "$SCRATCH/$name.Info.plist"
         otool -L "$app/$scheme" > "$SCRATCH/$name.links"
@@ -9636,10 +9909,10 @@ apple-kids-check: i18n-generate providers-generate
     archive kids Fauna-Kids-iOS OTHER_SWIFT_FLAGS='$(inherited) -D FAUNA_KIDS -D FAUNA_EXCISE_PAYMENTS -D FAUNA_EXCISE_P2P_SHARE'
     fail=0
     for pat in "${ID_PATS[@]}"; do
-        n="$(count "$(id_line "$pat")" "$SCRATCH/kids.strings")"
+        n="$(count "$(id_line "$pat")" "$SCRATCH/kids.ids")"
         if [ "$n" != "0" ]; then
             echo "ERROR: the kids iOS archive still carries $n '$pat' element id(s):" >&2
-            grep -- "$(id_line "$pat")" "$SCRATCH/kids.strings" | sort -u | head -5 | sed 's/^/    /' >&2
+            grep -- "$(id_line "$pat")" "$SCRATCH/kids.ids" | sort -u | head -5 | sed 's/^/    /' >&2
             fail=1
         fi
     done
@@ -9659,15 +9932,15 @@ apple-kids-check: i18n-generate providers-generate
         fi
     done
     for pat in "${SWIFT_KIDS_ID_PATS[@]}"; do
-        n="$(count "$(id_line "$pat")" "$SCRATCH/kids.strings")"
+        n="$(count "$(id_line "$pat")" "$SCRATCH/kids.ids")"
         if [ "$n" != "0" ]; then
             echo "ERROR: the kids iOS archive still carries $n '$pat' (subscriptions) element id(s):" >&2
-            grep -- "$(id_line "$pat")" "$SCRATCH/kids.strings" | sort -u | head -5 | sed 's/^/    /' >&2
+            grep -- "$(id_line "$pat")" "$SCRATCH/kids.ids" | sort -u | head -5 | sed 's/^/    /' >&2
             fail=1
         fi
     done
     for pat in "${PHOTO_ID_PATS[@]}"; do
-        n="$(count "$(id_line "$pat")" "$SCRATCH/kids.strings")"
+        n="$(count "$(id_line "$pat")" "$SCRATCH/kids.ids")"
         if [ "$n" != "0" ]; then
             echo "ERROR: the kids iOS archive still carries $n '$pat' (photo backup) element id(s)." >&2
             fail=1
@@ -9724,7 +9997,7 @@ apple-kids-check: i18n-generate providers-generate
     faces "$SCRATCH/default.faces"
     archive default Fauna-iOS
     for pat in "${ID_PATS[@]}"; do
-        if [ "$(count "$(id_line "$pat")" "$SCRATCH/default.strings")" = "0" ]; then
+        if [ "$(count "$(id_line "$pat")" "$SCRATCH/default.ids")" = "0" ]; then
             echo "ERROR: the DEFAULT iOS archive carries no '$pat' element id — the kids" >&2
             echo "  assertion above is therefore vacuous. Either the surface was removed" >&2
             echo "  from the default build (a product regression) or it was renamed and" >&2
@@ -9751,14 +10024,14 @@ apple-kids-check: i18n-generate providers-generate
         exit 1
     fi
     for pat in "${SWIFT_KIDS_ID_PATS[@]}"; do
-        if [ "$(count "$(id_line "$pat")" "$SCRATCH/default.strings")" = "0" ]; then
+        if [ "$(count "$(id_line "$pat")" "$SCRATCH/default.ids")" = "0" ]; then
             echo "ERROR: the DEFAULT iOS archive carries no '$pat' element id — the kids" >&2
             echo "  subscriptions assertion above is vacuous (or the ids were renamed)." >&2
             exit 1
         fi
     done
     for pat in "${PHOTO_ID_PATS[@]}"; do
-        if [ "$(count "$(id_line "$pat")" "$SCRATCH/default.strings")" = "0" ]; then
+        if [ "$(count "$(id_line "$pat")" "$SCRATCH/default.ids")" = "0" ]; then
             echo "ERROR: the DEFAULT iOS archive carries no '$pat' element id — the kids" >&2
             echo "  photo-backup assertion above is vacuous (or the ids were renamed)." >&2
             exit 1
@@ -10240,6 +10513,42 @@ release-flavor-compile-check:
         --exclude fauna-wasm-connected-apps \
         --exclude fauna-wasm-atproto-settings \
         --exclude fauna-wasm-launch
+
+# CHECK-tier gate (merge-gate-catalog.md § The heavy gate catalog) — each shipped
+# binary type-checked the way its artifact recipe builds it: release profile,
+# `CARGO_RESOLVER_FEATURE_UNIFICATION=selected`, one invocation per artifact
+# build. `release-flavor-compile-check` above runs `--workspace` with
+# unification ON (.cargo/config.toml § feature unification), so a feature one
+# member turns on is on for every member, and a crate that uses a dependency's
+# feature-gated item without asking for the feature compiles there and nowhere
+# that ships. That is 0.1.7's red 2: fauna-sync-agent's presence_roots.rs called
+# `fauna_client_folders::NestFolderKeyResolver`, gated behind `mls`, which the
+# shipped agent does not enable — every dev build and gate compiled it, the mac
+# rehearsal's `mac-app` (the agent alone, under `selected`) failed E0433.
+#
+# ⚠ Each line MIRRORS one artifact recipe's cargo invocation — the same `-p`
+# set and features, `check` for `build` — because a `-p a -p b` invocation
+# unions the named packages' features, so the agent alone and the agent beside
+# fauna-tui are two different builds: `tui-release`; the agent alone
+# (`mac-app`, `windows-services-release`); `nest`; `servers-release`, one crate
+# per invocation; `linux-release` (linux only — it needs glib/gtk4). A new
+# artifact recipe gets its line here. `cargo check`, not build: the failure
+# class is resolution and type-checking, and the rmeta-only check is the
+# `release-flavor-compile-check` cost class. `tests/e2e-unified/tests/
+# test_shipped_selected_check.py` pins the mirror and witnesses the class on a
+# fixture workspace (red under `selected`, green unified).
+shipped-selected-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{slot_build_body}}
+    export CARGO_RESOLVER_FEATURE_UNIFICATION=selected
+    cargo check --locked --release -p fauna-tui -p fauna-sync-agent -p fauna-cli-device
+    cargo check --locked --release -p fauna-sync-agent
+    cargo check --locked --release -p fauna-nest --features bluesky,nostr,activitypub
+    for crate in fauna-push-relay fauna-cors-proxy fauna-front-door; do
+        cargo check --locked --release -p "$crate"
+    done
+    {{ if os() == "linux" { "cargo check --locked --release -p fauna-linux -p fauna-sync-agent" } else { "true" } }}
 
 # Build the Go atproto PDS bridge binary (role "atproto.pds";
 # docs/goal/behavior/atproto-pds-bridge.md § Architecture). Since S2 this is a
@@ -11025,7 +11334,6 @@ windows-debug: (windows-ffi-test "dev") i18n-generate providers-generate
         --stamp target/windows-debug.stamp \
         --target apps/fauna-windows/FaunaApp/FaunaApp/bin/ARM64/Debug/net10.0-windows10.0.26100/FaunaApp.exe \
         --source apps/fauna-windows/FaunaApp \
-        --source apps/fauna-windows/installer/PackageIdentity.props \
         --source Directory.Build.props --source global.json \
         --exclude '*/bin/*' --exclude '*/obj/*' \
         -- {{slot_build}} "{{msbuild_exe}}" \
@@ -11130,7 +11438,6 @@ windows-release: windows-ffi i18n-generate providers-generate
         --stamp target/windows-release.stamp \
         --target apps/fauna-windows/FaunaApp/FaunaApp/bin/ARM64/Release/net10.0-windows10.0.26100/FaunaApp.exe \
         --source apps/fauna-windows/FaunaApp \
-        --source apps/fauna-windows/installer/PackageIdentity.props \
         --source Directory.Build.props --source global.json \
         --exclude '*/bin/*' --exclude '*/obj/*' \
         -- {{slot_build}} "{{msbuild_exe}}" \
@@ -11280,10 +11587,75 @@ cli-debug: i18n-generate providers-generate
 linux-release target="": i18n-generate providers-generate (linux-desktop-notices target)
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{slot_build}} cargo build --locked -p fauna-linux -p fauna-sync-agent --release {{ if target == "" { "" } else { "--target " + target } }}
 
-# Run fauna-linux debug build
-linux-run: i18n-generate providers-generate
-    {{slot_build}} cargo build -p fauna-linux
-    "$(cargo metadata --format-version 1 --no-deps | {{py}} -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])')/debug/fauna-linux"
+# The Linux desktop app's release archive, `fauna-desktop-<suffix>.tar.gz` in
+# `out` — channel 1's released form (installers/linux-desktop.md § What the
+# release publishes): the two binaries `linux-release` built for `target`
+# (empty = the host), the ONE `install.sh`, the desktop entry, the icon and the
+# three licence files, staged by `installer/assemble-archive.sh --payload
+# linux-desktop` (the payload's one definition, which the install-then-drive
+# witness runs too). It packages, never compiles: run `linux-release` first.
+# `release.yml`'s Linux legs build the published archive with this recipe.
+# Usage: just linux-archive x86_64-unknown-linux-gnu artifacts
+linux-archive target="" out="build/linux-archive": (linux-desktop-notices target)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    triple="{{target}}"
+    [ -n "$triple" ] || triple="$(rustc -vV | sed -n 's/^host: //p')"
+    case "$triple" in
+        x86_64-unknown-linux-gnu) suffix=x86_64-linux ;;
+        aarch64-unknown-linux-gnu) suffix=aarch64-linux ;;
+        *) echo "linux-archive: no Linux desktop archive for $triple" >&2; exit 1 ;;
+    esac
+    tdir="${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 --no-deps | {{py}} -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])')}"
+    bin="$tdir/{{ if target == "" { "" } else { target + "/" } }}release"
+    mkdir -p "{{out}}"
+    bash installer/assemble-archive.sh --payload linux-desktop --bin-dir "$bin" \
+        --out "{{out}}" --suffix "$suffix" \
+        --notices build/shipped-notices/linux-desktop/THIRD-PARTY-NOTICES
+    rm -rf "{{out}}/fauna-desktop-$suffix"
+
+# The Linux desktop app's AppImage, `fauna-desktop-<suffix>.AppImage` in `out`
+# (installers/linux-desktop.md § What the release publishes, § 5 AppImage): the
+# AppDir staged by `installer/stage-appdir.sh` (the layout's one definition,
+# which the tier_3 fixture runs too) from the two binaries `linux-release` built
+# for `target` (empty = the host), then packed by `appimagetool`. It packages,
+# never compiles: run `linux-release` first. `runtime` is the type-2 runtime
+# file handed to the packer (`--runtime-file`), so no runtime is downloaded at
+# pack time; empty leaves the packer's own choice, which a published file may
+# never take. With no `appimagetool` on PATH the AppDir is staged and the pack
+# skipped, said on one line.
+# Usage: just linux-appimage x86_64-unknown-linux-gnu artifacts /path/to/runtime
+linux-appimage target="" out="build/linux-appimage" runtime="": (linux-desktop-notices target)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    triple="{{target}}"
+    [ -n "$triple" ] || triple="$(rustc -vV | sed -n 's/^host: //p')"
+    case "$triple" in
+        x86_64-unknown-linux-gnu) suffix=x86_64-linux; arch=x86_64 ;;
+        aarch64-unknown-linux-gnu) suffix=aarch64-linux; arch=aarch64 ;;
+        *) echo "linux-appimage: no Linux desktop AppImage for $triple" >&2; exit 1 ;;
+    esac
+    tdir="${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 --no-deps | {{py}} -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])')}"
+    bin="$tdir/{{ if target == "" { "" } else { target + "/" } }}release"
+    mkdir -p "{{out}}"
+    appdir="{{out}}/fauna-desktop-$suffix.AppDir"
+    bash installer/stage-appdir.sh --bin-dir "$bin" --out "$appdir" \
+        --notices build/shipped-notices/linux-desktop/THIRD-PARTY-NOTICES
+    if ! command -v appimagetool >/dev/null 2>&1; then
+        echo "linux-appimage: no appimagetool on PATH — AppDir staged at $appdir, pack skipped"
+        exit 0
+    fi
+    runtime_args=()
+    [ -z "{{runtime}}" ] || runtime_args=(--runtime-file "{{runtime}}")
+    ARCH="$arch" appimagetool ${runtime_args[@]+"${runtime_args[@]}"} \
+        "$appdir" "{{out}}/fauna-desktop-$suffix.AppImage"
+    rm -rf "$appdir"
+    echo "linux-appimage: {{out}}/fauna-desktop-$suffix.AppImage"
+
+# Run fauna-linux debug build, in the person's own profile. The binary is `fauna-desktop`
+# (see linux-debug), built with the sync agent it spawns.
+linux-run: linux-debug
+    "${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 --no-deps | {{py}} -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])')}/debug/fauna-desktop"
 
 # Install fauna-linux to ~/.local (user) or $PREFIX
 linux-install:
@@ -11293,41 +11665,111 @@ linux-install:
 linux-uninstall:
     apps/fauna-linux/uninstall.sh
 
-# Build a .deb package (requires debhelper: apt install debhelper). Copies
-# debian/ to the repo root — dpkg-buildpackage's expected location — since
-# apps/fauna-linux/packaging/debian/{rules,control} is the source of truth
-# (docs/goal/architecture/installers/linux-desktop.md § Debian Package). A
-# real copy, not a symlink: dh's build-stamp/staging files land in the
+# The Linux desktop app's Debian package, `fauna-desktop-<suffix>.deb` in `out`
+# (installers/linux-desktop.md § What the release publishes, § 4 Debian Package;
+# requires debhelper). It packages, never compiles: run `linux-release` first
+# (`target` as there, empty = the host) — `debian/rules` stages the two binaries
+# from the directory this recipe hands it as FAUNA_BIN_DIR. The package's
+# Architecture is the build host's, so a `target` must be the host's own triple.
+# Copies debian/ to the repo root — dpkg-buildpackage's expected location —
+# since apps/fauna-linux/packaging/debian/{rules,control} is the source of
+# truth. A real copy, not a symlink: dh's build-stamp/staging files land in the
 # disposable repo-root copy instead of polluting the tracked source dir (a
 # symlink let them leak through and, once, got silently replaced by a plain
 # directory mid-build, breaking dh_installdocs's debian/control lookup).
-linux-deb: i18n-generate providers-generate linux-desktop-notices
+# dpkg-buildpackage writes into the checkout's parent; the recipe moves the
+# package to `out` under its release name and removes the rest it wrote there.
+# Usage: just linux-deb x86_64-unknown-linux-gnu artifacts
+linux-deb target="" out="build/linux-deb": (linux-desktop-notices target)
     #!/usr/bin/env bash
     set -euo pipefail
+    host="$(rustc -vV | sed -n 's/^host: //p')"
+    triple="{{target}}"
+    [ -n "$triple" ] || triple="$host"
+    if [ "$triple" != "$host" ]; then
+        echo "linux-deb: a .deb is built on its own architecture; $triple is not this host's ($host)" >&2
+        exit 1
+    fi
+    case "$triple" in
+        x86_64-unknown-linux-gnu) suffix=x86_64-linux ;;
+        aarch64-unknown-linux-gnu) suffix=aarch64-linux ;;
+        *) echo "linux-deb: no Linux desktop package for $triple" >&2; exit 1 ;;
+    esac
+    tdir="${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 --no-deps | {{py}} -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])')}"
+    bin="$tdir/{{ if target == "" { "" } else { target + "/" } }}release"
+    for exe in fauna-desktop fauna-sync-agent; do
+        if [ ! -x "$bin/$exe" ]; then
+            echo "linux-deb: no $bin/$exe — run \`just linux-release{{ if target == "" { "" } else { " " + target } }}\` first" >&2
+            exit 1
+        fi
+    done
     rm -rf debian
     cp -r apps/fauna-linux/packaging/debian debian
-    dpkg-buildpackage -us -uc -b
-    rm -rf debian
+    trap 'rm -rf debian' EXIT
+    version="$(dpkg-parsechangelog -l debian/changelog -S Version)"
+    arch="$(dpkg-architecture -qDEB_HOST_ARCH)"
+    FAUNA_BIN_DIR="$bin" dpkg-buildpackage -us -uc -b
+    mkdir -p "{{out}}"
+    mv "../fauna-desktop_${version}_${arch}.deb" "{{out}}/fauna-desktop-$suffix.deb"
+    rm -f "../fauna-desktop-dbgsym_${version}_${arch}.ddeb" \
+        "../fauna-desktop_${version}_${arch}.buildinfo" "../fauna-desktop_${version}_${arch}.changes"
+    echo "linux-deb: {{out}}/fauna-desktop-$suffix.deb"
 
-# Build Flatpak (requires flatpak-builder + org.gnome.Sdk//50; the manifest
-# installs the repo's pinned rustup toolchain itself — builds since 2026-07-14.
-# In a sandboxed tool environment add --disable-rofiles-fuse; see
-# docs/goal/architecture/installers/linux-desktop.md § Flatpak)
-linux-flatpak: i18n-generate providers-generate linux-desktop-notices
-    flatpak-builder --force-clean build-flatpak apps/fauna-linux/packaging/flatpak/social.fauna.fauna.yml
+# The Flatpak build packages, it never compiles (installers/linux-desktop.md
+# § 3 Flatpak): every recipe below builds the two binaries with `linux-release
+# <target>` first (the release leg has built them already, so cargo finds them
+# fresh), stages them with the rest of the payload (`linux-flatpak-stage`), and
+# runs flatpak-builder over the staged files with no network and no toolchain.
+# Needs flatpak, flatpak-builder and org.gnome.Platform//50 + org.gnome.Sdk//50.
+# `--disable-rofiles-fuse`: a sandboxed tool environment cannot FUSE-mount, and
+# without the optimisation the build is the same. Build state lives under build/.
+flatpak_manifest := "apps/fauna-linux/packaging/flatpak/social.fauna.fauna.yml"
+flatpak_builder := "flatpak-builder --force-clean --disable-rofiles-fuse --default-branch=stable --state-dir=build/flatpak-builder-state"
 
-# Install Flatpak locally for testing
-linux-flatpak-install: i18n-generate providers-generate linux-desktop-notices
-    flatpak-builder --user --install --force-clean build-flatpak apps/fauna-linux/packaging/flatpak/social.fauna.fauna.yml
+# Stage the Flatpak's payload from `linux-release <target>`'s binaries into
+# build/flatpak-staging, the directory the manifest's one module reads
+# (scripts/linux-flatpak-stage.py is the payload's one definition).
+linux-flatpak-stage target="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    TARGET_DIR="${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 --no-deps | {{py}} -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])')}"
+    {{py}} scripts/linux-flatpak-stage.py --bin-dir "$TARGET_DIR/{{ if target == "" { "release" } else { target + "/release" } }}"
+
+# Build the Flatpak into build/flatpak-build (not installed).
+linux-flatpak target="": (linux-desktop-notices target) (linux-release target) (linux-flatpak-stage target)
+    {{flatpak_builder}} build/flatpak-build {{flatpak_manifest}}
+
+# Install Flatpak locally for testing (--user)
+linux-flatpak-install target="": (linux-desktop-notices target) (linux-release target) (linux-flatpak-stage target)
+    {{flatpak_builder}} --user --install build/flatpak-build {{flatpak_manifest}}
 
 # Run the locally installed Flatpak
 linux-flatpak-run:
     flatpak run social.fauna.fauna
 
-# Export Flatpak to a .flatpak bundle file for distribution
-linux-flatpak-bundle: i18n-generate providers-generate linux-desktop-notices
-    flatpak-builder --force-clean --repo=flatpak-repo build-flatpak apps/fauna-linux/packaging/flatpak/social.fauna.fauna.yml
-    flatpak build-bundle flatpak-repo fauna-linux.flatpak social.fauna.fauna
+# Export the Flatpak to build/fauna-desktop-<suffix>.flatpak, the file a person
+# installs with `flatpak install --user`: the branch `stable`, and Flathub's
+# repository file as the runtime repository, so flatpak fetches
+# org.gnome.Platform//50 at install. The bundle is the build machine's own
+# architecture, so the target must be too (each release leg is native).
+linux-flatpak-bundle target="": (linux-desktop-notices target) (linux-release target) (linux-flatpak-stage target)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    triple="{{target}}"
+    [ -n "$triple" ] || triple="$(rustc -vV | sed -n 's/^host: //p')"
+    case "$triple" in
+        x86_64-unknown-linux-gnu) suffix="x86_64-linux" ;;
+        aarch64-unknown-linux-gnu) suffix="aarch64-linux" ;;
+        *) echo "linux-flatpak-bundle: no bundle suffix for $triple" >&2; exit 1 ;;
+    esac
+    if [ "${triple%%-*}" != "$(uname -m)" ]; then
+        echo "linux-flatpak-bundle: $triple is not this machine's architecture ($(uname -m))" >&2
+        exit 1
+    fi
+    {{flatpak_builder}} --repo=build/flatpak-repo build/flatpak-build {{flatpak_manifest}}
+    flatpak build-bundle --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
+        build/flatpak-repo "build/fauna-desktop-${suffix}.flatpak" social.fauna.fauna stable
+    echo "linux-flatpak-bundle: build/fauna-desktop-${suffix}.flatpak"
 
 # Build macOS installer package (unsigned, for dev/testing). `profile`:
 # forwarded to build.sh (`release` default, `dist` the shipping build —
@@ -11479,10 +11921,6 @@ regen:
 # A node over the cap renders as its child index rather than truncating.
 ui-show *ARGS:
     {{py}} scripts/ui-show.py {{ARGS}}
-
-# Lint ui.yaml: verify all 7 apps implement every required element (spec -> app)
-ui-lint:
-    uv run scripts/lint-ui-elements.py
 
 # Lint ui.yaml the OTHER two directions (advisory, exits 0 unless --strict):
 #   * page/component lists naming ids with no `elements:` registry row
@@ -11706,11 +12144,17 @@ shipped-suite-test:
 # a #[cfg] gate, …) — the class that compiles clean in BOTH build flavors and
 # still ships the id in a store-safe artifact. Pure text/regex analysis of
 # ui.yaml, the justfile, and per-app generated ID sources — no cargo, no
-# dotnet, no swift, no build slot — ~3s. Gated on the local-merge path (both
-# both merge scripts call it); the recipe itself skips loudly
+# dotnet, no swift — ~3s. Gated on the local-merge path (both merge scripts
+# call it through merge_gate_runner.py); the recipe itself skips loudly
 # where bare pytest is absent (next-open-test's guard, same reasoning here:
 # the check is platform-agnostic text, so a lone machine's PATH gap costs
 # nothing while the sibling machine's gate still covers it).
+# `--noconftest`: the module uses no fixture, and the e2e conftest's import,
+# collection hooks and last-green record were more than half the gate's wall
+# (6.7 s → 2.9 s measured 2026-11-16, the same 117 passed). Inside the merge
+# runner's uncounted gate phase (FAUNA_MERGE_GATE_PHASE, merge-gates.md § The
+# 10-second budget, rule 7) it takes NO slot — a broker wait there was up to
+# tens of seconds of stall per merge; a hand run keeps its `tier_1` slot.
 payments-excision-spine-check:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -11718,7 +12162,10 @@ payments-excision-spine-check:
         echo "payments-excision-spine-check: SKIPPED — no pytest on PATH (see the machine setup guide)"
         exit 0
     fi
-    {{slot_tier_1}} pytest tests/e2e-unified/tests/test_payments_excision_spine.py -q
+    if [ -n "${FAUNA_MERGE_GATE_PHASE:-}" ]; then
+        exec pytest --noconftest tests/e2e-unified/tests/test_payments_excision_spine.py -q
+    fi
+    {{slot_tier_1}} pytest --noconftest tests/e2e-unified/tests/test_payments_excision_spine.py -q
 
 # Lint WinUI: a DataTemplate root that is a bare layout container (Grid/Border/…)
 # with an AutomationId must also have an AutomationProperties.Name, else UIA prunes
@@ -11864,6 +12311,40 @@ features-lint *ARGS:
 features-prune *ARGS:
     {{py}} scripts/features-prune.py {{ARGS}}
 
+# The candidate run's warm pass, ahead of it: the same selection as part 1 of
+# `e2e-release-candidate` (the re-timed half selects no binary the first does not),
+# under the suite's prewarm-only switch — every prebuild warmed, no test run, nothing
+# recorded, no precheck (the image is not yet the attempt's build). The `prewarm` step
+# of `fauna-publish attempt next` runs it through `release-driver.py prewarm`, in the
+# candidate clone (release-table.md § Release-candidate run).
+# Usage: just e2e-release-candidate-prewarm ghcr.io/faunasocial/nest:test
+e2e-release-candidate-prewarm IMAGE *ARGS:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    export FAUNA_E2E_PREWARM_ONLY=1
+    pytest tests/e2e-unified/tests/ --nest docker:{{IMAGE}} --no-feature-ledger \
+        --long-run "release-candidate prewarm" -m "not drafts_autosave_window_ms" {{ARGS}}
+
+# The pre-auth reject witnesses at the attempt's staged digest: the `preauth` step of
+# `fauna-publish attempt next` (release-attempt.md § The release attempt, *The pre-auth
+# witnesses run on every attempt*; deployment-threat-model.md § Concern 1a). The candidate
+# run's `--nest docker:<image>` never reaches the tier_4 docker package, which boots the image
+# `FAUNA_NEST_TEST_IMAGE` names, so this pulls IMAGE, pins it to the registry digest it
+# resolved (a moved tag cannot change what is witnessed mid-run) and runs the module at tier 4
+# against exactly that. Never builds an image. Nothing lands in the feature ledger: the
+# attempt record's step is the witness.
+# Usage: just e2e-release-preauth ghcr.io/faunasocial/nest:test
+e2e-release-preauth IMAGE *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker pull --quiet "{{IMAGE}}" >/dev/null
+    digest=$(docker image inspect --format '{{"{{"}}index .RepoDigests 0{{"}}"}}' "{{IMAGE}}")
+    case "$digest" in *@sha256:*) ;; *) echo "[e2e-release-preauth] {{IMAGE}} has no registry digest" >&2; exit 2 ;; esac
+    echo "[e2e-release-preauth] witnessing $digest"
+    export FAUNA_NEST_TEST_IMAGE="$digest"
+    pytest tests/e2e-unified/tests/platform/docker/test_preauth_rejects.py --tier 4 \
+        --no-feature-ledger -v {{ARGS}}
+
 # Write one store submission's state into installer/store-review.toml — the record's
 # ONLY writer; a hand edit fails the tier_1 pin. Refuses a store, track, state or
 # flavour outside the owner doc's lists, a read before since or in the future, and
@@ -11961,6 +12442,27 @@ windows-msi-notices dir arch="arm64" bridge="target/fauna-mail-bridge.exe":
     just shipped-licences "{{dir}}" .txt
     {{py}} scripts/windows-msi-wix-stage.py "$(dirname "{{bridge}}")"
     {{py}} scripts/shipped-notices.py windows-msi "{{dir}}/THIRD-PARTY-NOTICES.txt" --set "go.binary={{bridge}}" \
+        --set "bundled.dir=$(dirname "{{bridge}}")" \
+        --target "$CPU-pc-windows-msvc" --target "$CPU-pc-windows-gnullvm"
+
+# The nest MSI's three licence files into `dir` (installers/windows.md § Direct
+# download, 1; shipped-notices.md § Per channel, the Windows nest MSI row): the
+# recipe above for the manifest's windows-nest-msi artifact — the nest and bridge
+# services, the terminal binaries and the mail bridge, with its bundled
+# components, and no app (so no publish runs first). The test MSI's builder
+# (windows_installer.py::build_nest_msi) runs it; the full-feature recipe above
+# retires when the release workflow ships this package in its place.
+windows-nest-msi-notices dir arch="arm64" bridge="target/fauna-mail-bridge.exe":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{arch}}" in
+        arm64) CPU=aarch64 ;;
+        x64)   CPU=x86_64 ;;
+        *) echo "windows-nest-msi-notices: arch must be arm64 or x64, got '{{arch}}'" >&2; exit 2 ;;
+    esac
+    just shipped-licences "{{dir}}" .txt
+    {{py}} scripts/windows-msi-wix-stage.py "$(dirname "{{bridge}}")"
+    {{py}} scripts/shipped-notices.py windows-nest-msi "{{dir}}/THIRD-PARTY-NOTICES.txt" --set "go.binary={{bridge}}" \
         --set "bundled.dir=$(dirname "{{bridge}}")" \
         --target "$CPU-pc-windows-msvc" --target "$CPU-pc-windows-gnullvm"
 

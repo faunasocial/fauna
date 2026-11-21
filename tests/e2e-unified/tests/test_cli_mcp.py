@@ -443,7 +443,10 @@ def test_the_admin_plane_serves_an_admin_consented_principal_and_no_member(
         "admin_mail_settings",
     ):
         refused = cli.call(tool)
-        assert refused["isError"] and ".permission_denied" in cli.text(refused), (
+        # The nest's code and reason, worded with the step: connect with
+        # `admin: true` (`apps/cli.md` § A tool that cannot run, rule 3).
+        text = cli.text(refused)
+        assert refused["isError"] and ".permission_denied" in text and "admin: true" in text, (
             f"{tool} without the admin arms is the nest's refusal: {refused!r}\n{cli.diagnostics()}"
         )
 
@@ -664,7 +667,9 @@ def test_the_feed_tools_read_one_feeds_definition_and_its_posts(
     assert isinstance(trending["structuredContent"].get("posts"), list), trending
 
     missing = cli.call("feed_get", {"feed_id": os.urandom(16).hex()})
-    assert missing["isError"], f"a feed the account does not hold is refused: {missing!r}"
+    assert missing["isError"] and "feed_list" in cli.text(missing), (
+        f"a feed the account does not hold is refused with the list tool to call: {missing!r}"
+    )
 
 
 def _admin_connected(cli: CliMcpSession, nest: dict, handle: str) -> dict:

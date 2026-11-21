@@ -666,7 +666,8 @@ async fn reclaim_store_at(
 /// first home is the orphaned-store row, which is exactly when no host exists.
 ///
 /// Nothing about the ceremony's order is decided here. The driver is the shared
-/// `fauna_client_backup::reseed::run_reseed` over the shared
+/// `fauna_sync_engine::recovery::reseed_with_own_store_recovery` (the shared
+/// `run_reseed_with_recovery`, a lived-in segment set handed to the store end) over the shared
 /// `fauna_sync_engine::reseed::ReseedDelivery` — the pair the desktop agent's
 /// job runs — and the tail is [`crate::reseed`]'s `finish`, the pair every
 /// shell's post-ceremony duty goes through. What this adds is only what the
@@ -713,7 +714,6 @@ async fn reseed_store_at(
     data_dir: String,
     budget: Duration,
 ) -> Result<crate::FfiReseedResult, FfiError> {
-    use fauna_client_backup::reseed::run_reseed;
     use fauna_core::crypto::{BackupKey, NestBackupKey, OwnerSealKey};
     use fauna_core::identity::ActorKeypair;
     use fauna_sync_engine::reseed::{ReseedDelivery, SyncClientSink};
@@ -777,9 +777,21 @@ async fn reseed_store_at(
         ));
     }
 
-    let outcome = run_reseed(
-        &BackupClient::new(Arc::clone(&ws)),
-        nest_key.to_bytes().to_vec(),
+    // A lived-in segment set goes to the store end of the recovery leg in the
+    // same run (`backup-destinations.md` § Third destination kind → *A lived-in
+    // segment set is completed by record in the same gesture*, rule (1)) — the
+    // composition the desktop agent's job runs too.
+    let outcome = fauna_sync_engine::recovery::reseed_with_own_store_recovery(
+        fauna_sync_engine::recovery::OwnStoreRecovery {
+            store: &store,
+            source: ws.as_ref(),
+            bytes: &sync_client,
+            scope_id: actor_id,
+            device_id: device_hex.clone(),
+            local: OwnerSealKey::Client(BackupKey::derive(&secret)),
+            nest_key: &nest_key,
+            now: fauna_core::data::Timestamp::now_secs_or_zero(),
+        },
         &leg,
     )
     .await;

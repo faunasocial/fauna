@@ -750,7 +750,11 @@ def test_smoke_f2_fallthrough_clears_the_binding_so_relaunch_starts_at_handle_en
 # product path, so a reset-erase assertion greens on the harness and pins nothing,
 # and a browser `teardown()` discards the whole profile so there is no force-quit
 # analogue. Web's arm is `test_sign_out_web.py`'s Settings sign-out + hard reload.
-@pytest.mark.parametrize("launch_harness", _clients(*NATIVE_ONLY), indirect=True)
+# android joins this case alone of the native ones: its reset is the product's
+# `storage.clear()`, its relaunch withholds the seed so the cleared device file is
+# what the next process reads, and its harness store reads that file over the
+# bridge once launched (`AndroidLaunchHarness.launch`).
+@pytest.mark.parametrize("launch_harness", _clients(*NATIVE_ONLY, "android"), indirect=True)
 @pytest.mark.feature("factory-reset")
 def test_smoke_g_factory_reset_leaves_no_identity_for_the_next_launch(
     nest_instance, launch_harness

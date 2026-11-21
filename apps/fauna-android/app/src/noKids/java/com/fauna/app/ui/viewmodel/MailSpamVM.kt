@@ -1,17 +1,25 @@
 package com.fauna.app.ui.viewmodel
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.fauna.app.core.ApiClient
+import com.fauna.app.ui.util.pressAsked
 import com.fauna.ffi.FfiReportShareEntry
 import com.fauna.ffi.FfiReportShareStatus
+import com.fauna.ffi.readPossibility
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import uniffi.fauna_client_mail_settings.MailSpamAction
 import uniffi.fauna_client_mail_settings.MailSpamMachine
 import uniffi.fauna_client_mail_settings.MailSpamSnapshot
 import uniffi.fauna_client_mail_settings.SpamStatus
+import uniffi.fauna_core.Possibility
+import uniffi.fauna_core.ReadState
 import javax.inject.Inject
 
 /**
@@ -33,6 +41,7 @@ import javax.inject.Inject
  */
 @HiltViewModel
 class MailSpamVM @Inject constructor(
+    @ApplicationContext private val context: Context,
     private val api: ApiClient,
 ) : ViewModel() {
 
@@ -52,6 +61,34 @@ class MailSpamVM @Inject constructor(
     // pair, not the MailSpamMachine, same shape as report-share above. `null`
     // = follows the admin default; `0u` is a real setting, distinct from `null`.
     val thresholdOverride = MutableStateFlow<UInt?>(null)
+
+    // Controls wait for their reads (mail-settings.md § Errors & edge cases,
+    // *Controls wait for their reads*; tui's `contribute_answer` /
+    // `share_read` / `threshold_read`): where the classifier snapshot, the
+    // report-share read and the override read stand, held beside the reads
+    // they track. Each control's answer is the shared
+    // `Possibility::from_read` over its read, so a pre-read default (`false`,
+    // an empty override) is never written as a guess.
+    private var classifierRead = ReadState.PENDING
+    private var shareRead = ReadState.PENDING
+    private var thresholdRead = ReadState.PENDING
+    private val _contributeAnswer = MutableStateFlow(readPossibility(ReadState.PENDING))
+    private val _shareAnswer = MutableStateFlow(readPossibility(ReadState.PENDING))
+    private val _thresholdAnswer = MutableStateFlow(readPossibility(ReadState.PENDING))
+
+    /** `mail-spam-contribute-baseline-toggle`: the classifier snapshot's read. */
+    val contributeAnswer: StateFlow<Possibility> = _contributeAnswer.asStateFlow()
+
+    /** `mail-spam-share-reports-toggle`: the report-share read. */
+    val shareAnswer: StateFlow<Possibility> = _shareAnswer.asStateFlow()
+
+    /** `mail-spam-threshold-override-input` and its commit: the override read. */
+    val thresholdAnswer: StateFlow<Possibility> = _thresholdAnswer.asStateFlow()
+
+    /** Rule 6 at the press: ask [answer] again; a blocked one names its
+     *  reason on `error-message` and sends nothing. */
+    private inline fun asked(answer: Possibility, go: () -> Unit) =
+        pressAsked(context, answer, onRefuse = { errorMessage.value = it }, go = go)
 
     init {
         hydrate()
@@ -80,13 +117,22 @@ class MailSpamVM @Inject constructor(
                 // in its own snapshot, which the publish below surfaces.
             }
             publish(m)
+            // The machine records a failed hydrate in its snapshot's `error`.
+            classifierRead = if (m.snapshot().error == null) ReadState.RESOLVED else afterFailedRead(classifierRead)
+            _contributeAnswer.value = readPossibility(classifierRead)
         }
     }
 
     fun resetModel() = dispatch(MailSpamAction.ResetModel)
 
-    fun setContributeBaseline(contribute: Boolean) =
-        dispatch(MailSpamAction.SetContributeBaseline(contribute = contribute))
+    /** Asks the toggle's answer first — once the machine exists: a
+     *  never-built machine is [dispatch]'s unbuilt refusal (rule 7), not a
+     *  "still loading" that would never end. */
+    fun setContributeBaseline(contribute: Boolean) {
+        val action = MailSpamAction.SetContributeBaseline(contribute = contribute)
+        if (machine == null) return dispatch(action)
+        asked(_contributeAnswer.value) { dispatch(action) }
+    }
 
     fun undo(historyIdHex: String) =
         dispatch(MailSpamAction.UndoTraining(historyIdHex = historyIdHex))
@@ -98,17 +144,20 @@ class MailSpamVM @Inject constructor(
         viewModelScope.launch {
             try {
                 publishReportShare(api.reportShareStatus())
+                shareRead = ReadState.RESOLVED
             } catch (_: Exception) {
                 // One attempt: the transport already waits out a socket that
                 // has not landed yet (NestClient::request_inner).
+                shareRead = afterFailedRead(shareRead)
             }
+            _shareAnswer.value = readPossibility(shareRead)
         }
     }
 
     /** Set the report-share opt-in, then re-read status so the toggle + published
      *  list reflect the persisted value (opting out withdraws this actor's
      *  reports, which may shrink the list — mirrors linux `set_report_share`). */
-    fun setReportShare(share: Boolean) {
+    fun setReportShare(share: Boolean) = asked(_shareAnswer.value) {
         viewModelScope.launch {
             try {
                 api.reportShareSet(share)
@@ -131,17 +180,21 @@ class MailSpamVM @Inject constructor(
         viewModelScope.launch {
             try {
                 thresholdOverride.value = api.spamThresholdOverrideGet()
+                thresholdRead = ReadState.RESOLVED
             } catch (_: Exception) {
                 // One attempt: the transport already waits out a socket that
                 // has not landed yet (NestClient::request_inner).
+                thresholdRead = afterFailedRead(thresholdRead)
             }
+            _thresholdAnswer.value = readPossibility(thresholdRead)
         }
     }
 
     /** Set (or clear, with `null`) the override, then reflect the persisted
      *  value the nest confirmed — never the local edit (mirrors
-     *  [setReportShare]). */
-    fun setThresholdOverride(value: UInt?) {
+     *  [setReportShare]). Asks the override read's answer first, so an empty
+     *  pre-read draft is never committed as "clear the override". */
+    fun setThresholdOverride(value: UInt?) = asked(_thresholdAnswer.value) {
         viewModelScope.launch {
             try {
                 thresholdOverride.value = api.spamThresholdOverrideSet(value)
@@ -152,7 +205,12 @@ class MailSpamVM @Inject constructor(
     }
 
     private fun dispatch(action: MailSpamAction) {
-        val m = machine ?: return
+        // Rule 7 (ui/README.md § Offer only what is possible): a gesture whose
+        // machine was never built says so on `error-message`, never silently.
+        val m = machine ?: run {
+            errorMessage.value = api.mailUnbuiltRefusal()
+            return
+        }
         viewModelScope.launch {
             try {
                 m.dispatch(action)
@@ -170,6 +228,12 @@ class MailSpamVM @Inject constructor(
     }
 
     private companion object {
+        /** A read that failed keeps an earlier success (`Possibility::from_read`'s
+         *  rule; tui's `read_failed`): the page still holds a value the nest
+         *  confirmed. */
+        fun afterFailedRead(was: ReadState): ReadState =
+            if (was == ReadState.RESOLVED) ReadState.RESOLVED else ReadState.FAILED
+
         val EMPTY_SNAPSHOT = MailSpamSnapshot(
             events = emptyList(),
             contributeBaseline = false,

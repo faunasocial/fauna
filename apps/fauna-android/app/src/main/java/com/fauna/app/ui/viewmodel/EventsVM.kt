@@ -4,7 +4,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.fauna.app.core.ApiClient
 import com.fauna.app.data.api.*
+import com.fauna.ffi.FfiCalendarsRead
+import com.fauna.ffi.FfiEventCreateTarget
 import com.fauna.ffi.calendarIsDisplayed
+import com.fauna.ffi.eventCreatePossibility
+import com.fauna.ffi.eventCreateTarget
+import uniffi.fauna_core.LocalizedText
 import com.fauna.ffi.resolveCalendarSelection
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.async
@@ -96,6 +101,61 @@ class EventsVM @Inject constructor(
     val isLoading = MutableStateFlow(false)
     val errorMessage = MutableStateFlow<String?>(null)
 
+    /** The calendar read's answer (`ui/events.md` § Errors & edge cases → *No
+     *  calendar to hold an event*, ruling 2): unresolved until the first read
+     *  lands, so the page paints the loading line, never the empty state. */
+    val calendarsRead = MutableStateFlow<FfiCalendarsRead>(FfiCalendarsRead.Unresolved)
+
+    /** The one predicate every door to the event compose asks (ruling 3): the
+     *  shared `event_create_possibility` over [calendarsRead], never re-derived
+     *  here. */
+    val createGate = MutableStateFlow(eventCreatePossibility(FfiCalendarsRead.Unresolved))
+
+    /** Why the open `event-form` refused or failed its save (ruling 4) — painted
+     *  on the form's own `error-message`; null while there is nothing to say. */
+    val eventFormError = MutableStateFlow<EventFormError?>(null)
+
+    sealed interface EventFormError {
+        /** The gate refused at the submit: the predicate's reason. */
+        data class Refused(val reason: LocalizedText) : EventFormError
+        /** The create failed after the gate: `events.save_failed` over [detail]. */
+        data class SaveFailed(val detail: String) : EventFormError
+    }
+
+    /** The calendar load's generation: a load that lands after a newer load, or
+     *  after a landed mutation (which claims the next generation), is dropped,
+     *  so a re-run in flight cannot put an older list back. */
+    private var loadGen = 0
+
+    private fun applyRead(read: FfiCalendarsRead) {
+        calendarsRead.value = read
+        createGate.value = eventCreatePossibility(read)
+        val previous = calendars.value
+        calendars.value = when (read) {
+            is FfiCalendarsRead.Loaded -> read.calendars.map {
+                FaunaCalendar(id = it.id, name = it.name, color = it.color.ifBlank { null })
+            }
+            else -> emptyList()
+        }
+        visibleCalendarIds.value = seedVisibleCalendarIds(visibleCalendarIds.value, previous, calendars.value)
+    }
+
+    /** Read the calendars through the shared four-answer read; a read a newer
+     *  load or a landed mutation superseded is dropped. A failed read leaves the
+     *  answer as it was (unresolved on a fresh page) and says so on the page. */
+    private suspend fun readCalendarsGuarded() {
+        val gen = ++loadGen
+        try {
+            val read = api.readCalendars()
+            if (gen == loadGen) applyRead(read)
+        } catch (e: Exception) {
+            if (gen == loadGen) errorMessage.value = e.message
+        }
+    }
+
+    /** A landed mutation re-reads the calendars at the next generation. */
+    private suspend fun rereadAfterMutation() = readCalendarsGuarded()
+
     // The just-created calendar, so the next authoring action can target it from
     // the no-selection union view without a "pick a calendar" step (events.md
     // § Layout & flow). Captured by diffing the calendar list across a create,
@@ -170,7 +230,13 @@ class EventsVM @Inject constructor(
         // re-reads the refused-change list — the list ONLY; the calendars and
         // events beside it are the nest's, not the store's.
         viewModelScope.launch {
-            api.storeChangedTick.collect { loadRefusedChanges() }
+            api.storeChangedTick.collect {
+                loadRefusedChanges()
+                // The calendar read waits on the store (custody not readable
+                // yet, or the key's mint in flight): re-run the whole load while
+                // it is unresolved; a settled read is the push's to refresh.
+                if (calendarsRead.value is FfiCalendarsRead.Unresolved) load()
+            }
         }
     }
 
@@ -180,12 +246,7 @@ class EventsVM @Inject constructor(
         // calendar or the union). Mirrors web's push arm (events.md dated history
         // 2026-07-18). The push is a hint; errors surface on the next explicit load.
         viewModelScope.launch {
-            try {
-                val previous = calendars.value
-                calendars.value = api.listCalendars()
-                visibleCalendarIds.value = seedVisibleCalendarIds(visibleCalendarIds.value, previous, calendars.value)
-            } catch (_: Exception) {
-            }
+            readCalendarsGuarded()
             refreshEvents()
             loadEventsForCurrentView()
         }
@@ -197,13 +258,7 @@ class EventsVM @Inject constructor(
     fun load() {
         loadRefusedChanges()
         viewModelScope.launch {
-            try {
-                val previous = calendars.value
-                calendars.value = api.listCalendars()
-                visibleCalendarIds.value = seedVisibleCalendarIds(visibleCalendarIds.value, previous, calendars.value)
-            } catch (e: Exception) {
-                errorMessage.value = e.message
-            }
+            readCalendarsGuarded()
             refreshEvents()
             loadEventsForCurrentView()
         }
@@ -277,12 +332,10 @@ class EventsVM @Inject constructor(
     fun createCalendar(name: String) {
         viewModelScope.launch {
             try {
-                val before = calendars.value
-                val beforeIds = before.map { it.id }.toSet()
+                val beforeIds = calendars.value.map { it.id }.toSet()
                 api.createCalendar(name)
-                val after = api.listCalendars()
-                calendars.value = after
-                visibleCalendarIds.value = seedVisibleCalendarIds(visibleCalendarIds.value, before, after)
+                rereadAfterMutation()
+                val after = calendars.value
                 // Target the just-created calendar for the next authoring action
                 // (events.md § Layout and flow) — the create RPC returns no id, so
                 // diff the list. The no-selection union stays visible; we do NOT
@@ -296,30 +349,43 @@ class EventsVM @Inject constructor(
         }
     }
 
-    fun createEvent(request: CreateEventRequest) {
+    /** `create-event`: asks the same predicate the doors painted from before it
+     *  sends (`ui/events.md` § *No calendar to hold an event*, ruling 3) — the
+     *  shared `event_create_target` answers the calendar (the request's, else the
+     *  active one) or the reason, so an empty calendar id never reaches the wire.
+     *  A refusal or a failed save is the form's own `error-message` and the form
+     *  stays open (ruling 4); [onSaved] closes it on success only. */
+    fun createEvent(request: CreateEventRequest, onSaved: () -> Unit = {}) {
         viewModelScope.launch {
-            try {
-                // In the no-selection union view the request carries an empty
-                // calendarId (the screen has no selection) — target the active
-                // (just-created / first available) calendar, mirroring apple's
-                // `request.calendarId.isEmpty ? …` fill.
-                val req = if (request.calendarId.isEmpty()) {
-                    val cal = activeCalendar() ?: return@launch
-                    request.copy(calendarId = cal.id)
-                } else {
-                    request
+            eventFormError.value = null
+            val selected = request.calendarId.ifEmpty { activeCalendar()?.id.orEmpty() }.ifEmpty { null }
+            val req = when (val target = eventCreateTarget(calendarsRead.value, selected)) {
+                is FfiEventCreateTarget.Refused -> {
+                    eventFormError.value = EventFormError.Refused(target.reason)
+                    return@launch
                 }
-                api.createEvent(req)
-                // Rule 3: clear the rail on the SUCCESS path, not at the
-                // submit click — a failed create must leave the draft intact
-                // so the user's authored text is not lost to a transient error.
-                draftsHost.clear()
-                refreshEvents()
-                loadEventsForCurrentView()
-            } catch (e: Exception) {
-                errorMessage.value = e.message
+                is FfiEventCreateTarget.Calendar -> request.copy(calendarId = target.id)
             }
+            try {
+                api.createEvent(req)
+            } catch (e: Exception) {
+                eventFormError.value = EventFormError.SaveFailed(e.message.orEmpty())
+                return@launch
+            }
+            // Rule 3: clear the rail on the SUCCESS path, not at the
+            // submit click — a failed create must leave the draft intact
+            // so the user's authored text is not lost to a transient error.
+            draftsHost.clear()
+            onSaved()
+            ++loadGen
+            refreshEvents()
+            loadEventsForCurrentView()
         }
+    }
+
+    /** The open form was closed: what it said goes with it. */
+    fun clearEventFormError() {
+        eventFormError.value = null
     }
 
     fun deleteEvent() {

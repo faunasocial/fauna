@@ -737,6 +737,81 @@
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
             </StackPanel>
+
+            <!-- Unsent changes (account-offline-mutation.md § The offline-mutation
+                 contract → The unsent-changes surface, point 1) — STANDING,
+                 right after its sibling pending actions and in its shape: the
+                 header answers in all three states (bare title before the first
+                 read, the empty line once read and empty, the counted title with
+                 rows), RenderUnsentChanges. One unsent-change-item per change the
+                 device outbox holds, in the shared model's order; its description
+                 and status from the shared describer and state text
+                 (SettingsViewModel.LoadUnsentChangesAsync). Retry and discard on a
+                 NOT-SENT row only; discard arms the confirm in its place. Read from
+                 the device, never the nest, and re-read every two seconds while the
+                 page shows. Mirrors tui's unsent_changes_elements and android's
+                 UnsentChangesCard. Same UIA rules as the section above: no Name on
+                 the header, a Name on each row's root. -->
+            <StackPanel Spacing="8">
+                <TextBlock x:Name="UnsentChangesTitleText"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.UnsentChangesSection}"
+                           Style="{StaticResource SubtitleTextBlockStyle}"
+                           TextWrapping="Wrap"
+                           Text="{loc:Localize Key=settings/unsent_changes/title}" />
+
+                <ItemsControl x:Name="UnsentChangesList">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:UnsentChangeRowVm">
+                            <Grid ColumnSpacing="8" Padding="0,4"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.UnsentChangeItem}"
+                                  AutomationProperties.Name="{x:Bind Description}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+
+                                <TextBlock Grid.Column="0" Grid.Row="0"
+                                           AutomationProperties.AutomationId="{x:Bind ids:Ids.UnsentChangeDescription}"
+                                           TextWrapping="Wrap"
+                                           Text="{x:Bind Description}" />
+
+                                <TextBlock Grid.Column="0" Grid.Row="1"
+                                           AutomationProperties.AutomationId="{x:Bind ids:Ids.UnsentChangeStatus}"
+                                           Opacity="0.7"
+                                           TextWrapping="Wrap"
+                                           Text="{x:Bind Status}" />
+
+                                <Button Grid.Column="1" Grid.RowSpan="2" VerticalAlignment="Center"
+                                        AutomationProperties.AutomationId="{x:Bind ids:Ids.UnsentChangeRetryButton}"
+                                        Visibility="{x:Bind local:SettingsAccountPage.BoolToVisibility(ShowsRetry)}"
+                                        Click="RetryUnsentChange_Click"
+                                        Tag="{x:Bind IntentId}"
+                                        Content="{loc:Localize Key=settings/unsent_changes/retry}" />
+
+                                <Button Grid.Column="2" Grid.RowSpan="2" VerticalAlignment="Center"
+                                        AutomationProperties.AutomationId="{x:Bind ids:Ids.UnsentChangeDiscardButton}"
+                                        Visibility="{x:Bind local:SettingsAccountPage.BoolToVisibility(ShowsDiscard)}"
+                                        Click="DiscardUnsentChange_Click"
+                                        Tag="{x:Bind IntentId}"
+                                        Content="{loc:Localize Key=settings/unsent_changes/discard}" />
+
+                                <Button Grid.Column="3" Grid.RowSpan="2" VerticalAlignment="Center"
+                                        AutomationProperties.AutomationId="{x:Bind ids:Ids.UnsentChangeDiscardConfirmButton}"
+                                        Visibility="{x:Bind local:SettingsAccountPage.BoolToVisibility(ShowsDiscardConfirm)}"
+                                        Click="ConfirmDiscardUnsentChange_Click"
+                                        Tag="{x:Bind IntentId}"
+                                        Content="{loc:Localize Key=settings/unsent_changes/discard_confirm}" />
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
         </StackPanel>
     </ScrollViewer>
 </Page>

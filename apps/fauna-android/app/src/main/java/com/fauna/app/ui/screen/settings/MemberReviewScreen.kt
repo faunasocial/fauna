@@ -15,11 +15,18 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
 import com.fauna.app.core.HexUtil
+import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.isShown
 import com.fauna.app.ui.util.localized
+import uniffi.fauna_core.Possibility
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.MemberReviewRow
 import com.fauna.app.ui.viewmodel.MemberReviewVM
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
 
 /**
  * The permanent **Members To Review** Settings sub-page (`ui.yaml` page
@@ -39,6 +46,7 @@ fun MemberReviewScreen(
     val rows by vm.rows.collectAsState()
     val loaded by vm.loaded.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
+    val removeAnswer by vm.removeAnswer.collectAsState()
 
     MemberReviewContent(
         rows = rows,
@@ -47,6 +55,7 @@ fun MemberReviewScreen(
         onBack = { navController.popBackStack() },
         onKeep = vm::keep,
         onRemove = vm::remove,
+        removeAnswer = removeAnswer,
     )
 }
 
@@ -65,6 +74,10 @@ fun MemberReviewContent(
     onBack: () -> Unit,
     onKeep: (ByteArray) -> Unit,
     onRemove: (ByteArray) -> Unit,
+    /** Every row's Remove answer (`MemberReviewVM.removeAnswer`: the
+     *  conversations session is up); the default is for the stateless
+     *  harness only. */
+    removeAnswer: Possibility = Possibility.Possible,
 ) {
     Scaffold(
         topBar = {
@@ -130,6 +143,7 @@ fun MemberReviewContent(
                             row = row,
                             onKeep = { onKeep(row.person) },
                             onRemove = { onRemove(row.person) },
+                            removeAnswer = removeAnswer,
                         )
                         HorizontalDivider()
                     }
@@ -152,6 +166,7 @@ private fun MemberReviewRowItem(
     row: MemberReviewRow,
     onKeep: () -> Unit,
     onRemove: () -> Unit,
+    removeAnswer: Possibility,
 ) {
     val who = localized(row.text.who) ?: stringResource(R.string.settings_recovery_kit_review_unknown_person)
     val reasonText = row.text.reasons.mapNotNull { localized(it) }.joinToString(", ")
@@ -171,9 +186,18 @@ private fun MemberReviewRowItem(
             Button(onClick = onKeep, modifier = Modifier.testTag(Ids.MEMBER_REVIEW_KEEP_BUTTON)) {
                 Text(stringResource(R.string.settings_recovery_kit_review_keep))
             }
-            OutlinedButton(onClick = onRemove, modifier = Modifier.testTag(Ids.MEMBER_REVIEW_REMOVE_BUTTON)) {
-                Text(stringResource(R.string.settings_recovery_kit_review_remove))
+            // Remove evicts through the conversations session, so it is not
+            // live without one — the reason beside the row's buttons.
+            if (removeAnswer.isShown) {
+                OutlinedButton(
+                    onClick = onRemove,
+                    enabled = removeAnswer.isPossible,
+                    modifier = Modifier.testTag(Ids.MEMBER_REVIEW_REMOVE_BUTTON),
+                ) {
+                    Text(stringResource(R.string.settings_recovery_kit_review_remove))
+                }
             }
         }
+        DisabledControlReasonText(localized(removeAnswer.blockedReason))
     }
 }

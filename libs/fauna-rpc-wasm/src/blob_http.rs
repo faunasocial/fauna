@@ -38,6 +38,10 @@ pub const CHUNKS_UPLOAD_PATH: &str = "/api/v1/chunks";
 /// `fauna_nest_http::paths::chunk_store::MANIFESTS_UPLOAD`.
 pub const MANIFESTS_UPLOAD_PATH: &str = "/api/v1/manifests";
 
+/// `POST /api/v1/manifest-pages` — store one canonical `ManifestPage` of a
+/// paged root; the twin of `fauna_nest_http::paths::chunk_store::MANIFEST_PAGES_UPLOAD`.
+pub const MANIFEST_PAGES_UPLOAD_PATH: &str = "/api/v1/manifest-pages";
+
 /// Why a multipart blob upload did not return a body.
 ///
 /// Deliberately transport-shaped rather than domain-shaped: each caller maps it

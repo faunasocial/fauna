@@ -49,9 +49,26 @@ pub fn subdomain_url(handle: &str, domain: &str) -> Option<String> {
 }
 
 /// The `https://<domain>/` apex URL the admin-designated apex actor's site serves
-/// at.
+/// at. Formats whatever it is given — an empty `domain` gives `https:///` — so
+/// a surface that paints the apex address calls [`apex_origin`] instead, which
+/// answers `None` for the nest that serves no web content.
 pub fn apex_url(domain: &str) -> String {
     format!("https://{domain}/")
+}
+
+/// The apex address for a surface to paint, or `None` when the nest serves no
+/// web content at any host: an empty serving domain (or one only whitespace)
+/// is the nest's own way of saying so (`web-content-hosting.md` § Routing),
+/// and a surface then paints the no-serving-domain reason rather than a
+/// composed `https:///` (`docs/goal/ui/README.md` § Offer only what is
+/// possible, rule 7).
+pub fn apex_origin(domain: &str) -> Option<String> {
+    let domain = domain.trim();
+    if domain.is_empty() {
+        None
+    } else {
+        Some(apex_url(domain))
+    }
 }
 
 /// Why an actor's published content has no public origin
@@ -818,6 +835,16 @@ mod tests {
         assert_eq!(subdomain_url("", "example.org"), None);
         assert_eq!(subdomain_url("alice", ""), None);
         assert_eq!(subdomain_url("www", "example.org"), None);
+    }
+
+    #[test]
+    fn apex_origin_never_composes_an_empty_host() {
+        assert_eq!(
+            apex_origin("example.org").as_deref(),
+            Some("https://example.org/")
+        );
+        assert_eq!(apex_origin(""), None);
+        assert_eq!(apex_origin("  "), None);
     }
 
     #[test]

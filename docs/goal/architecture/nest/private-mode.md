@@ -85,7 +85,7 @@ When a remote sender creates a DM channel with an actor whose home is a private 
 - **Pull — `fauna.federation.sync.mls_pull`** (capability: `mls_pull`). Request: `actor_id`, `since_seq` — no client-supplied limit; the reply page is server-capped at `segments::SERVE_PAGE_MAX_RECORDS` (500 records) and closes early rather than overflowing the 2 MiB WS frame. Returns buffered messages in sequence order starting after `since_seq`; the public nest reads buffered ciphertext from the per-channel `__conv` segment store (`list_actor_channels` → `segments::conv::read_for_scopes_after_seq`).
 - **Acknowledge — `fauna.federation.sync.mls_ack`.** Request: `actor_id`, `up_to_seq`. Confirms delivery up through `up_to_seq`; the public nest calls `segments::conv::tombstone_up_to_seq`, hiding messages with `seq <= up_to_seq` from subsequent reads (physical reclaim of tombstoned segment bytes is the Plan 8 conv compaction — `segments::conv::compact_bucket`).
 
-The private nest is responsible for the polling interval. There is no server-push to the private nest; it must poll actively to receive messages in near-real time.
+The private nest is responsible for the polling interval. There is no server-push to the private nest; it must poll actively to receive messages in near-real time. **The interval (built):** the sync worker syncs each paired actor's namespace and relays its mail from every pairing target in one cycle, then waits 10 s, or 30 s when reading its pairing rows failed (`bins/fauna-nest/src/nest_sync_worker.rs::run_sync_worker`); the relay guide states it as "about every 10 seconds".
 
 See `../data-flow.md` — "DM send (cross-nest)" for the full sequence diagram showing how messages arrive at the public nest before the private nest polls.
 

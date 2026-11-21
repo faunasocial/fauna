@@ -120,6 +120,11 @@ pub enum Gesture {
         home: Option<String>,
     },
     Events(crate::events::Action),
+    /// `folder-paywall-step` / `folder-destination-step`
+    /// — a folder row's jump to the place its gate's reason names
+    /// (`crate::settings::folders::go_to_step`). It crosses pages, so it sits
+    /// outside `crate::settings::Action` like [`Self::OpenSearchResult`].
+    FoldersStep(crate::settings::folders::FolderStep),
     /// A Settings-shell gesture (`crate::settings`) — sub-page nav
     /// (`OpenTuiSettings` / `NavBack`) or the external-media select. All local,
     /// so both actuation paths dispatch it synchronously (no network op).
@@ -283,7 +288,8 @@ impl Gesture {
             | Gesture::OpenRoomSearchHit(_)
             | Gesture::SelectCalendar(_)
             | Gesture::ToggleCalendarVisibility(_)
-            | Gesture::OpenEventDetail(_) => None,
+            | Gesture::OpenEventDetail(_)
+            | Gesture::FoldersStep(_) => None,
             // The pre-authentication surfaces. A launch/wizard/unlock screen is
             // reached precisely when there is no session yet, so gating it on
             // "no live nest" would desensitize the controls whose whole job is
@@ -323,6 +329,10 @@ pub enum SelectTarget {
     /// cross-app `select(id, label)` contract is one shape.
     ComposeGateTier,
     VpsLocation,
+    /// `provider-goal-select[<goal>]` on `provider_choice` — a raw-value
+    /// picker: the covering provider's id (or `manual`) is what `get_text`
+    /// returns and `select` takes; the provider's name rides `display_value`.
+    ProviderGoalCover(fauna_onboarding_machine::ProviderGoal),
     RuleType,
     Combination,
     Factor,
@@ -845,6 +855,14 @@ impl SelectTarget {
         match self {
             SelectTarget::VpsLocation => {
                 Gesture::Wizard(crate::wizard::Action::SelectVpsLocationByName(value))
+            }
+            SelectTarget::ProviderGoalCover(goal) => {
+                let cover = if value == crate::wizard::provider_choice::MANUAL {
+                    fauna_onboarding_machine::GoalCover::Manual
+                } else {
+                    fauna_onboarding_machine::GoalCover::Provider { provider_id: value }
+                };
+                Gesture::Wizard(crate::wizard::Action::SelectGoalCover(goal, cover))
             }
             SelectTarget::RuleType => Gesture::Feed(crate::feed::Action::SetRuleType(value)),
             SelectTarget::Combination => Gesture::Feed(crate::feed::Action::SetCombination(value)),
@@ -1411,6 +1429,15 @@ pub struct Element {
     /// § Rendering — *A page whose LAYOUT is load-bearing asserts the paint*).
     /// So the default is "a button looks like a button" and the grids opt out.
     pub cell: bool,
+    /// Paint this label as frame `n` of the terminal's indeterminate activity
+    /// glyph ([`crate::spinner`]) instead of its `text` — set via
+    /// [`Element::spinning`]. Paint-only, like [`Element::label`]: the registry
+    /// keeps `text` (the shared `status_glyph`), so a driver's read never
+    /// depends on which frame happened to be painted. The one consumer is the
+    /// `running` paint of `provisioning-step-checkbox`
+    /// (`onboarding-provisioning.md` § 6 *A running step shows activity, never
+    /// an attempt count*).
+    pub spinner: Option<usize>,
     /// The element's **second** gesture: what a double-press actuates, when
     /// that is a different action from the single press — set via
     /// [`Element::double_clickable`].
@@ -1459,9 +1486,45 @@ pub struct Element {
     /// dwell to another whenever the window changed between the two reads — the
     /// mid-rebuild misattribution `fauna_feed::CueRow::post_id` forbids.
     pub cue: Option<crate::feed::cues::CueSubject>,
+    /// The shared-Rust predicate's answer for this affordance, set via
+    /// [`Element::possible`]: may it succeed now, and if not, why
+    /// (`docs/goal/ui/README.md` § Offer only what is possible, rule 6).
+    ///
+    /// **A declaration, never a decision.** The page states the answer its
+    /// predicate gave; [`crate::app::App::page_elements`] is the one seam that
+    /// acts on it, folding it with the offline gate: `Blocked` disables the
+    /// element (the reason painted), `Absent` drops it from the list. The
+    /// builder deliberately leaves [`Self::enabled`] alone, so a page that
+    /// builds its elements past the seam leaves a blocked control enabled, and
+    /// the walk invariant I8 (`crate::walk`) reds on it.
+    ///
+    /// In-process only, like [`observation`](Self::observation): no `attrs`
+    /// entry. A driver reads the decision through `is_enabled` and the painted
+    /// reason, never the declaration.
+    pub possibility: Option<fauna_core::possibility::Possibility>,
 }
 
 impl Element {
+    /// Declare the shared predicate's answer for this affordance (see
+    /// [`Self::possibility`]). The seam in
+    /// [`crate::app::App::page_elements`] applies it; this only records it.
+    pub fn possible(mut self, answer: fauna_core::possibility::Possibility) -> Self {
+        self.possibility = Some(answer);
+        self
+    }
+
+    /// Whether the seam leaves this element enabled — its own flag and its
+    /// declared answer together, the offline gate aside. For a page's unit
+    /// tests, which read element lists from before the seam ran.
+    #[cfg(test)]
+    pub fn offered(&self) -> bool {
+        self.enabled
+            && self
+                .possibility
+                .as_ref()
+                .is_none_or(fauna_core::possibility::Possibility::is_possible)
+    }
+
     /// Declare that this element paints the body of `record` — the T1
     /// observation the shell reports once the element is really on screen.
     ///
@@ -1503,6 +1566,18 @@ impl Element {
     /// "prompt: value" (a contact field's "Postal code", a MUA row's "IMAP
     /// host"). Paint-only: [`Element::text`] stays the bare value, which is what
     /// the registry hands every driver's `get_text`.
+    /// Paint as frame `frame` of the activity glyph (see [`Element::spinner`]).
+    /// Label-only: a debug build asserts on misuse, the [`Element::cell`] shape.
+    pub fn spinning(mut self, frame: usize) -> Self {
+        debug_assert!(
+            matches!(self.role, Role::Label),
+            "Element::spinning is for Role::Label — {} is not one",
+            self.id
+        );
+        self.spinner = Some(frame);
+        self
+    }
+
     pub fn labelled(mut self, label: impl Into<String>) -> Self {
         self.label = Some(label.into());
         self
@@ -1730,9 +1805,11 @@ impl Element {
             nav: false,
             nav_back: false,
             cell: false,
+            spinner: None,
             dbl: None,
             observation: None,
             cue: None,
+            possibility: None,
         }
     }
 
@@ -1809,9 +1886,11 @@ impl Element {
             nav: false,
             nav_back: false,
             cell: false,
+            spinner: None,
             dbl: None,
             observation: None,
             cue: None,
+            possibility: None,
         }
     }
 
@@ -1853,9 +1932,11 @@ impl Element {
             nav: false,
             nav_back: false,
             cell: false,
+            spinner: None,
             dbl: None,
             observation: None,
             cue: None,
+            possibility: None,
         }
     }
 
@@ -1911,9 +1992,11 @@ impl Element {
             nav: false,
             nav_back: false,
             cell: false,
+            spinner: None,
             dbl: None,
             observation: None,
             cue: None,
+            possibility: None,
         }
     }
 
@@ -1935,9 +2018,11 @@ impl Element {
             nav: false,
             nav_back: false,
             cell: false,
+            spinner: None,
             dbl: None,
             observation: None,
             cue: None,
+            possibility: None,
         }
     }
 
@@ -1967,9 +2052,11 @@ impl Element {
             nav: false,
             nav_back: false,
             cell: false,
+            spinner: None,
             dbl: None,
             observation: None,
             cue: None,
+            possibility: None,
         }
     }
 
@@ -2010,9 +2097,11 @@ impl Element {
             nav: false,
             nav_back: false,
             cell: false,
+            spinner: None,
             dbl: None,
             observation: None,
             cue: None,
+            possibility: None,
         }
     }
 
@@ -2040,9 +2129,11 @@ impl Element {
             nav: false,
             nav_back: false,
             cell: false,
+            spinner: None,
             dbl: None,
             observation: None,
             cue: None,
+            possibility: None,
         }
     }
 
@@ -2077,9 +2168,11 @@ impl Element {
             nav: false,
             nav_back: false,
             cell: false,
+            spinner: None,
             dbl: None,
             observation: None,
             cue: None,
+            possibility: None,
         }
     }
 

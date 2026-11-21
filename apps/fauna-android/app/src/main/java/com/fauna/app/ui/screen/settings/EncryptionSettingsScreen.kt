@@ -17,6 +17,7 @@ import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.viewmodel.EncryptionSettingsVM
 import social.fauna.generated.Ids
 import uniffi.fauna_conversations.keypackagesLow
+import com.fauna.app.ui.controls.Button
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

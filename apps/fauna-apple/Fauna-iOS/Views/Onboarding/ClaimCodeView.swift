@@ -17,7 +17,6 @@ struct ClaimCodeView: View {
 
     var body: some View {
         let snap = vm.machine.claimCodeSnapshot()
-        let canSubmit = snap.submitEnabled && !code.isEmpty
 
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -36,17 +35,17 @@ struct ClaimCodeView: View {
                         .submitLabel(.go)
                         .accessibilityIdentifier(Ids.claimCodeInput)
                         .automationField(Ids.claimCodeInput, text: $code)
-                        .onSubmit { if canSubmit { submit() } }
+                        .onSubmit { submit() }
 
                     Button(L.onboarding.claimCode.submitButton) { submit() }
                         .buttonStyle(.bordered)
-                        .disabled(!canSubmit)
                         .accessibilityIdentifier(Ids.claimCodeSubmitButton)
-                        .automationActivate(Ids.claimCodeSubmitButton,
-                                            isEnabled: { vm.machine.claimCodeSnapshot().submitEnabled && !code.isEmpty }) {
-                            submit()
-                        }
+                        .automationActivate(Ids.claimCodeSubmitButton) { submit() }
+                        // One shared answer — a code typed, no claim on its
+                        // way; `submitClaimCode` re-asks it.
+                        .faunaPossible(vm.claimCodePossibility(code))
                 }
+                FaunaPossibilityReason(vm.claimCodePossibility(code))
 
                 Text(renderLocalizedText(snap.message))
                     .font(.subheadline)
@@ -84,7 +83,7 @@ struct ClaimCodeView: View {
     }
 
     private func submit() {
-        Task { _ = await vm.machine.wizardSubmitClaimCode(code: code) }
+        vm.submitClaimCode(code)
     }
 }
 #endif // !FAUNA_KIDS

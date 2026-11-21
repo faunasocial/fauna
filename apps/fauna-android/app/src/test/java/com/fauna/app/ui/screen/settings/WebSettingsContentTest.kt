@@ -133,6 +133,27 @@ class WebSettingsContentTest {
         composeTestRule.onNodeWithTag("web-settings-subdomain-toggle").assertIsEnabled()
     }
 
+    /** The shared answer: a nest with no serving domain leaves the toggle
+     *  absent — nothing on this page could make it serve. */
+    @Test
+    fun toggleAbsentWithNoServingDomain() {
+        render(
+            SubdomainView(enabled = false, url = null, disabledReason = SubdomainDisabledReason.NO_SERVING_DOMAIN),
+            hydrated = true,
+        )
+        composeTestRule.onNodeWithTag("web-settings-subdomain-toggle").assertDoesNotExist()
+    }
+
+    /** No handle leaves the toggle shown but blocked, naming the step. */
+    @Test
+    fun toggleBlockedWithNoHandle() {
+        render(
+            SubdomainView(enabled = false, url = null, disabledReason = SubdomainDisabledReason.NO_HANDLE),
+            hydrated = true,
+        )
+        composeTestRule.onNodeWithTag("web-settings-subdomain-toggle").assertIsNotEnabled()
+    }
+
     // ── Published-posts management section ─────────────────────────────────
 
     private val view = SubdomainView(enabled = true, url = "https://alice.example.com/", disabledReason = null)

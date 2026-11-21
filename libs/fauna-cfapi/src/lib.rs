@@ -152,6 +152,19 @@ pub fn is_filter_registered(path: &str) -> Result<bool> {
 /// `account_id` distinguishes roots within the provider (the OS-mandated Id
 /// format is `provider!SID!account`); returns the composed Id, which
 /// [`unregister_sync_root_with_shell`] takes.
+///
+/// **A `0x80070490` refusal is tried again** (measured 2026-11-17 on Windows,
+/// `installers/windows.md` § Direct download, 5, *Removal*: a `Register` made
+/// from inside a freshly deployed package's context is refused "Element not
+/// found" at first and then registers, about one attempt in four refused
+/// after that): at most [`SHELL_REGISTER_ATTEMPTS`] calls, a doubling backoff
+/// from [`SHELL_REGISTER_FIRST_BACKOFF`] between them, and each refusal's
+/// leftovers — a half `SyncRootManager` key and a namespace class — removed
+/// by [`unregister_sync_root_with_shell`] before the next call and after the
+/// last. Any other failure is returned at once. **The caller's contract:**
+/// `path` holds no shell registration ([`shell_registration_for`] answers
+/// `None`) and `account_id` names that folder's binding alone, so whatever
+/// stands under the Id after a refusal is the refused call's to remove.
 pub fn register_sync_root_with_shell(
     path: &str,
     display_name: &str,
@@ -189,8 +202,23 @@ pub fn register_sync_root_with_shell(
     info.SetAllowPinning(true)?;
     info.SetShowSiblingsAsGroup(false)?;
 
-    StorageProviderSyncRootManager::Register(&info)
-        .context("StorageProviderSyncRootManager::Register")?;
+    // A refusal's half key and namespace class are removed before the next
+    // call, and after the last: nothing but a registration stays under this
+    // Id. Safe by the contract in the doc above — the folder holds no shell
+    // registration and the Id names its binding alone — so whatever is under
+    // the Id after a refusal is the refused call's.
+    retry_refused_register(
+        SHELL_REGISTER_ATTEMPTS,
+        SHELL_REGISTER_FIRST_BACKOFF,
+        || StorageProviderSyncRootManager::Register(&info),
+        || {
+            if let Err(e) = unregister_sync_root_with_shell(&id) {
+                tracing::warn!(id, error = %format!("{e:#}"), "removing a refused Register's leftovers failed");
+            }
+        },
+        std::thread::sleep,
+    )
+    .context("StorageProviderSyncRootManager::Register")?;
     tracing::info!(path, display_name, id, "sync root registered with shell");
     Ok(id)
 }
@@ -203,18 +231,98 @@ pub fn register_sync_root_with_shell(
 /// Order matters (measured 2026-07-16): this fails `0x8007017C
 /// ERROR_CLOUD_FILE_INVALID_REQUEST` while the root is still connected, and
 /// succeeds once [`disconnect`] + [`unregister_sync_root`] have run — the
-/// reverse of registration, where the shell call goes first.
+/// reverse of registration, where the shell call goes first. That error, and
+/// any other but the one below, is returned and nothing is deleted.
+///
+/// **What `Unregister` leaves, this removes** (measured 2026-11-16 and
+/// 2026-11-17 on Windows, Windows 11 26300): for a root registered from inside a
+/// package's context, `Unregister` keeps the `SyncRootManager` key — called
+/// from inside the package or outside it, before or after the package's
+/// removal — and answers either S_OK or `0x80070490 ERROR_NOT_FOUND`; it also
+/// keeps the root's `WOW6432Node` namespace class, and a failed one keeps the
+/// two other namespace keys as well ([`NAMESPACE_PARENTS`]). A refused
+/// `Register` leaves a half key the OS answers `0x80070490` for too. So after
+/// an S_OK or that answer, whatever is still there under this Id is a leftover
+/// no OS registration stands behind, and it is deleted: the key, then the
+/// namespace keys its `NamespaceCLSID` names (read before anything is
+/// removed, since the key is their only pointer). An unpackaged registration's
+/// `Unregister` removes all of it itself, and the deletes find nothing. A
+/// caller running in a package gets the same deletes in the real hive
+/// ([`delete_shell_leftovers`]).
 pub fn unregister_sync_root_with_shell(id: &str) -> Result<()> {
     use windows::Storage::Provider::StorageProviderSyncRootManager;
-    StorageProviderSyncRootManager::Unregister(&HSTRING::from(id))
-        .context("StorageProviderSyncRootManager::Unregister")?;
-    tracing::info!(id, "sync root unregistered from shell");
+    let entry = read_shell_sync_root(id);
+    match StorageProviderSyncRootManager::Unregister(&HSTRING::from(id)) {
+        Ok(()) => tracing::info!(id, "sync root unregistered from shell"),
+        Err(e) if e.code().0 as u32 == ERROR_NOT_FOUND_HRESULT => {
+            tracing::info!(id, "the OS holds no shell registration under this id");
+        }
+        Err(e) => return Err(e).context("StorageProviderSyncRootManager::Unregister"),
+    }
+    if let Some(entry) = entry {
+        delete_shell_leftovers(&entry)?;
+    }
     Ok(())
+}
+
+/// `HRESULT_FROM_WIN32(ERROR_NOT_FOUND)`, "Element not found": what
+/// `StorageProviderSyncRootManager` answers for an Id the OS holds no
+/// registration under — and, transiently, what a `Register` from inside a
+/// package's context answers (see [`unregister_sync_root_with_shell`]).
+const ERROR_NOT_FOUND_HRESULT: u32 = 0x8007_0490;
+
+/// How many `Register` calls [`register_sync_root_with_shell`] makes, at most,
+/// while the OS refuses them `0x80070490` (the refusal a freshly deployed
+/// package's `Register` meets — `installers/windows.md` § Direct download, 5,
+/// *Removal*, measured 2026-11-17: refused at first, then about one attempt in
+/// four). Bounded short, since the call runs on the engine's driving thread:
+/// a root still refused after them is the engine's to retry at its next edge
+/// (`fauna-sync-agent`'s serve loop, the connect retry).
+pub const SHELL_REGISTER_ATTEMPTS: u32 = 4;
+
+/// The wait before the second `Register` call; it doubles before each later
+/// one (250 ms, 500 ms, 1 s — under two seconds of waiting in all).
+pub const SHELL_REGISTER_FIRST_BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The retry rule of [`register_sync_root_with_shell`], apart from the OS: call
+/// `register` until it is not refused `0x80070490`, at most `attempts` times;
+/// after each refusal call `clean_up` (a refused `Register` leaves a half key
+/// and a namespace class — [`unregister_sync_root_with_shell`] removes both),
+/// and before each retry `sleep` the backoff, doubling from `first_backoff`.
+/// Any other answer — a success or any other failure — is returned at once.
+fn retry_refused_register<T>(
+    attempts: u32,
+    first_backoff: std::time::Duration,
+    mut register: impl FnMut() -> windows::core::Result<T>,
+    mut clean_up: impl FnMut(),
+    mut sleep: impl FnMut(std::time::Duration),
+) -> windows::core::Result<T> {
+    let mut backoff = first_backoff;
+    let mut attempt = 1;
+    loop {
+        match register() {
+            Err(e) if e.code().0 as u32 == ERROR_NOT_FOUND_HRESULT => {
+                clean_up();
+                if attempt >= attempts {
+                    return Err(e);
+                }
+                tracing::warn!(
+                    attempt,
+                    attempts,
+                    "StorageProviderSyncRootManager::Register refused 0x80070490; trying again"
+                );
+                sleep(backoff);
+                backoff = backoff.saturating_mul(2);
+                attempt += 1;
+            }
+            other => return other,
+        }
+    }
 }
 
 /// One entry of the `SyncRootManager` state that belongs to the Fauna provider
 /// (the Id starts with `Fauna!`): what [`list_shell_sync_roots`] returns.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ShellSyncRoot {
     /// The OS-mandated `Fauna!SID!account` Id ([`unregister_sync_root_with_shell`] takes it).
     pub id: String,
@@ -223,6 +331,164 @@ pub struct ShellSyncRoot {
     /// data), so a caller deciding "ghost or live" must check the path on disk;
     /// `None` means the entry carries no readable path at all.
     pub path: Option<String>,
+    /// The `AUMID` value the OS records for a root registered from inside a
+    /// package's context — `<package family name>!<application id>` — and
+    /// `None` for one registered by an unpackaged process (measured 2026-11-16).
+    /// [`ShellSyncRoot::package_family`] reads the family from it.
+    pub aumid: Option<String>,
+    /// The `NamespaceCLSID` value: the Explorer namespace class the OS made for
+    /// this root ([`NAMESPACE_PARENTS`]). The key is the only pointer to it.
+    pub namespace_clsid: Option<String>,
+}
+
+impl ShellSyncRoot {
+    /// The SID segment of the `Fauna!SID!account` Id.
+    pub fn sid(&self) -> Option<&str> {
+        self.id.split('!').nth(1).filter(|s| !s.is_empty())
+    }
+
+    /// The package family whose context registered this root, from its
+    /// [`aumid`](Self::aumid); `None` for an unpackaged registration.
+    pub fn package_family(&self) -> Option<&str> {
+        self.aumid.as_deref().and_then(package_family_of_aumid)
+    }
+}
+
+/// The package family name of an application user model id
+/// (`<family name>!<application id>`, the family `<name>_<publisher id>`), or
+/// `None` when `aumid` is not that shape.
+pub fn package_family_of_aumid(aumid: &str) -> Option<&str> {
+    let (family, app) = aumid.split_once('!')?;
+    let (name, publisher) = family.rsplit_once('_')?;
+    (!name.is_empty() && !publisher.is_empty() && !app.is_empty() && !app.contains('!'))
+        .then_some(family)
+}
+
+/// Whether package family `family` has a package installed for the current
+/// user: `GetPackagesByPackageFamily`, the documented query an unpackaged
+/// process may make, which answers for the calling user alone. Any failure but
+/// the two answers is an error, never a "no".
+pub fn package_family_installed(family: &str) -> Result<bool> {
+    use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS};
+    use windows::Win32::Storage::Packaging::Appx::GetPackagesByPackageFamily;
+    let name = HSTRING::from(family);
+    let mut count = 0u32;
+    let mut buffer_length = 0u32;
+    // No buffers: the count alone. A family with packages answers
+    // ERROR_INSUFFICIENT_BUFFER, one with none answers ERROR_SUCCESS and 0.
+    let rc =
+        unsafe { GetPackagesByPackageFamily(&name, &mut count, None, &mut buffer_length, None) };
+    match rc {
+        ERROR_SUCCESS => Ok(count > 0),
+        ERROR_INSUFFICIENT_BUFFER => Ok(true),
+        other => anyhow::bail!("GetPackagesByPackageFamily({family}) failed: {other:?}"),
+    }
+}
+
+/// The parents, under `HKEY_CURRENT_USER`, of the keys the OS writes for a
+/// shell registration's Explorer namespace node, each named by the entry's
+/// `NamespaceCLSID` (measured 2026-11-17: all three on a registration, the
+/// `WOW6432Node` class alone on a refused one).
+const NAMESPACE_PARENTS: [&str; 3] = [
+    r"Software\Classes\CLSID",
+    r"Software\Classes\WOW6432Node\CLSID",
+    r"Software\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace",
+];
+
+/// Delete what a shell registration left in the registry once no OS
+/// registration stands behind it: for this user's own entry, whose namespace
+/// keys live in this user's hive, the namespace keys its `NamespaceCLSID`
+/// names; then its `SyncRootManager` key. Each is deleted only when present;
+/// an Id or a class that is not its exact shape deletes nothing (an empty one
+/// would name the whole parent).
+///
+/// **The namespace keys go first,** while the key that names them still
+/// stands, so a stop between the two leaves them findable. A namespace delete
+/// that fails does not keep the key: the key goes anyway — a `SyncRootManager`
+/// entry for an ended binding would read as a live registration of the folder
+/// ([`shell_registration_for`]) — and the first failure is returned after it.
+///
+/// **From inside a package, the namespace deletes are made outside it**
+/// ([`outside_package`]): a packaged process's own `HKEY_CURRENT_USER` deletes
+/// reach only its package's registry view (measured 2026-11-20). The
+/// `SyncRootManager` key is under `HKEY_LOCAL_MACHINE`, whose writes are not
+/// virtualized: the packaged agent's own delete of it was measured reaching the
+/// real hive the same day, so it stays in this process.
+fn delete_shell_leftovers(entry: &ShellSyncRoot) -> Result<()> {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    anyhow::ensure!(
+        is_fauna_root_id(&entry.id),
+        "refusing to delete a SyncRootManager key named {:?}",
+        entry.id
+    );
+    let ours = entry
+        .sid()
+        .is_some_and(|sid| current_user_sid_string().is_ok_and(|me| me.eq_ignore_ascii_case(sid)));
+    let mut namespace: Result<()> = Ok(());
+    if let (true, Some(clsid)) = (ours, entry.namespace_clsid.as_deref())
+        && is_braced_guid(clsid)
+    {
+        namespace = outside_package::running_in_package()
+            .context("ask whether this process runs in a package")
+            .and_then(|in_package| {
+                let mut first: Result<()> = Ok(());
+                for parent in NAMESPACE_PARENTS {
+                    let sub = format!(r"{parent}\{clsid}");
+                    let deleted = if in_package {
+                        outside_package::delete_hkcu_tree(&sub)
+                    } else {
+                        delete_key_tree(HKEY_CURRENT_USER, &sub)
+                    };
+                    if let Err(e) = deleted.with_context(|| format!(r"delete HKCU\{sub}")) {
+                        tracing::warn!(id = %entry.id, error = %format!("{e:#}"), "a namespace key was not deleted");
+                        first = first.and(Err(e));
+                    }
+                }
+                first
+            });
+    }
+    delete_key_tree(
+        HKEY_LOCAL_MACHINE,
+        &format!(r"{SYNC_ROOT_MANAGER_KEY}\{}", entry.id),
+    )
+    .with_context(|| format!("delete the SyncRootManager key of {}", entry.id))?;
+    namespace?;
+    tracing::info!(id = %entry.id, "removed what the shell registration left");
+    Ok(())
+}
+
+/// `Fauna!<SID>!<account>`: the provider prefix, three non-empty segments, no
+/// path separator.
+fn is_fauna_root_id(id: &str) -> bool {
+    let parts: Vec<&str> = id.split('!').collect();
+    parts.len() == 3
+        && parts[0] == "Fauna"
+        && parts.iter().all(|p| !p.is_empty())
+        && !id.contains(['\\', '/'])
+}
+
+/// `{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}`, hex digits either case.
+fn is_braced_guid(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 38
+        && b[0] == b'{'
+        && b[37] == b'}'
+        && b[1..37].iter().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => *c == b'-',
+            _ => c.is_ascii_hexdigit(),
+        })
+}
+
+/// `RegDeleteTreeW` of `sub` (the key and everything under it); an absent key
+/// is already deleted.
+fn delete_key_tree(root: windows::Win32::System::Registry::HKEY, sub: &str) -> Result<()> {
+    use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
+    use windows::Win32::System::Registry::RegDeleteTreeW;
+    let sub_h = HSTRING::from(sub);
+    match unsafe { RegDeleteTreeW(root, &sub_h) } {
+        ERROR_SUCCESS | ERROR_FILE_NOT_FOUND => Ok(()),
+        other => anyhow::bail!("RegDeleteTreeW failed: {other:?}"),
+    }
 }
 
 /// The registry home of shell sync-root registrations — **the only readable
@@ -240,21 +506,16 @@ const SYNC_ROOT_MANAGER_KEY: &str =
 /// prefix) from the `SyncRootManager` registry state — see
 /// [`SYNC_ROOT_MANAGER_KEY`] for why this reads the registry and not WinRT.
 /// Each entry's folder comes from its `UserSyncRoots\<SID>` value (the SID is
-/// the Id's middle segment), which `Register` always writes.
+/// the Id's middle segment), which a successful `Register` always writes.
 pub fn list_shell_sync_roots() -> Result<Vec<ShellSyncRoot>> {
     use windows::Win32::System::Registry::{
-        HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RRF_RT_REG_SZ, RegCloseKey, RegEnumKeyExW,
-        RegGetValueW, RegOpenKeyExW,
+        HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RegCloseKey, RegEnumKeyExW, RegOpenKeyExW,
     };
     use windows::core::{PCWSTR, PWSTR};
 
-    fn to_w(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain(std::iter::once(0)).collect()
-    }
-
     unsafe {
         let mut hkey = HKEY::default();
-        let sub = to_w(SYNC_ROOT_MANAGER_KEY);
+        let sub = to_wide(SYNC_ROOT_MANAGER_KEY);
         if RegOpenKeyExW(
             HKEY_LOCAL_MACHINE,
             PCWSTR(sub.as_ptr()),
@@ -268,7 +529,7 @@ pub fn list_shell_sync_roots() -> Result<Vec<ShellSyncRoot>> {
             // at all (fresh install) — an empty listing, not an error.
             return Ok(Vec::new());
         }
-        let mut out = Vec::new();
+        let mut ids = Vec::new();
         let mut index = 0u32;
         loop {
             let mut name = [0u16; 512];
@@ -289,37 +550,87 @@ pub fn list_shell_sync_roots() -> Result<Vec<ShellSyncRoot>> {
             }
             index += 1;
             let id = String::from_utf16_lossy(&name[..len as usize]);
-            if !id.starts_with("Fauna!") {
-                continue;
+            if id.starts_with("Fauna!") {
+                ids.push(id);
             }
-            // Id = Fauna!<SID>!<account>; the folder lives at <id>\UserSyncRoots\<SID>.
-            let sid = id.split('!').nth(1).unwrap_or_default();
-            let value_key = to_w(&format!(r"{SYNC_ROOT_MANAGER_KEY}\{id}\UserSyncRoots"));
-            let sid_w = to_w(sid);
-            let mut buf = [0u16; 1024];
-            let mut cb = std::mem::size_of_val(&buf) as u32;
-            let path = if RegGetValueW(
-                HKEY_LOCAL_MACHINE,
-                PCWSTR(value_key.as_ptr()),
-                PCWSTR(sid_w.as_ptr()),
-                RRF_RT_REG_SZ,
-                None,
-                Some(buf.as_mut_ptr() as *mut _),
-                Some(&mut cb),
-            )
-            .is_ok()
-            {
-                // cb counts bytes including the terminating NUL.
-                let chars = (cb as usize / 2).saturating_sub(1);
-                Some(String::from_utf16_lossy(&buf[..chars]))
-            } else {
-                None
-            };
-            out.push(ShellSyncRoot { id, path });
         }
         let _ = RegCloseKey(hkey);
-        Ok(out)
+        // An entry deleted between the enumeration and its read is not listed.
+        Ok(ids
+            .iter()
+            .filter_map(|id| read_shell_sync_root(id))
+            .collect())
     }
+}
+
+/// One `SyncRootManager` entry by Id, or `None` when no key has that name:
+/// the folder from `<id>\UserSyncRoots\<SID>` (the SID is the Id's middle
+/// segment), the `AUMID` and the `NamespaceCLSID` values, each `None` when
+/// absent.
+fn read_shell_sync_root(id: &str) -> Option<ShellSyncRoot> {
+    let key = format!(r"{SYNC_ROOT_MANAGER_KEY}\{id}");
+    if !hklm_key_exists(&key) {
+        return None;
+    }
+    let sid = id.split('!').nth(1).unwrap_or_default();
+    Some(ShellSyncRoot {
+        id: id.to_string(),
+        path: hklm_string(&format!(r"{key}\UserSyncRoots"), sid),
+        aumid: hklm_string(&key, "AUMID"),
+        namespace_clsid: hklm_string(&key, "NamespaceCLSID"),
+    })
+}
+
+fn to_wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn hklm_key_exists(sub: &str) -> bool {
+    use windows::Win32::System::Registry::{
+        HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RegCloseKey, RegOpenKeyExW,
+    };
+    use windows::core::PCWSTR;
+    let sub_w = to_wide(sub);
+    let mut hkey = HKEY::default();
+    unsafe {
+        if RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(sub_w.as_ptr()),
+            None,
+            KEY_READ,
+            &mut hkey,
+        )
+        .is_err()
+        {
+            return false;
+        }
+        let _ = RegCloseKey(hkey);
+    }
+    true
+}
+
+/// A `REG_SZ` value under `HKEY_LOCAL_MACHINE\<sub>`, or `None`.
+fn hklm_string(sub: &str, value: &str) -> Option<String> {
+    use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
+    use windows::core::PCWSTR;
+    let sub_w = to_wide(sub);
+    let value_w = to_wide(value);
+    let mut buf = [0u16; 1024];
+    let mut cb = std::mem::size_of_val(&buf) as u32;
+    let ok = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(sub_w.as_ptr()),
+            PCWSTR(value_w.as_ptr()),
+            RRF_RT_REG_SZ,
+            None,
+            Some(buf.as_mut_ptr() as *mut _),
+            Some(&mut cb),
+        )
+        .is_ok()
+    };
+    // cb counts bytes including the terminating NUL.
+    ok.then(|| String::from_utf16_lossy(&buf[..(cb as usize / 2).saturating_sub(1)]))
 }
 
 /// Unregister one [`list_shell_sync_roots`] entry whole: the filter half first,
@@ -327,14 +638,20 @@ pub fn list_shell_sync_roots() -> Result<Vec<ShellSyncRoot>> {
 /// [`unregister_sync_root_with_shell`] fails while the root is still
 /// filter-connected. Best-effort on the filter half: an already-gone or
 /// unknown-path registration is fine, the shell entry is the part Explorer
-/// keeps rendering. The one home of that order for every whole-entry sweep (the
-/// agent's ghost janitor and uninstall cleanup, the dev fleet's test-root sweep).
+/// keeps rendering — and through [`unregister_sync_root_with_shell`], whatever
+/// `Unregister` keeps of it (the key, the namespace keys). The one home of that
+/// order for every whole-entry sweep (the agent's ghost janitor and uninstall
+/// cleanup, the dev fleet's test-root sweep).
 pub fn unregister_shell_root(r: &ShellSyncRoot) -> Result<()> {
     if let Some(p) = &r.path {
         let _ = unregister_sync_root(p);
     }
     unregister_sync_root_with_shell(&r.id)
 }
+
+/// `HKEY_CURRENT_USER` deletes that reach the real hive from inside a package
+/// ([`delete_shell_leftovers`]'s namespace keys).
+mod outside_package;
 
 /// The dev fleet's sweep of the test sync roots a killed test run leaves
 /// registered — test scaffolding, compiled out of a shipped artifact.
@@ -2167,6 +2484,172 @@ pub fn unix_to_filetime(unix_secs: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `Register` answer for [`retry_refused_register`]'s tests: the
+    /// refusal a freshly deployed package meets, or another failure.
+    fn refused() -> windows::core::Error {
+        windows::core::Error::from(windows::core::HRESULT(ERROR_NOT_FOUND_HRESULT as i32))
+    }
+
+    /// What one run of [`retry_refused_register`] did, attempt by attempt.
+    #[derive(Debug, Default, PartialEq)]
+    struct Run {
+        attempts: u32,
+        clean_ups: u32,
+        sleeps: Vec<std::time::Duration>,
+    }
+
+    /// Run the rule over `answers`, one per attempt, and record what it did.
+    fn run_rule(
+        attempts: u32,
+        answers: Vec<windows::core::Result<()>>,
+    ) -> (windows::core::Result<()>, Run) {
+        let run = std::cell::RefCell::new(Run::default());
+        let mut answers = answers.into_iter();
+        let result = retry_refused_register(
+            attempts,
+            std::time::Duration::from_millis(250),
+            || {
+                run.borrow_mut().attempts += 1;
+                answers.next().expect("an attempt past the answers given")
+            },
+            || run.borrow_mut().clean_ups += 1,
+            |d| run.borrow_mut().sleeps.push(d),
+        );
+        (result, run.into_inner())
+    }
+
+    /// A refused `Register` is cleaned up and tried again after a doubling
+    /// backoff, and the first success ends the run (`installers/windows.md`
+    /// § Direct download, 5, *Removal*: a freshly deployed package's
+    /// `Register` is refused `0x80070490` at first, then registers). The
+    /// sleeps are counted, never timed.
+    #[test]
+    fn a_refused_register_is_cleaned_up_and_tried_again() {
+        let (result, run) = run_rule(4, vec![Err(refused()), Err(refused()), Ok(())]);
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(
+            run,
+            Run {
+                attempts: 3,
+                clean_ups: 2,
+                sleeps: vec![
+                    std::time::Duration::from_millis(250),
+                    std::time::Duration::from_millis(500)
+                ],
+            }
+        );
+    }
+
+    /// The tries are bounded: every attempt refused returns the refusal, the
+    /// last refusal's half key cleaned up too, and no sleep after it.
+    #[test]
+    fn the_tries_are_bounded_and_the_last_refusal_is_cleaned_up() {
+        let (result, run) = run_rule(4, (0..4).map(|_| Err(refused())).collect());
+        assert_eq!(
+            result.map_err(|e| e.code().0 as u32),
+            Err(ERROR_NOT_FOUND_HRESULT)
+        );
+        assert_eq!(run.attempts, 4);
+        assert_eq!(run.clean_ups, 4);
+        assert_eq!(run.sleeps.len(), 3);
+    }
+
+    /// Any other failure is no refusal: returned at once, nothing cleaned up.
+    #[test]
+    fn another_failure_is_returned_at_once() {
+        let denied = windows::core::Error::from(windows::core::HRESULT(0x8007_0005_u32 as i32));
+        let (result, run) = run_rule(4, vec![Err(denied)]);
+        assert_eq!(result.map_err(|e| e.code().0 as u32), Err(0x8007_0005));
+        assert_eq!(
+            run,
+            Run {
+                attempts: 1,
+                ..Run::default()
+            }
+        );
+    }
+
+    /// The family is read off an AUMID as the OS records it for a packaged root
+    /// (`<name>_<publisher id>!<app id>`, measured 2026-11-16); anything else is
+    /// no family, so an unpackaged root is never taken for a removed package's.
+    #[test]
+    fn a_package_family_is_read_off_the_recorded_aumid() {
+        assert_eq!(
+            package_family_of_aumid("FaunaSocial.FaunaDesktop_nb85n7znrt5re!FaunaApp"),
+            Some("FaunaSocial.FaunaDesktop_nb85n7znrt5re")
+        );
+        let root = ShellSyncRoot {
+            id: "Fauna!S-1-5-21-1-2-3-1001!docs".into(),
+            aumid: Some("FaunaSocialTest.RootWitnessStore1_gmah1na7r5dfy!FaunaApp".into()),
+            ..Default::default()
+        };
+        assert_eq!(root.sid(), Some("S-1-5-21-1-2-3-1001"));
+        assert_eq!(
+            root.package_family(),
+            Some("FaunaSocialTest.RootWitnessStore1_gmah1na7r5dfy")
+        );
+        for not_one in [
+            "",
+            "FaunaApp",
+            "NoPublisherId!FaunaApp",
+            "_nb85n7znrt5re!FaunaApp",
+            "Name_!FaunaApp",
+            "Name_pub!",
+            "Name_pub!App!Extra",
+        ] {
+            assert_eq!(package_family_of_aumid(not_one), None, "{not_one:?}");
+        }
+        assert_eq!(ShellSyncRoot::default().package_family(), None);
+    }
+
+    /// The deletes name a key only by an exact Id or class: an empty or
+    /// separator-bearing one would name the parent itself.
+    #[test]
+    fn only_an_exact_id_or_class_names_a_key_to_delete() {
+        assert!(is_fauna_root_id(
+            "Fauna!S-1-5-21-1-2-3-1001!direct-witness-direct-1"
+        ));
+        for bad in [
+            "",
+            "Fauna!",
+            "Fauna!!acct",
+            "Fauna!S-1!",
+            "Other!S-1!acct",
+            r"Fauna!S-1!acct\..",
+            "Fauna!S-1!a/b",
+            "Fauna!S-1!a!b",
+        ] {
+            assert!(!is_fauna_root_id(bad), "{bad:?}");
+        }
+        assert!(is_braced_guid("{97E452D0-6BBC-42B5-AADE-03db447406eb}"));
+        for bad in [
+            "",
+            "{}",
+            "97E452D0-6BBC-42B5-AADE-03DB447406EB",
+            "{97E452D0-6BBC-42B5-AADE-03DB447406E}",
+            "{97E452D0x6BBC-42B5-AADE-03DB447406EB}",
+            "{97E452D0-6BBC-42B5-AADE-03DB447406EG}",
+            r"{97E452D0-6BBC-42B5-AADE\03DB447406EB}",
+        ] {
+            assert!(!is_braced_guid(bad), "{bad:?}");
+        }
+    }
+
+    /// The installed check answers for this user's catalogue: a family nobody
+    /// registered is not installed, and the Start menu's inbox package — part
+    /// of every Windows 11 desktop session — is.
+    #[test]
+    fn the_installed_check_answers_from_this_users_package_catalogue() {
+        assert!(
+            !package_family_installed("FaunaSocialTest.NeverRegistered_0000000000000")
+                .expect("query a family nobody registered")
+        );
+        assert!(
+            package_family_installed("Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy")
+                .expect("query the Start menu's family")
+        );
+    }
 
     /// The pin classifier maps the two attribute bits and refuses to guess on a
     /// contradiction. `0x20` = a plain `ARCHIVE` file; `0x0040_1620` = the measured

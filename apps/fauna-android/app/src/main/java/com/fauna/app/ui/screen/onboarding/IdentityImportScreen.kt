@@ -5,6 +5,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
@@ -14,10 +15,21 @@ import androidx.lifecycle.ViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
 import com.fauna.app.core.OnboardingHost
+import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.formRefusal
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.localized
+import com.fauna.ffi.onboarding.identityImportPossibility
 import com.fauna.ffi.parseIdentityImport
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.Tab
 
 @HiltViewModel
 class IdentityImportVM @Inject constructor(
@@ -51,6 +63,15 @@ class IdentityImportVM @Inject constructor(
         }
         error = null
         return commitConfirmedIdentity(host, registry, validated, persistFailedTemplate, "IdentityImportVM")
+    }
+
+    /**
+     * The submit's refusal (`ui/README.md` § Offer only what is possible, rule
+     * 6): the press re-asked the draft answer the button was painted from and
+     * it said no — its line goes on `error-message`.
+     */
+    fun refuse(reason: String?) {
+        error = reason
     }
 
     /** QR payload is `(identity, handle)` per target doc §1.identity_import. */
@@ -184,7 +205,11 @@ private fun ScanQrTab() {
 
 @Composable
 private fun PasteKeyTab(vm: IdentityImportVM, navController: NavController) {
+    val context = LocalContext.current
     var secretInput by remember { mutableStateOf("") }
+    // `import-submit-button`'s answer (`ui/README.md` § Offer only what is
+    // possible, rule 4's form case): the shared import grammar over the paste.
+    val importAnswer = remember(secretInput) { askForm { identityImportPossibility(secretInput) } }
     val invalidMessage = stringResource(R.string.onboarding_identity_import_invalid_secret)
     val persistFailedTemplate = stringResource(R.string.onboarding_session_error_persist_identity)
 
@@ -214,12 +239,17 @@ private fun PasteKeyTab(vm: IdentityImportVM, navController: NavController) {
             // accepts the union — a pasted `fauna://identity` URI or the iOS colon form
             // (priority #4) — so a URL-bearing handle still pre-fills.
             onClick = {
-                if (vm.importIdentity(secretInput, invalidMessage, persistFailedTemplate)) {
+                // The press asks the answer it was painted from again (rule 6).
+                val refusal = formRefusal(context, importAnswer)
+                if (refusal != null) {
+                    vm.refuse(refusal.reason)
+                } else if (vm.importIdentity(secretInput, invalidMessage, persistFailedTemplate)) {
                     navController.navigate("onboarding/handle-entry")
                 }
             },
-            enabled = secretInput.isNotBlank(),
+            enabled = importAnswer.isPossible,
             modifier = Modifier.fillMaxWidth().testTag(Ids.IMPORT_SUBMIT_BUTTON),
         ) { Text(stringResource(R.string.onboarding_identity_import_import)) }
+        DisabledControlReasonText(localized(importAnswer.blockedReason))
     }
 }

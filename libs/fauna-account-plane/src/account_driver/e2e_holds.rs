@@ -18,10 +18,15 @@
 //!   of the fleet plane publishes nothing; the plane is one ordered log, so
 //!   the rows behind it wait with it. The window closes at the next awaited
 //!   publish, which ships the whole log.
-//! - `FAUNA_E2E_HOLD_FLEET_WALK=1` — once this process has listed the fleet
-//!   scope (its launch's first listing is never held — the read gate waits on
-//!   it), an unprompted walk of the fleet scope walks nothing, so the replica
-//!   stays at what it listed until an awaited walk.
+//! - `FAUNA_E2E_HOLD_FLEET_WALK=1` — once the replica has listed the fleet
+//!   scope (its first listing is never held — the read gate waits on it), an
+//!   unprompted walk of the fleet scope walks nothing, so the replica stays at
+//!   what it listed until an awaited walk. "Listed" is this process's listing
+//!   OR the store's durable listed fact: a sync agent sharing an app's store
+//!   is a second process on the same replica, and the first pass it runs on
+//!   taking the engine role is its own first listing — keyed on the process
+//!   alone, that pass walked the replica forward at whatever moment the agent
+//!   took the role, closing the window the hold stands open.
 //!
 //! **Gated** (convention 15 rule (a), the `pass.rs::stated_row` shape):
 //! compile-gated outer, env inner — a release build has only the no-op twins
@@ -94,13 +99,20 @@ where
 }
 
 /// Does the walk hold keep this unprompted walk of the fleet scope back? Only
-/// once this process has listed the scope (the runtime's [`FirstListings`]),
-/// so the launch's first listing — the one every first read waits on —
-/// always lands.
+/// once the replica has listed the scope — this process's listing (the
+/// runtime's [`FirstListings`]) or the store's durable listed fact
+/// ([`AccountStatePlane::store_listed`]) — so the replica's first listing,
+/// the one every first read waits on, always lands, and a second process on
+/// the same store (the sync agent taking the engine role from the app beside
+/// it) does not walk the replica forward with its own first pass. A failed
+/// read of the stored fact holds nothing (the walk then runs as it would).
 ///
 /// [`FirstListings`]: crate::account_state_plane::FirstListings
 #[cfg(any(debug_assertions, feature = "e2e-agent"))]
-pub(crate) fn fleet_walk_held<B, R>(fleet: &AccountStatePlane<'_, B, R>, prompt: Prompt) -> bool
+pub(crate) async fn fleet_walk_held<B, R>(
+    fleet: &AccountStatePlane<'_, B, R>,
+    prompt: Prompt,
+) -> bool
 where
     B: StoreBackend,
     R: RpcRequester,
@@ -113,7 +125,8 @@ where
     }
     let held = fleet
         .first_listings()
-        .is_some_and(|f| f.listed(fleet.scope()));
+        .is_some_and(|f| f.listed(fleet.scope()))
+        || fleet.store_listed().await.unwrap_or(false);
     if held {
         tracing::info!("account runtime: e2e hold — unprompted fleet walk held");
     }
@@ -121,7 +134,10 @@ where
 }
 
 #[cfg(not(any(debug_assertions, feature = "e2e-agent")))]
-pub(crate) fn fleet_walk_held<B, R>(_fleet: &AccountStatePlane<'_, B, R>, _prompt: Prompt) -> bool
+pub(crate) async fn fleet_walk_held<B, R>(
+    _fleet: &AccountStatePlane<'_, B, R>,
+    _prompt: Prompt,
+) -> bool
 where
     B: StoreBackend,
     R: RpcRequester,

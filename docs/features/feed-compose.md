@@ -37,19 +37,21 @@ Stamped 2026-11-01 at a6047fbd8b.
    - `tests/e2e-unified/tests/test_feed_compose_in_flight.py::test_a_post_that_fails_to_send_says_so_and_keeps_what_you_wrote`
 8. [nest] Your nest stores a post only from the connection of the person who wrote it: a post uploaded by anyone else is refused and nothing of it is kept — `docs/goal/ui/feed.md` § Post creation
    - `tests/e2e-unified/tests/api/test_post_create_author_only_nest.py::test_a_post_uploaded_by_anyone_but_its_author_is_refused_and_not_kept`
+9. [app] Post and Reply are disabled and say there is nothing to post while the text is empty, and the compose and reply dialogs close only once the post is saved: a failure leaves the dialog open with what you typed and any attachment, and says why — `docs/goal/ui/feed.md` § Errors & edge cases
+   - `tests/e2e-unified/tests/test_forms_offer_only_possible.py::test_post_and_reply_are_blocked_while_empty_and_a_failed_send_keeps_the_dialog_open`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+646e0070 standalone |
-| linux | ✅ full | 0.1.5-dev+cbd813be standalone |
-| windows | ✅ full | 0.1.3-dev+a6f1524b standalone |
+| web | ⚠ partial | 0.1.5-dev+646e0070 standalone |
+| linux | ⚠ partial | 0.1.5-dev+cbd813be standalone |
+| windows | ⚠ partial | 0.1.3-dev+a6f1524b standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.6 docker |
+| ios | ⚠ partial | 0.1.7 docker |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+390d61b5 standalone |
+| tui | ✅ full | 0.1.7 docker |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 
@@ -65,4 +67,5 @@ Stamped 2026-11-01 at a6047fbd8b.
 | 6 | app | `tests/e2e-unified/tests/test_feed_compose_in_flight.py::test_the_audience_picked_for_a_post_stays_picked_while_you_keep_typing` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_feed_compose_in_flight.py::test_a_post_that_fails_to_send_says_so_and_keeps_what_you_wrote` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | nest | `tests/e2e-unified/tests/api/test_post_create_author_only_nest.py::test_a_post_uploaded_by_anyone_but_its_author_is_refused_and_not_kept` | nest (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_forms_offer_only_possible.py::test_post_and_reply_are_blocked_while_empty_and_a_failed_send_keeps_the_dialog_open` — requires `blocked-reason-read` (test harness) (not built: windows) | macos (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

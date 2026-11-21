@@ -1092,6 +1092,25 @@ pub struct ConflictCandidate {
 /// review list).
 pub const CONFLICT_TYPE_CATCHUP_FAILED: &str = "catchup_failed";
 
+/// [`SyncConflict::conflict_type`] of a local file a device could not upload
+/// because the nest cannot store it: its manifest must be paged and the nest
+/// does not advertise `paged-manifests` (`file-sync.md` § Paged manifests →
+/// *Compatibility*). Like [`CONFLICT_TYPE_CATCHUP_FAILED`], an unresolved,
+/// candidate-free row whose `device_id` names the device that refused it,
+/// resolved by that device once the file uploads or is deleted, or a later
+/// change to its path applies (`conflicts.md` § Refused uploads reach the
+/// review list).
+pub const CONFLICT_TYPE_TOO_LARGE_FOR_NEST: &str = "too_large_for_nest";
+
+/// The conflict types a DEVICE files about itself — candidate-free and
+/// unresolved, re-sent until acknowledged and resolved by that device once
+/// cured. The nest dedupes them per (set, device, path) and resolves them when
+/// the device is removed.
+pub const DEVICE_REPORTED_CONFLICT_TYPES: &[&str] = &[
+    CONFLICT_TYPE_CATCHUP_FAILED,
+    CONFLICT_TYPE_TOO_LARGE_FOR_NEST,
+];
+
 /// One sync conflict (`fauna.sync.conflicts.list`) — unresolved (the blocking
 /// chooser flow) or auto-resolved (the review list, ratified 2026-07-10).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]

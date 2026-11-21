@@ -18,7 +18,9 @@ use fauna_client_capabilities::{
     master_key_rotation_heal_keys, mint_grant,
 };
 use fauna_client_config::SuccessionLedgerStore;
-use fauna_core::data::{MailConfig, MailCredential, MsekFingerprint, Timestamp};
+use fauna_core::data::{
+    MailConfig, MailCredential, MsekFingerprint, PriorMsekRetirement, Timestamp,
+};
 use fauna_core::grant_event::{GrantEvent, GrantEventScope};
 use fauna_core::identity::ActorId;
 use fauna_core::mail_rows::{MailRows, MailStateRow};
@@ -1910,7 +1912,7 @@ impl MailSettingsMachine {
             //    submission-token) reads pending and resumes
             //    (`mail-credentials.md` § Partial-state-during-minting). ──
             true => {
-                let (msek, mail) = self.ensure_msek(mail).await?;
+                let (msek, mail) = self.ensure_msek(mail, MintOrigin::Enable).await?;
                 crate::rotation::first_enable(self, msek, &mail, display_name, &credential).await
             }
         }
@@ -1956,24 +1958,56 @@ impl MailSettingsMachine {
     /// (the MSEK is irrecoverable — `key-material-hierarchy.md` § Path B — so
     /// it persists first; a crash after this leaves a dormant MSEK the next
     /// enable reuses), then **read back**, and the key the row now holds is
-    /// the one returned. Two devices enabling at once each write their own;
+    /// the one returned. Two devices minting at once each write their own;
     /// the state row's join keeps one, and reading it back is what makes both
-    /// provision under the winner rather than each under its own.
+    /// provision under the winner rather than each under its own — the loser
+    /// already a prior generation, its ring row written first.
+    ///
+    /// Its callers: the connect-time step ([`Self::ensure_account_key`], the
+    /// mint every account takes at its first connect — `mail-credentials.md`
+    /// § MSEK lifecycle → *Every account holds the key*, ruling 3), and the
+    /// enable paths, which find the key already there unless they race that
+    /// first connect. `origin` names which: the connect-time mint's state
+    /// write is the machinery's, a background write
+    /// ([`MailStore::write_state_background`]), so a page whose calendar or
+    /// card read was unresolved for want of the key re-runs when it lands
+    /// (`account-runtime.md` § Multi-instance concurrency → *A runtime's own
+    /// pump is a source of the notice too*); an enable's is that page's
+    /// gesture, and the page repaints from its answer.
     async fn ensure_msek(
         &self,
         mail: MailConfig,
+        origin: MintOrigin,
     ) -> Result<(SecretArray32, MailConfig), DispatchError> {
         if let Some(msek) = mail.msek.clone() {
             return Ok((msek, mail));
         }
+        // `fresh_msek()` hands back `Zeroizing<[u8; 32]>`; `.into()` MOVES it
+        // into custody (the *Carrier shape* rule).
+        let minted: SecretArray32 = fresh_msek().into();
+        // **Born in the ring** (`mail-credentials.md` § MSEK lifecycle →
+        // *Every account holds the key*, ruling 4): the key's own
+        // `generation/<fingerprint>` row, its instant the mint's, lands BEFORE
+        // the state row — so whichever key the state row's join keeps when two
+        // devices minted at once, the other is already a prior generation on
+        // every replica, and nothing sealed under it in the window is lost.
+        // The READ fold leaves the current key's generation out of the priors;
+        // a later rotation's retirement moves the instant (the row's join keeps
+        // the later one).
         self.mail
-            .write_state(MailStateRow {
-                // `fresh_msek()` hands back `Zeroizing<[u8; 32]>`; `.into()`
-                // MOVES it into custody (the *Carrier shape* rule).
-                msek: Some(fresh_msek().into()),
-                ..MailStateRow::recreatable_of(&mail)
+            .retire_generation(PriorMsekRetirement {
+                msek: minted.clone(),
+                retired_at_unix: Timestamp::now_secs().max(0) as u64,
             })
             .await?;
+        let row = MailStateRow {
+            msek: Some(minted),
+            ..MailStateRow::recreatable_of(&mail)
+        };
+        match origin {
+            MintOrigin::Connect => self.mail.write_state_background(row).await?,
+            MintOrigin::Enable => self.mail.write_state(row).await?,
+        };
         let mail = self.mail.load().await?;
         let msek = mail.msek.clone().ok_or_else(|| {
             DispatchError::InvalidState("the new mail key did not persist — try again".into())
@@ -2072,7 +2106,7 @@ impl MailSettingsMachine {
         // and its listener AUTHs a read credential — `enable_mail`'s path,
         // minus the submission token and the `set_mail_enabled` deployment
         // flip.
-        let (msek, mail) = self.ensure_msek(mail).await?;
+        let (msek, mail) = self.ensure_msek(mail, MintOrigin::Enable).await?;
         self.mint_credential_under(&msek, &mail, &rows, display_name, &credential)
             .await?;
         // An email flag never written reads as OFF; write it so, explicitly —
@@ -2200,20 +2234,17 @@ impl MailSettingsMachine {
     /// to write (`deployment-home-with-public-relay.md` § Pairing).
     async fn provision_relay_mailbox(&self) -> Result<(), DispatchError> {
         let mail = self.mail.load().await?;
-        let msek = mail.msek.as_ref().ok_or_else(|| {
-            DispatchError::InvalidState(
-                "mail not enabled — enable mail on your primary box first".into(),
-            )
-        })?;
         // Reuse the default (first live) credential the user already configured
         // — the read credential the home box's MDA AEAD-unwraps at MUA-AUTH.
         // Minting a fresh credential here would force the user to reconfigure
-        // their MUA.
-        let row = mail.live_credentials().next().ok_or_else(|| {
-            DispatchError::InvalidState(
-                "mail enabled but no credential to provision — rotate or re-enable".into(),
-            )
-        })?;
+        // their MUA. An account with no live credential has no mailbox to
+        // carry across — content-only multi-homing — so the link provisions
+        // nothing and answers no error; holding the key alone is not a mailbox
+        // (`mail-credentials.md` § MSEK lifecycle → *Every account holds the
+        // key*, ruling 2).
+        let (Some(msek), Some(row)) = (mail.msek.as_ref(), mail.live_credentials().next()) else {
+            return Ok(());
+        };
         let credential_id = row.credential_id.clone();
         let credential = Credential::of_row(row)?;
 
@@ -2259,12 +2290,21 @@ impl MailSettingsMachine {
     ) -> Result<(), DispatchError> {
         let rows = self.mail.load_rows().await?;
         let mail = rows.config();
-        let Some(msek) = mail.msek.clone() else {
+        // No mailbox yet — no credential row, whatever key the account holds
+        // (`mail-credentials.md` § MSEK lifecycle → *Every account holds the
+        // key*, ruling 2): there is no snapshot or registration to add a
+        // credential beside.
+        let msek = match mail.msek.clone() {
+            Some(msek) if rows.has_mailbox() => Some(msek),
+            _ => None,
+        };
+        let Some(msek) = msek else {
             // On a deployment serving CalDAV or CardDAV with mail off the first
             // credential IS the enable — the read recipe (`mail-settings.md`
-            // § Layout & flow → *CalDAV-only mailbox*). Anywhere else the
-            // enable toggle is the way in. The hydrated status decides on the
-            // page; the fresh read covers a machine that never hydrated.
+            // § Layout & flow → *CalDAV-only mailbox*), provisioned under the
+            // key the account already holds. Anywhere else the enable toggle
+            // is the way in. The hydrated status decides on the page; the
+            // fresh read covers a machine that never hydrated.
             let hydrated = self.inner.lock().unwrap().deployment;
             let dav_only = hydrated.serves_dav_without_mail()
                 || self
@@ -2569,12 +2609,20 @@ impl MailSettingsMachine {
         // separately). The DAV lines are whatever the last hydrate's
         // `MuaInstructions::apply_dav_listener` made of the nest's listener —
         // or the for-node-URL default before the first.
-        let (serving_enabled, serves_webdav_set, mail_unavailable_here, deployment, prior_mua) = {
+        let (
+            serving_enabled,
+            serves_webdav_set,
+            mail_unavailable_here,
+            read,
+            deployment,
+            prior_mua,
+        ) = {
             let g = self.inner.lock().unwrap();
             (
                 g.snapshot.serving_enabled,
                 g.snapshot.serves_webdav_set,
                 g.snapshot.mail_unavailable_here,
+                g.snapshot.read,
                 g.deployment,
                 g.snapshot.mua.clone(),
             )
@@ -2607,6 +2655,9 @@ impl MailSettingsMachine {
                 || deployment.serves_dav_without_mail(),
             serving_enabled,
             mail_unavailable_here,
+            // Carried forward like the nest-sourced fields: only `hydrate`
+            // sets it (`MailSettingsSnapshot::mail_usable`).
+            read,
             // A credential of a kind this build does not name is kept in the
             // sealed config untouched and offered by no row here.
             credentials: mail
@@ -2778,6 +2829,9 @@ impl MailSettingsMachine {
             inner.snapshot.serves_webdav_set = serves_webdav_set;
             inner.snapshot.mail_unavailable_here = deployment.mail_unavailable_here;
             inner.deployment = deployment;
+            // Every read above resolved: the snapshot is the nest's answer
+            // from here on (`MailSettingsSnapshot::mail_usable`, rule 5).
+            inner.snapshot.read = true;
         }
         self.set_snapshot_from(&rows);
         if let Some(listener) = dav_listener {
@@ -2847,6 +2901,12 @@ impl MailSettingsMachine {
     /// else → walk ([`MailStore::walk`]) and re-read, moving nothing
     /// when no walk can be taken now (the next connect retries).
     pub async fn refresh_epoch_schedule(&self) -> Result<(), DispatchError> {
+        // The connect-time step's first act: every account holds its key from
+        // its first connect (`mail-credentials.md` § MSEK lifecycle → *Every
+        // account holds the key*, ruling 3). A wait — an unreadable custody,
+        // a walk not takeable now — mints nothing and moves on; the next
+        // connect tries again.
+        self.ensure_account_key().await?;
         // A nest that lost the mailbox (a factory reset and a reclaim, a box
         // rebuilt over an empty database) gets it back from the custody first
         // — before the pending-rotation return below, since a carried sentinel
@@ -2856,7 +2916,13 @@ impl MailSettingsMachine {
         if self.restore_lost_mailbox().await? {
             return Ok(());
         }
-        let mut mail = self.mail.load().await?;
+        let rows = self.mail.load_rows().await?;
+        // A key with no mailbox has nothing on any nest to re-seal: its mint
+        // registers nothing (*Every account holds the key*, rulings 1 and 2).
+        if !rows.has_mailbox() {
+            return Ok(());
+        }
+        let mut mail = rows.config();
         if mail.msek.is_none() || mail.pending_rotation.is_some() {
             return Ok(());
         }
@@ -2894,7 +2960,48 @@ impl MailSettingsMachine {
     }
 }
 
+/// Who asked [`MailSettingsMachine::ensure_msek`] for the key — which door
+/// its state write takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MintOrigin {
+    /// The connect-time step: the runtime's own machinery, a background write.
+    Connect,
+    /// An enable path: the page's gesture.
+    Enable,
+}
+
 impl MailSettingsMachine {
+    /// **The account key at first connect** (`mail-credentials.md` § MSEK
+    /// lifecycle → *Every account holds the key*, rulings 1, 3 and 4): when
+    /// the account's custody holds no MSEK, take the awaited fleet walk
+    /// ([`MailStore::walk`]) so a key another device already minted is found,
+    /// re-read, and mint ([`Self::ensure_msek`]) only when the walked custody
+    /// still holds none. The mint writes the key's ring row and the state row
+    /// in the custody and nothing on any nest.
+    ///
+    /// A wait is never a mint: an unreadable custody answers its error (the
+    /// caller retries at the next connect), and a walk that cannot be taken
+    /// now moves nothing and answers `Ok(false)`. Whether a key was minted.
+    pub async fn ensure_account_key(&self) -> Result<bool, DispatchError> {
+        if self.mail.load().await?.msek.is_some() {
+            return Ok(false);
+        }
+        if let Err(e) = self.mail.walk().await {
+            tracing::info!(
+                "mail key: the custody holds no key and no walk can be taken now ({e}); \
+                 minting nothing until the next connect"
+            );
+            return Ok(false);
+        }
+        let mail = self.mail.load().await?;
+        if mail.msek.is_some() {
+            return Ok(false);
+        }
+        self.ensure_msek(mail, MintOrigin::Connect).await?;
+        tracing::info!("mail key: minted the account's key at its first connect");
+        Ok(true)
+    }
+
     /// Snapshot then registration under the custody's standing MSEK — the
     /// connect-time refresh's re-seal, and the lost-mailbox restore's first
     /// nest step ([`Self::restore_lost_mailbox`]). A no-op with no MSEK.
@@ -3159,9 +3266,13 @@ impl MailSettingsMachine {
         // site (fresh-onboarding launch glue) already guarantees once-per-user;
         // this is the belt-and-suspenders check that also keeps the call a
         // graceful no-op rather than an `InvalidState` error.
-        // An MSEK of a mailbox whose mail was turned off counts: the user did it on
-        // purpose, and a new-user auto-enable must not turn it back on.
-        if self.mail.load().await?.msek.is_some() {
+        // A mailbox is any credential row (`mail-credentials.md` § MSEK
+        // lifecycle → *Every account holds the key*, ruling 2) — never the key,
+        // which every account holds from its first connect. A mailbox whose
+        // mail was turned off, or whose credentials were all revoked, counts:
+        // the user did it on purpose, and a new-user auto-enable must not
+        // turn it back on.
+        if self.mail.load_rows().await?.has_mailbox() {
             return Ok(None);
         }
         let password = if deployment_mail_enabled {

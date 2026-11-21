@@ -6,7 +6,10 @@
 //! (`resources/list`, `resources/templates/list`, `resources/read`; no
 //! subscriptions) and the coaching prompts (`prompts/list`, `prompts/get`) —
 //! and ignores every notification, which is the whole of what
-//! the stdio transport asks of a server. The official Rust SDK is the other
+//! the stdio transport asks of a server. The one notification it sends is
+//! `notifications/tools/list_changed`, and only on a server built
+//! [`Server::announcing`] (the stdio transport, `apps/cli.md` § A tool that
+//! cannot run, rule 2). The official Rust SDK is the other
 //! shape cli.md names; whether it replaces this is the owner's decision at a
 //! dependency round, and the replacement is a change to this file and
 //! [`crate::stdio`] only — the catalog and its handlers do not see the
@@ -17,8 +20,13 @@
 
 use serde_json::{Value, json};
 
-use crate::catalog::{self, CATALOG, PROMPTS, Prompt, RESOURCES, Resource, Tool};
+use crate::catalog::{self, PROMPTS, Prompt, RESOURCES, Resource, Tool};
+use crate::reach::{self, Reach};
 use crate::tools::{self, Host};
+
+/// The notification a server built [`Server::announcing`] sends when what
+/// `tools/list` answers changed.
+pub const LIST_CHANGED: &str = "notifications/tools/list_changed";
 
 /// The protocol revisions this layer speaks, newest first. A client asking
 /// for one of them gets it back; any other request is answered with the
@@ -37,6 +45,11 @@ const RESOURCE_NOT_FOUND: i64 = -32002;
 /// One MCP server over one [`Host`].
 pub struct Server<H> {
     host: H,
+    /// Whether its transport carries server notifications: then `tools/list`
+    /// answers the held connections' reach and every change is announced;
+    /// otherwise the whole catalog stays listed (`apps/cli.md` § A tool that
+    /// cannot run, rule 2).
+    announcing: bool,
 }
 
 fn error(id: Value, code: i64, message: impl Into<String>) -> Value {
@@ -116,8 +129,51 @@ fn prompts_get(id: Value, params: &Value) -> Value {
 }
 
 impl<H: Host> Server<H> {
+    /// A server whose transport carries no server notifications (the
+    /// streamable-HTTP shell, which offers no event stream): it lists the
+    /// whole catalog whatever the held connections reach.
     pub fn new(host: H) -> Self {
-        Self { host }
+        Self {
+            host,
+            announcing: false,
+        }
+    }
+
+    /// A server whose transport carries server notifications (stdio): it
+    /// lists what the held connections' granted scopes reach and advertises
+    /// `listChanged`, the transport sending [`LIST_CHANGED`] on each change
+    /// ([`Server::list_changed`]).
+    pub fn announcing(host: H) -> Self {
+        Self {
+            host,
+            announcing: true,
+        }
+    }
+
+    /// Whether this server announces listing changes.
+    pub fn announces(&self) -> bool {
+        self.announcing
+    }
+
+    /// The tools `tools/list` answers now.
+    pub async fn listed_tools(&self) -> Vec<&'static Tool> {
+        let reach = if self.announcing {
+            self.host.reach().await
+        } else {
+            Reach::Whole
+        };
+        reach::listed(&reach, self.host.conversations_door())
+    }
+
+    /// The [`LIST_CHANGED`] notification, when `tools/list` would now answer
+    /// other tools than `last` names; `last` becomes what it answers now.
+    pub async fn list_changed(&self, last: &mut Vec<&'static str>) -> Option<Value> {
+        let now: Vec<&'static str> = self.listed_tools().await.iter().map(|t| t.name).collect();
+        if now == *last {
+            return None;
+        }
+        *last = now;
+        Some(json!({ "jsonrpc": "2.0", "method": LIST_CHANGED }))
     }
 
     pub fn host(&self) -> &H {
@@ -153,7 +209,7 @@ impl<H: Host> Server<H> {
             "ping" => result(id, json!({})),
             "tools/list" => result(
                 id,
-                json!({ "tools": CATALOG.iter().map(listed).collect::<Vec<_>>() }),
+                json!({ "tools": self.listed_tools().await.into_iter().map(listed).collect::<Vec<_>>() }),
             ),
             "tools/call" => self.tools_call(id, &params).await,
             "resources/list" => result(
@@ -191,7 +247,14 @@ impl<H: Host> Server<H> {
                     "text": data.to_string(),
                 }] }),
             ),
-            Some(Err(e)) => error(id, INTERNAL_ERROR, e.text()),
+            // A fault is the internal-error code; a refusal the model can act
+            // on never is (`apps/cli.md` § A tool that cannot run, rule 3):
+            // an actor that names nothing is MCP's not-found, any other
+            // refusal — a session to connect, a scope to ask for — a
+            // parameter the call must change.
+            Some(Err(e)) if e.is_fault() => error(id, INTERNAL_ERROR, e.text()),
+            Some(Err(e)) if e.is_not_found() => error(id, RESOURCE_NOT_FOUND, e.text()),
+            Some(Err(e)) => error(id, INVALID_PARAMS, e.text()),
         }
     }
 
@@ -203,7 +266,7 @@ impl<H: Host> Server<H> {
         json!({
             "protocolVersion": version,
             "capabilities": {
-                "tools": { "listChanged": false },
+                "tools": { "listChanged": self.announcing },
                 "resources": { "listChanged": false, "subscribe": false },
                 "prompts": { "listChanged": false },
             },

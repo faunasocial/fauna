@@ -52,6 +52,7 @@ pub(super) fn logs_elements(state: &AdminState) -> Vec<Element> {
         .copied()
         .unwrap_or(logs::FILTER_ALL);
 
+    let entries = filtered_nest_entries(state);
     let mut els = vec![
         Element::label(ids::ADMIN_LOGS_HEADING, t::logs_page::TITLE),
         Element::chrome(t::logs_page::DESCRIPTION),
@@ -71,15 +72,9 @@ pub(super) fn logs_elements(state: &AdminState) -> Vec<Element> {
             labels.iter().map(|l| l.to_string()).collect(),
         )
         .labelled(logs::FILTER_LABEL),
-        Element::gesture_button(
-            ids::LOG_COPY_BUTTON,
-            logs::COPY_BUTTON,
-            true,
-            Gesture::Admin(Action::CopyLogs),
-        ),
+        copy_button(state, entries.len()),
     ];
 
-    let entries = filtered_nest_entries(state);
     if entries.is_empty() {
         // Untagged placeholder chrome — the page still resolves
         // (`admin-logs-heading` is present) but paints no `log-entry`, so
@@ -125,20 +120,59 @@ fn audit_elements(state: &AdminState) -> Vec<Element> {
     els.push(Element::gesture_button(
         ids::ADMIN_AUDIT_MORE_BUTTON,
         t::logs_page::AUDIT_MORE,
-        view.more_before_id.is_some(),
+        // Blocked once the whole record is shown: the shared
+        // `audit_more_possibility`, folded on by the read gates.
+        true,
         Gesture::Admin(Action::AuditMore),
     ));
     els
 }
 
-/// This page's read failure — read by `App::screen_error_text`, not painted
-/// here (`crate::admin::page_error` carries the why).
+/// Whether `log-copy-button` can copy anything with `shown` entries painted:
+/// blocked by the page's own empty line (`admin.logs_page.empty`) when none
+/// are — the shared [`fauna_log::format::ring_action_possibility`]. The
+/// button and the copy action read this one answer.
+pub(super) fn copy_possibility(shown: usize) -> fauna_core::possibility::Possibility {
+    fauna_log::format::ring_action_possibility(shown, "admin.logs_page.empty")
+}
+
+/// `log-copy-button`: disabled with the empty line on an empty ring, and
+/// "Copied!" with its `copied` attr after a copy that reached the terminal
+/// (the `account-actor-id-copy-btn` contract).
+fn copy_button(state: &AdminState, shown: usize) -> Element {
+    let answer = copy_possibility(shown);
+    let label = if state.logs_copied.is_some() {
+        fauna_i18n::strings::common::COPIED
+    } else {
+        logs::COPY_BUTTON
+    };
+    let button = Element::gesture_button(
+        ids::LOG_COPY_BUTTON,
+        label,
+        answer.is_possible(),
+        Gesture::Admin(Action::CopyLogs),
+    )
+    .possible(answer);
+    match &state.logs_copied {
+        Some(text) => button.attr("copied", text.clone()),
+        None => button,
+    }
+}
+
+/// This page's failure — a copy that just failed first (it answers the
+/// gesture just made), then a read failure — read by
+/// `App::screen_error_text`, not painted here (`crate::admin::page_error`
+/// carries the why).
 pub(super) fn page_error(state: &AdminState) -> Option<String> {
-    [&state.logs_error, &state.audit_error]
-        .into_iter()
-        .filter_map(|e| e.as_deref())
-        .find(|e| !e.is_empty())
-        .map(str::to_string)
+    [
+        &state.logs_copy_failure,
+        &state.logs_error,
+        &state.audit_error,
+    ]
+    .into_iter()
+    .filter_map(|e| e.as_deref())
+    .find(|e| !e.is_empty())
+    .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -280,11 +314,19 @@ mod tests {
             status.text,
             "The record checks out through the 2 entries shown."
         );
-        let more = els
-            .iter()
+        // More is blocked by the shared `audit_more_possibility`, with its
+        // reason, once the whole record is shown.
+        let more = crate::admin::elements(&app)
+            .into_iter()
             .find(|e| e.id == "admin-audit-more-button")
-            .unwrap();
-        assert!(!more.enabled, "the whole record is shown");
+            .unwrap()
+            .possibility
+            .expect("more answered");
+        assert_eq!(
+            more.reason().map(|r| r.key.as_str()),
+            Some("admin.logs_page.audit_no_older"),
+            "the whole record is shown"
+        );
     }
 
     /// A longer record enables More, and the gesture reads the page older than
@@ -294,11 +336,11 @@ mod tests {
         let mut app = app_with(Vec::new());
         app.session = Some(crate::app::tests::test_session());
         app.admin.audit.absorb(audit_page(5));
-        let more = logs_elements(&app.admin)
+        let more = crate::admin::elements(&app)
             .into_iter()
             .find(|e| e.id == "admin-audit-more-button")
             .unwrap();
-        assert!(more.enabled);
+        assert!(more.enabled && more.possibility.expect("more answered").is_possible());
         assert_eq!(
             app.admin.audit.view().more_before_id,
             Some(1),
@@ -385,6 +427,53 @@ mod tests {
 
     /// An empty nest ring paints the placeholder chrome, never a tagged blank
     /// row — `count("log-entry") == 0` is what the e2e's poll waits out.
+    /// On an empty ring `log-copy-button` is disabled by the page's own empty
+    /// line, and a press is refused with it on `error-message` — never an
+    /// empty string on the clipboard (README § Offer only what is possible).
+    #[test]
+    fn copy_is_blocked_by_the_empty_line_on_an_empty_ring() {
+        let mut app = app_with(Vec::new());
+        let els = logs_elements(&app.admin);
+        let copy = els.iter().find(|e| e.id == "log-copy-button").unwrap();
+        assert!(!copy.offered(), "nothing shown, nothing to copy");
+        assert!(
+            els.iter().any(|e| e.text == t::logs_page::EMPTY),
+            "the reason is on the page"
+        );
+
+        crate::admin::apply_local(&mut app, Action::CopyLogs);
+        assert_eq!(page_error(&app.admin).as_deref(), Some(t::logs_page::EMPTY));
+        assert_eq!(app.admin.logs_copied, None);
+
+        let app = app_with(seeded());
+        let els = logs_elements(&app.admin);
+        let copy = els.iter().find(|e| e.id == "log-copy-button").unwrap();
+        assert!(copy.offered());
+    }
+
+    /// A copy that reached the terminal confirms on the button with its
+    /// `copied` attr; a copy failure leads the page's error over a read one.
+    #[test]
+    fn a_confirmed_copy_paints_copied_and_a_failed_one_leads_the_error() {
+        let mut app = app_with(seeded());
+        app.admin.logs_copied = Some("ERROR · handler failed".to_string());
+        let els = logs_elements(&app.admin);
+        let copy = els.iter().find(|e| e.id == "log-copy-button").unwrap();
+        assert_eq!(copy.text, fauna_i18n::strings::common::COPIED);
+        assert!(
+            copy.attrs
+                .iter()
+                .any(|(k, v)| k == "copied" && v == "ERROR · handler failed")
+        );
+
+        app.admin.logs_error = Some("load nest logs: timeout".to_string());
+        app.admin.logs_copy_failure = Some("Could not copy to the clipboard: closed".to_string());
+        assert_eq!(
+            page_error(&app.admin).as_deref(),
+            Some("Could not copy to the clipboard: closed")
+        );
+    }
+
     #[test]
     fn empty_ring_paints_no_log_entry() {
         let app = app_with(Vec::new());

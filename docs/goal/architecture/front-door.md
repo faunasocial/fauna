@@ -340,7 +340,13 @@ nameserver switch, workflow activation, and the Azure teardown — all owned by
 the migration track. Until the cutover the site serves from Azure Static Web
 Apps (apex + `www` attached 2026-08-06), deployed at every version's sync by
 `deploy-site.yml` ([`product-version.md`](product-version.md) § Bumping), and `app.fauna.social` /
-`proxy.fauna.social` do not resolve.
+`proxy.fauna.social` do not resolve. The cutover's own commit flips the one
+build fact that says so, `fauna_protocol::web_app_origin::CENTRAL_APP_ORIGIN_LIVE`
+(ruled 2026-11-19, not built — until it is `true` no nest redirects to
+`app.fauna.social` and no app offers to:
+[`../behavior/web-content-hosting.md`](../behavior/web-content-hosting.md)
+§ Same-origin security model → *While the central origin is not live, the
+choice is not offered*).
 
 **§ Which origin a user loads the app from — RATIFIED 2026-09-24, the origin
 not live.** Until the Track H cutover every web user loads the app from a

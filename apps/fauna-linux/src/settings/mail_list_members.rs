@@ -41,6 +41,7 @@ use crate::async_helper::spawn_with_snapshot;
 use crate::client::FaunaClient;
 use crate::i18n::strings::mail_lists as S;
 use crate::testid::set_test_id;
+use fauna_core::possibility::Possibility;
 
 /// Placeholder list id for the embedded seed (the full app passes the real id
 /// from the opened `mail-lists` row).
@@ -255,12 +256,27 @@ pub fn build_mail_list_members_page()
 }
 
 fn wire_machine(widgets: MembersWidgets) -> (SelectClosure, ResolveFallbackClosure) {
+    // No machine (the unit-test path, a not-yet-signed-in shell, or a failed
+    // build): the page renders its static ID scaffold, selecting a list is a
+    // no-op rather than a panic, and a press says so on `error-message`
+    // (rule 7: never silent).
+    let unbuilt = |w: &MembersWidgets| {
+        super::mail_gate::wire_unbuilt(
+            &w.error_label,
+            &[
+                &w.add_button,
+                &w.import_button,
+                &w.add_submit,
+                &w.import_submit,
+            ],
+        );
+    };
     let client = match crate::settings::get_client() {
         Some(c) => c,
-        // No client (the unit-test path, or a not-yet-signed-in shell): the
-        // page renders its static ID scaffold only, so selecting a list is a
-        // no-op rather than a panic.
-        None => return (Rc::new(|_, _| {}), Rc::new(|| {})),
+        None => {
+            unbuilt(&widgets);
+            return (Rc::new(|_, _| {}), Rc::new(|| {}));
+        }
     };
     let machine = match crate::mail_glue::build_mail_list_members_machine(
         &client,
@@ -268,7 +284,10 @@ fn wire_machine(widgets: MembersWidgets) -> (SelectClosure, ResolveFallbackClosu
         S::MEMBERS_TITLE.to_string(),
     ) {
         Ok(m) => Arc::new(m),
-        Err(_) => return (Rc::new(|_, _| {}), Rc::new(|| {})),
+        Err(_) => {
+            unbuilt(&widgets);
+            return (Rc::new(|_, _| {}), Rc::new(|| {}));
+        }
     };
 
     let ctx = Rc::new(MembersCtx {
@@ -287,8 +306,24 @@ fn wire_machine(widgets: MembersWidgets) -> (SelectClosure, ResolveFallbackClosu
         ctx.w.add_button.clone().connect_clicked(move |_| {
             ctx.w.import_sheet.set_visible(false);
             ctx.w.address_input.set_text("");
+            paint_add_submit(&ctx.w);
             ctx.w.add_sheet.set_visible(true);
         });
+    }
+    // Each sheet's submit repaints from its answer as the draft changes.
+    {
+        let ctx = Rc::clone(&ctx);
+        ctx.w
+            .address_input
+            .clone()
+            .connect_changed(move |_| paint_add_submit(&ctx.w));
+    }
+    {
+        let ctx = Rc::clone(&ctx);
+        ctx.w
+            .import_input
+            .buffer()
+            .connect_changed(move |_| paint_import_submit(&ctx.w));
     }
     {
         let ctx = Rc::clone(&ctx);
@@ -300,14 +335,17 @@ fn wire_machine(widgets: MembersWidgets) -> (SelectClosure, ResolveFallbackClosu
     {
         let ctx = Rc::clone(&ctx);
         ctx.w.add_submit.clone().connect_clicked(move |_| {
-            let address = ctx.w.address_input.text().trim().to_string();
-            if !address.is_empty() {
-                dispatch_then_close(
-                    &ctx,
-                    MailListMembersAction::AddMember { address },
-                    CloseSheet::Add,
-                );
+            // The answer the submit painted from, asked again; a refusal
+            // says why on `error-message` (rules 4, 6 and 7).
+            if refuse(&ctx.w, &add_answer(&ctx.w)) {
+                return;
             }
+            let address = ctx.w.address_input.text().trim().to_string();
+            dispatch_then_close(
+                &ctx,
+                MailListMembersAction::AddMember { address },
+                CloseSheet::Add,
+            );
         });
     }
     {
@@ -317,6 +355,7 @@ fn wire_machine(widgets: MembersWidgets) -> (SelectClosure, ResolveFallbackClosu
             ctx.w.import_input.buffer().set_text("");
             ctx.import_result_shown.set(false);
             ctx.w.import_result.set_visible(false);
+            paint_import_submit(&ctx.w);
             ctx.w.import_sheet.set_visible(true);
         });
     }
@@ -330,9 +369,10 @@ fn wire_machine(widgets: MembersWidgets) -> (SelectClosure, ResolveFallbackClosu
     {
         let ctx = Rc::clone(&ctx);
         ctx.w.import_submit.clone().connect_clicked(move |_| {
-            let buf = ctx.w.import_input.buffer();
-            let (start, end) = buf.bounds();
-            let addresses = buf.text(&start, &end, false).to_string();
+            if refuse(&ctx.w, &import_answer(&ctx.w)) {
+                return;
+            }
+            let addresses = import_text(&ctx.w);
             // The sheet stays open: the tally lives inside it.
             ctx.import_result_shown.set(true);
             dispatch_action(&ctx, MailListMembersAction::BatchImport { addresses });
@@ -350,6 +390,45 @@ fn wire_machine(widgets: MembersWidgets) -> (SelectClosure, ResolveFallbackClosu
         Rc::new(move || resolve_fallback(&ctx))
     };
     (select_closure, resolve_fallback_closure)
+}
+
+/// The import sheet's pasted text.
+fn import_text(w: &MembersWidgets) -> String {
+    let buf = w.import_input.buffer();
+    let (start, end) = buf.bounds();
+    buf.text(&start, &end, false).to_string()
+}
+
+/// `mail-list-members-add-sheet-submit-button`'s answer, the shared
+/// `member_add_possibility` over what is typed (`mail-settings.md` § Errors &
+/// edge cases, *The in-page predicates*).
+fn add_answer(w: &MembersWidgets) -> Possibility {
+    fauna_client_mail_settings::member_add_possibility(w.address_input.text().to_string())
+}
+
+/// `mail-list-members-import-sheet-submit-button`'s answer, the shared
+/// `member_import_possibility` over what is pasted.
+fn import_answer(w: &MembersWidgets) -> Possibility {
+    fauna_client_mail_settings::member_import_possibility(import_text(w))
+}
+
+fn paint_add_submit(w: &MembersWidgets) {
+    crate::possible::paint(&w.add_submit, None, add_answer(w));
+}
+
+fn paint_import_submit(w: &MembersWidgets) {
+    crate::possible::paint(&w.import_submit, None, import_answer(w));
+}
+
+/// A blocked answer's reason onto `error-message`; true when it refused.
+fn refuse(w: &MembersWidgets, answer: &Possibility) -> bool {
+    match crate::possible::reason_text(answer) {
+        Some(reason) => {
+            super::render_error_label(&w.error_label, Some(&reason));
+            true
+        }
+        None => false,
+    }
 }
 
 /// A direct rail visit to this page before any row's Members button has ever

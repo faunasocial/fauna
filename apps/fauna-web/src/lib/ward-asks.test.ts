@@ -15,12 +15,18 @@ import {
   KNOCK_SENT,
   knocksAwaitGuardian,
   knockStateFor,
+  knockAnswer,
+  acceptAnswer,
+  guardianDecides,
+  rosterStatus,
+  NO_WARD_ASKS,
   sourceAskRows,
   wardAsksFromStatus,
   type AskRules,
   type ContactAsk,
   type FeedAsk,
 } from './ward-asks.ts';
+import { paintPossibility } from './possibility.ts';
 
 const GUARDIAN_REFUSAL = 'guardian_approval_required: This account can only message approved contacts.';
 
@@ -39,6 +45,23 @@ const RULES: AskRules = {
     return a ? (a.approved_at != null ? 'approved' : 'pending') : null;
   },
   knocksAwaitGuardian: (policy) => policy?.contact_approval === true,
+  // The entry-gate stubs mirror `fauna_client_family::ward_asks` closely
+  // enough for these render tests; the rules themselves are Rust-tested.
+  knockPossibility: (statusRead, policy, peerStatus) => {
+    if (peerStatus === 'accepted' || peerStatus === 'confirmed') return { state: 'possible' };
+    if (!statusRead) return { state: 'blocked', reason: { key: 'common.loading' } };
+    return policy?.contact_approval === true
+      ? { state: 'blocked', reason: { key: 'contacts.guardian_approval_required' } }
+      : { state: 'possible' };
+  },
+  acceptPossibility: (statusRead, policy) => {
+    if (!statusRead) return { state: 'blocked', reason: { key: 'common.loading' } };
+    return policy?.contact_approval === true
+      ? { state: 'blocked', reason: { key: 'contacts.knock_guardian_pending' } }
+      : { state: 'possible' };
+  },
+  guardianDecidesContact: (statusRead, policy, peerStatus) =>
+    statusRead && policy?.contact_approval === true && peerStatus !== 'accepted' && peerStatus !== 'confirmed',
 };
 
 function aFeedAsk(bridge: string, op: string, target: string, approved: boolean): FeedAsk {
@@ -53,7 +76,11 @@ Deno.test('a status reply without supervised_by yields no asks, however many row
     contact_requests: [anAsk(0xcd)],
     feed_requests: [aFeedAsk('activitypub', 'follow', 'x', true)],
   });
-  assertEquals(asks, { contact: [], feed: [], policy: null }, 'a graduated account has no guardian to be waiting on');
+  assertEquals(
+    asks,
+    { contact: [], feed: [], policy: null, statusRead: true },
+    'a graduated account has no guardian to be waiting on',
+  );
 });
 
 Deno.test('a supervised reply carries its own asks', () => {
@@ -73,6 +100,38 @@ Deno.test('contact approval on the ward\'s own policy marks the knocks; graduati
   assertEquals(knocksAwaitGuardian(RULES, off), false, 'approval off: the ward decides its own knocks');
   const graduated = wardAsksFromStatus({ supervised_by: null, policy: approvalOn });
   assertEquals(knocksAwaitGuardian(RULES, graduated), false, 'no guardian, no wait');
+});
+
+// ── the ward's entry gate (contacts.md § Errors & edge cases) ───────────────
+
+Deno.test('before the status read the knock and accept wait and no ask is offered', () => {
+  assertEquals(knockAnswer(RULES, NO_WARD_ASKS, null).state, 'blocked');
+  assertEquals(acceptAnswer(RULES, NO_WARD_ASKS).state, 'blocked');
+  assertEquals(guardianDecides(RULES, NO_WARD_ASKS, null), false, 'no ask on a guess');
+});
+
+Deno.test('under contact approval the knock and accept are blocked and the ask is the one step', () => {
+  const ward = wardAsksFromStatus({ supervised_by: { handle: 'mum' }, policy: { contact_approval: true } });
+  const knock = paintPossibility(knockAnswer(RULES, ward, null));
+  assertEquals(knock.disabled, true);
+  assertEquals(knock.reason, { key: 'contacts.guardian_approval_required' });
+  const accept = paintPossibility(acceptAnswer(RULES, ward));
+  assertEquals(accept.disabled, true);
+  assertEquals(accept.reason, { key: 'contacts.knock_guardian_pending' });
+  const peer = 'cd'.repeat(32);
+  const offered = guardianDecides(RULES, ward, rosterStatus([], peer));
+  assertEquals(contactAskRender(RULES, ward.contact, peer, offered, false), 'ask');
+  // An accepted contact passes, as at the nest — and then no ask is offered.
+  const roster = [{ peer_id: peer.toUpperCase(), status: 'accepted' }];
+  assertEquals(rosterStatus(roster, peer), 'accepted', 'the roster compare is case-insensitive');
+  assertEquals(knockAnswer(RULES, ward, 'accepted').state, 'possible');
+  assertEquals(guardianDecides(RULES, ward, 'accepted'), false);
+});
+
+Deno.test('an unsupervised read makes the knock and accept possible', () => {
+  const free = wardAsksFromStatus({ supervised_by: null });
+  assertEquals(knockAnswer(RULES, free, null).state, 'possible');
+  assertEquals(acceptAnswer(RULES, free).state, 'possible');
 });
 
 Deno.test('an empty re-read after an ask keeps what the client already holds', () => {

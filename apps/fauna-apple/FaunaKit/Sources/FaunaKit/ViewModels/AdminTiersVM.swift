@@ -41,6 +41,21 @@ public final class AdminTiersVM: BusyAdminCommandVM {
     /// cycle over — same source `AdminVM.tierNames` computes.
     public var tierNames: [String] { tiers.map { $0.name } }
 
+    /// Where the page's own `tiers.list` read stands (admin.md § Errors &
+    /// edge cases, *Controls wait for their read*): the tier add form waits
+    /// for it — `Possibility::once_read`'s Swift twin.
+    public private(set) var tiersRead = PageRead()
+    /// Whether the read this page's read-gated controls wait for has resolved
+    /// (``AdminPageReading``): the tier list read. An unanswered one is asked again when the
+    /// nest connection comes back.
+    public var readAnswered: Bool { tiersRead.state == .resolved }
+
+    /// The tier add form's answer: the `tiers.list` read resolved and no
+    /// request is on its way. The submit asks the same answer.
+    public var addTierPossibility: Possibility {
+        writeAfterReadPossibility(read: tiersRead.state, idle: !isBusy)
+    }
+
     private var admin: FfiAdminClient?
     private var api: APIClient?
 
@@ -53,7 +68,11 @@ public final class AdminTiersVM: BusyAdminCommandVM {
         self.api = api
         if admin == nil {
             do { admin = try await api.adminClient() }
-            catch { errorMessage = DisplayError.message(error); return }
+            catch {
+                errorMessage = DisplayError.message(error)
+                tiersRead.failed()
+                return
+            }
         }
         await hydrate()
     }
@@ -66,7 +85,13 @@ public final class AdminTiersVM: BusyAdminCommandVM {
         isBusy = true
         defer { isBusy = false }
         do {
-            tiers = try await admin.tiersList()
+            do {
+                tiers = try await admin.tiersList()
+                tiersRead.resolved()
+            } catch {
+                tiersRead.failed()
+                throw error
+            }
             ownMembershipTierNames = try await api.listSubscriptionTiers().map { $0.name }
             membershipTiers = try await admin.membershipTiersList()
             errorMessage = nil
@@ -76,33 +101,63 @@ public final class AdminTiersVM: BusyAdminCommandVM {
         }
     }
 
+    /// A tier row's save answer over its five cap drafts (inbox, storage,
+    /// devices, blob size, feeds): the shared `tier_caps_possibility`. The row's
+    /// Save is painted from it and `saveTier` asks it again (admin.md § Errors &
+    /// edge cases, *A form's submit is live only for a draft the nest would
+    /// accept*).
+    public static func tierCapsAnswer(_ caps: [String]) -> Possibility {
+        adminTierCapsPossibility(caps: caps)
+    }
+
+    /// The add-a-tier form's answer: the page read first, then the shared
+    /// `tier_create_possibility` over the name and five cap drafts.
+    public func addTierAnswer(name: String, caps: [String]) -> Possibility {
+        addTierPossibility.and(adminTierCreatePossibility(name: name, caps: caps))
+    }
+
+    /// A membership row's save answer: the shared `membership_save_possibility`
+    /// (an admitted-at tier picked).
+    public static func membershipSaveAnswer(adminTier: String) -> Possibility {
+        adminMembershipSavePossibility(adminTier: adminTier)
+    }
+
     /// Save one tier's caps (full update — the tier `name` identifies the row and
     /// is not editable), then refetch so the row re-renders from persisted state.
-    public func saveTier(_ tier: FfiAdminTier) async {
+    /// `caps` are the row's five drafts; a malformed one refuses the press with
+    /// the shared reason on `error-message` — never sent with the stored cap in
+    /// its place.
+    public func saveTier(name: String, caps: [String]) async {
+        if refusePress(Self.tierCapsAnswer(caps), errorMessage: &errorMessage) { return }
         guard let admin else { return }
+        let parsed = caps.compactMap { parseCap(input: $0) }
+        // Unreachable once the answer above was possible (it asks `parse_cap`).
+        guard parsed.count == 5 else { return }
         await runAdminCommand {
             try await admin.tiersUpdate(
-                name: tier.name,
-                maxInboxBytes: tier.maxInboxBytes,
-                maxStorageBytes: tier.maxStorageBytes,
-                maxDevices: tier.maxDevices,
-                maxBlobSize: tier.maxBlobSize,
-                maxFeeds: tier.maxFeeds
+                name: name,
+                maxInboxBytes: parsed[0],
+                maxStorageBytes: parsed[1],
+                maxDevices: parsed[2],
+                maxBlobSize: parsed[3],
+                maxFeeds: parsed[4]
             )
         }
     }
 
     /// Define a new tier via `fauna.admin.tiers.create` (admin.md § 3 → *Defining a
-    /// new tier*), then refetch so it appears as an ordinary row. The name is
-    /// trimmed here and each cap goes through the shared `parseCap` (UniFFI face
-    /// of `fauna_core::format::parse_cap`, the row editor's validator); an empty
-    /// name or an unparseable cap is refused locally on `error-message` with its
-    /// own sentence, and a nest refusal (a taken name is `fauna.admin.conflict`)
+    /// new tier*), then refetch so it appears as an ordinary row. The press asks
+    /// `addTierAnswer` — the form is painted from the same answer — so an empty
+    /// name or an unparseable cap is refused locally on `error-message` with the
+    /// shared reason; the name is trimmed and each cap goes through the shared
+    /// `parseCap`. A nest refusal (a taken name is `fauna.admin.conflict`)
     /// is worded through `addTierError`. Returns `true` only when the nest
     /// accepted the create — the form clears on that alone, so a refused name
     /// keeps what was typed.
     public func addTier(name: String, inbox: String, storage: String, devices: String,
                         blobSize: String, feeds: String) async -> Bool {
+        if refusePress(addTierAnswer(name: name, caps: [inbox, storage, devices, blobSize, feeds]),
+                       errorMessage: &errorMessage) { return false }
         guard let admin else { return false }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -143,6 +198,7 @@ public final class AdminTiersVM: BusyAdminCommandVM {
     /// — goes on `error-message` as `deleteTierError(message:)`; the refusal is
     /// kept across the refetch, as in `addTier`.
     public func deleteTier(name: String) async {
+        if refusePress(adminTierDeletePossibility(tier: name), errorMessage: &errorMessage) { return }
         guard let admin else { return }
         isBusy = true
         var deleted = false
@@ -164,6 +220,9 @@ public final class AdminTiersVM: BusyAdminCommandVM {
     /// `lapseTier` always rides an explicit selection — the row never relies on
     /// the wire's omit-means-default.
     public func saveMembershipTier(tierName: String, adminTier: String, lapseTier: String) async {
+        if refusePress(Self.membershipSaveAnswer(adminTier: adminTier), errorMessage: &errorMessage) {
+            return
+        }
         guard let admin else { return }
         await runAdminCommand {
             try await admin.membershipTiersSet(tierName: tierName, adminTier: adminTier, lapseTier: lapseTier)
@@ -172,7 +231,17 @@ public final class AdminTiersVM: BusyAdminCommandVM {
 
     /// Drop a membership designation via `fauna.admin.membership_tiers.clear`;
     /// the subscription tier itself survives, reverting to undesignated.
+    /// `admin-settings-membership-clear-button`'s answer for the row of
+    /// `tierName`: the shared `membership_clear_possibility` (admin.md § 2,
+    /// *What a row offers*) — blocked, saying nothing is set, while the row
+    /// holds no persisted designation.
+    public func membershipClearAnswer(tierName: String) -> Possibility {
+        adminMembershipClearPossibility(
+            hasExisting: membershipTiers.contains { $0.tierName == tierName })
+    }
+
     public func clearMembershipTier(tierName: String) async {
+        if refusePress(membershipClearAnswer(tierName: tierName), errorMessage: &errorMessage) { return }
         guard let admin else { return }
         await runAdminCommand { try await admin.membershipTiersClear(tierName: tierName) }
     }

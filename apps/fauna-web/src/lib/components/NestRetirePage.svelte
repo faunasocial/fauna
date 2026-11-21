@@ -17,11 +17,17 @@
   // left is a machine fold (`confirmSummaryJson`, `leftoverLinesJson`,
   // `transferCodeNoteJson`, `stepLabelJson`, `stepNoteJson`); the credential
   // fields and the verify gate are the machine's (`visibleFieldsJson`,
-  // `canVerify`). The VPS token lives in the machine for the page's lifetime
+  // `verifyPossibilityJson`). The VPS token lives in the machine for the page's lifetime
   // and is dropped on exit (`cancel`). Reference app: tui
   // (`apps/fauna-tui/src/wizard/nest_retire.rs`).
   import { onDestroy, onMount } from 'svelte';
   import { IDS } from '#lib/generated/uiIds';
+  import ProvisioningStepGlyph from './ProvisioningStepGlyph.svelte';
+  import {
+    retireHostedAuthPaint,
+    retireVerifyPaint,
+    type Paint,
+  } from '#lib/onboarding/credential-possibility';
   import { t } from '#lib/i18n/strings';
   import {
     resolveKey,
@@ -34,7 +40,6 @@
   import { ensureWasm, logMessage, retireHeldDns } from '#lib/wasm';
   import {
     createNestRetireMachine,
-    provisioningStatusGlyph,
     type NestRetireMachine,
     type RetireField,
     type RetireServerRow,
@@ -42,6 +47,7 @@
     type RetireStepState,
   } from '#lib/wasm-onboarding';
   import { pendingProviderBaseUrl } from '#lib/onboarding/machine.svelte';
+  import { endsTextSelection } from '#lib/selection-click';
 
   interface Props {
     /** Which entry opened the page — where Back and Done return to. */
@@ -86,21 +92,23 @@
     void tick;
     return m ? (JSON.parse(m.visibleFieldsJson()) as RetireField[]) : [];
   });
-  // Each `hosted-auth` field's sign-in button — its label and whether it can
-  // be pressed are the machine's.
-  const hostedAuthView: Record<string, { label: string; enabled: boolean }> = $derived.by(() => {
+  // Each `hosted-auth` field's sign-in button — its label and its
+  // `hosted_auth_possibility` answer are the machine's.
+  const hostedAuthView: Record<string, { label: string; paint: Paint }> = $derived.by(() => {
     void tick;
-    const out: Record<string, { label: string; enabled: boolean }> = {};
+    const out: Record<string, { label: string; paint: Paint }> = {};
     if (!m) return out;
     for (const f of fields) {
       if (f.field_type !== 'HostedAuth') continue;
-      out[f.id] = { label: m.hostedAuthButtonText(f.id), enabled: m.hostedAuthCanBegin(f.id) };
+      out[f.id] = { label: m.hostedAuthButtonText(f.id), paint: retireHostedAuthPaint(m, f.id) };
     }
     return out;
   });
-  const canVerify: boolean = $derived.by(() => {
+  // `vps-verify-button`'s paint — the machine's `verify_possibility`, its
+  // phase check included.
+  const verifyPaint: Paint = $derived.by(() => {
     void tick;
-    return m?.canVerify() ?? false;
+    return retireVerifyPaint(m);
   });
   const selectedRow: RetireServerRow | undefined = $derived(
     snap?.servers.find((r) => r.server_id === snap?.selected),
@@ -350,9 +358,12 @@
                     <button
                       class="btn"
                       data-testid={`vps-credentials-form-${field.id}`}
-                      disabled={!(hostedAuthView[field.id]?.enabled ?? false)}
+                      disabled={hostedAuthView[field.id]?.paint.disabled ?? true}
                       onclick={() => hostedAuth(field.id)}
                     >{hostedAuthView[field.id]?.label ?? ''}</button>
+                    {#if hostedAuthView[field.id]?.paint.reason}
+                      <p class="muted">{resolveLocalized(hostedAuthView[field.id].paint.reason)}</p>
+                    {/if}
                   </div>
                 {:else}
                   <label class="form-group">
@@ -372,9 +383,12 @@
             <button
               class="btn primary"
               data-testid={IDS.VPS_VERIFY_BUTTON}
-              disabled={!canVerify || snap.phase !== 'Credentials'}
+              disabled={verifyPaint.disabled}
               onclick={() => act(() => m?.verify())}
             >{snap.phase === 'Listing' ? t.common.loading : t.provisioning.verify_credentials}</button>
+            {#if verifyPaint.reason}
+              <p class="muted">{resolveLocalized(verifyPaint.reason)}</p>
+            {/if}
           </div>
         {/if}
       {/each}
@@ -398,7 +412,7 @@
             role="button"
             tabindex="0"
             aria-pressed={isSelected}
-            onclick={() => { m?.select(row.server_id); refresh(); }}
+            onclick={(e) => { if (endsTextSelection(e.currentTarget)) return; m?.select(row.server_id); refresh(); }}
             onkeydown={(e) => {
               if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); m?.select(row.server_id); refresh(); }
             }}
@@ -501,9 +515,7 @@
       {#each snap.steps as s (s.step)}
         {@const note = stepNote(s.state)}
         <div data-testid={IDS.PROVISIONING_STEP_ROW} class="prov-row">
-          <span data-testid={IDS.PROVISIONING_STEP_CHECKBOX} class="prov-checkbox" aria-hidden="true">
-            {provisioningStatusGlyph(stepStatus(s.state))}
-          </span>
+          <ProvisioningStepGlyph status={stepStatus(s.state)} />
           <span data-testid={IDS.PROVISIONING_STEP_LABEL} class="prov-label">{stepLabel(s.step)}</span>
           {#if note}
             <span data-testid={IDS.PROVISIONING_SUBSTEP} class="prov-substep">{note}</span>

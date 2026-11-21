@@ -4371,7 +4371,7 @@ def test_outbound_dane_pin_match_delivers(mail_bridge_mta):
     T2.1b — `smtp-server.md` § DANE: nest fetches the DNSSEC-secure TLSA
     records (scripted via the test-hook), the bridge STARTTLSes to the MX and
     verifies the presented chain against them via `fauna_ffi.DaneChainMatches`
-    inside `VerifyPeerCertificate`. The TLS stub MX (127.0.0.2) serves a
+    inside `VerifyPeerCertificate`. The TLS stub MX (127.0.0.2, or `localhost` on macOS) serves a
     self-signed cert; we publish a DANE-EE (usage 3) / full-cert (selector 0)
     / SHA-256 (matching 1) record = sha256(cert DER), so the pin matches and
     the message lands. End-to-end: real submit → real nest fetch_tlsa RPC →
@@ -4382,11 +4382,13 @@ def test_outbound_dane_pin_match_delivers(mail_bridge_mta):
     external_rcpt = f"{token}@{handle.dane_domain}"
     cert_sha256 = hashlib.sha256(handle.tls_stub_mx.cert_der).hexdigest()
 
-    # The bridge dials the override target `127.0.0.2:<port>` → the matcher
-    # host is the bare `127.0.0.2`. Publish a matching DANE-EE record there.
+    # The bridge dials the override target `<route_host>:<port>` → the matcher
+    # host is the bare route host (`127.0.0.2`, or `localhost` on a macOS box
+    # whose loopback carries 127.0.0.1 alone). Publish a matching DANE-EE
+    # record there.
     _script_tlsa(
         handle.nest_url,
-        "127.0.0.2",
+        handle.tls_stub_mx.route_host,
         [{"usage": 3, "selector": 0, "matching": 1, "data_hex": cert_sha256}],
     )
     _submit(handle, external_rcpt, token)
@@ -4421,7 +4423,7 @@ def test_outbound_dane_pin_mismatch_refuses(mail_bridge_mta):
 
     _script_tlsa(
         handle.nest_url,
-        "127.0.0.2",
+        handle.tls_stub_mx.route_host,
         [{"usage": 3, "selector": 0, "matching": 1, "data_hex": wrong_hash}],
     )
     _submit(handle, external_rcpt, token)

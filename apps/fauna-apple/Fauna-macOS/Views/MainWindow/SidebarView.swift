@@ -27,8 +27,7 @@ struct SidebarView: View {
         List(selection: Binding(
             get: { selection },
             set: { newValue in
-                appState.profileActorId = nil
-                appState.profileHome = nil
+                appState.clearProfileTarget("the sidebar selection")
                 selection = newValue
             }
         )) {
@@ -42,8 +41,7 @@ struct SidebarView: View {
                     // NON-gated standard rows (only the gated `admin-tab` below needs
                     // a bare-string literal for the `--nav` lint).
                     .automationActivate("\(item.rawValue)-tab") {
-                        appState.profileActorId = nil
-                        appState.profileHome = nil
+                        appState.clearProfileTarget("\(item.rawValue)-tab")
                         selection = item
                     }
             }
@@ -55,12 +53,13 @@ struct SidebarView: View {
             // and `.automationActivate` registers it for the in-process driver's
             // `is_visible("admin-tab")` gate check. Mirrors iOS's "Nest Admin"
             // Button + web's `{#if userIsAdmin}` admin-tab.
-            if appState.isAdmin {
-                Label(SidebarItem.admin.label, systemImage: SidebarItem.admin.systemImage)
-                    .tag(SidebarItem.admin)
-                    .accessibilityIdentifier(Ids.adminTab)
-                    .automationActivate(Ids.adminTab) { selection = .admin }
-            }
+            // Painted from the shared answer (`appState.adminEntry`): absent for
+            // a non-admin.
+            Label(SidebarItem.admin.label, systemImage: SidebarItem.admin.systemImage)
+                .tag(SidebarItem.admin)
+                .accessibilityIdentifier(Ids.adminTab)
+                .automationActivate(Ids.adminTab) { selection = .admin }
+                .faunaPossible(appState.adminEntry)
             // The gated family entry (family-safety.md § App surface;
             // ui.yaml navigation.gated_tabs — "shown when fauna.family.status
             // returns any relationship", guardian OR supervised). Same shape as
@@ -75,6 +74,9 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        // A click on a row selects it (ui/README.md § Text the person reads can be
+        // copied, rule 3): its labels stay controls.
+        .faunaActsOnClick()
         .frame(minWidth: 180)
         .toolbar {
             ToolbarItem {
@@ -141,6 +143,17 @@ struct AdminNavRail: View {
 /// status page) is the first/default sub-page.
 struct SettingsNavRail: View {
     @Environment(MacAppState.self) private var appState
+    @Environment(FaunaClient.self) private var client: FaunaClient?
+
+    /// The six mail sub-page rows follow the session's shared mail-usable
+    /// answer (`mail-settings.md` § Errors & edge cases, the mail-usable gate):
+    /// absent where this box can never serve mail, disabled with the reason
+    /// while mail is off or still being read. Mail & Calendar stays live — the
+    /// one step that unblocks them — and carries the reason beneath it.
+    private func answer(for page: SettingsPage) -> Possibility {
+        client?.mailUsable.answer(for: page)
+            ?? (MailUsableGate.gatedPages.contains(page) ? mailUsableUnread() : .possible)
+    }
 
     var body: some View {
         @Bindable var state = appState
@@ -164,12 +177,25 @@ struct SettingsNavRail: View {
 
             Divider()
 
-            List(SettingsPage.built, selection: $state.selectedSettingsPage) { page in
-                Label(page.label, systemImage: page.systemImage)
-                    .tag(page)
-                    .settingsNavRow(page) { appState.selectedSettingsPage = page }
+            List(SettingsPage.built.filter { answer(for: $0).isShown },
+                 selection: $state.selectedSettingsPage) { page in
+                VStack(alignment: .leading, spacing: 2) {
+                    Label(page.label, systemImage: page.systemImage)
+                    if page == .mail {
+                        FaunaPossibilityReason(answer(for: .mailAliases))
+                    }
+                }
+                .tag(page)
+                .settingsNavRow(page, isSelected: { appState.selectedSettingsPage == page }) {
+                    appState.selectedSettingsPage = page
+                }
+                .faunaPossible(answer(for: page))
             }
             .listStyle(.sidebar)
+            .task {
+                guard let client else { return }
+                await client.mailUsable.refresh(api: client.api)
+            }
         }
         .frame(minWidth: 180)
     }

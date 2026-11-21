@@ -87,6 +87,47 @@ impl LinkBlock<'_> {
             LinkBlock::NoApplicableMode => fauna_i18n::strings::bridges::NO_LINK_METHOD.to_string(),
         }
     }
+
+    /// The reason as a [`LocalizedText`](fauna_core::localized::LocalizedText):
+    /// the nest's prose through the verbatim `bridges.link_blocked_by_provider`
+    /// template, else `bridges.no_link_method`. Resolves to [`Self::text`].
+    pub fn reason(&self) -> fauna_core::localized::LocalizedText {
+        use fauna_core::localized::LocalizedText;
+        match self {
+            LinkBlock::ProviderError(why) => {
+                LocalizedText::key_arg("bridges.link_blocked_by_provider", "message", *why)
+            }
+            LinkBlock::NoApplicableMode => LocalizedText::key("bridges.no_link_method"),
+        }
+    }
+}
+
+/// The [`Possibility`](fauna_core::possibility::Possibility) sibling of
+/// [`link_block`] for a bridge card's Link control (`bridges.md` § Errors &
+/// edge cases; `docs/goal/ui/README.md` § Offer only what is possible, rule
+/// 6): possible where [`link_block`] answers `None`, else blocked by the
+/// block's reason — the nest's own explanation verbatim, or the generic
+/// no-method sentence. Disabled with its reason, never absent.
+pub fn bridge_link_possibility(
+    bridge: &BridgeStatus,
+    applicable_modes: usize,
+) -> fauna_core::possibility::Possibility {
+    bridge_link_possibility_of(bridge.linked, bridge.error.as_deref(), applicable_modes)
+}
+
+/// [`bridge_link_possibility`] over the three values the rule reads — the
+/// [`link_block_of`] twin, for the UniFFI and wasm faces (records cross by
+/// value) and linux's detail pane, which never hold a whole [`BridgeStatus`].
+pub fn bridge_link_possibility_of(
+    linked: bool,
+    error: Option<&str>,
+    applicable_modes: usize,
+) -> fauna_core::possibility::Possibility {
+    use fauna_core::possibility::Possibility;
+    match link_block_of(linked, error, applicable_modes) {
+        None => Possibility::Possible,
+        Some(block) => Possibility::blocked(block.reason()),
+    }
 }
 
 /// Rule on a bridge's Link affordance, given how many of its declared modes
@@ -270,5 +311,39 @@ mod tests {
             LinkBlock::NoApplicableMode.text(),
             fauna_i18n::strings::bridges::NO_LINK_METHOD
         );
+    }
+
+    /// The three-value twin answers exactly what the whole-row sibling does.
+    #[test]
+    fn link_possibility_of_matches_the_whole_row_answer() {
+        for b in [
+            bridge(false, Some("status flaky")),
+            bridge(false, None),
+            bridge(true, None),
+            bridge(false, Some("   ")),
+        ] {
+            for modes in [0, 1] {
+                assert_eq!(
+                    bridge_link_possibility_of(b.linked, b.error.as_deref(), modes),
+                    bridge_link_possibility(&b, modes)
+                );
+            }
+        }
+    }
+
+    /// The Possibility sibling: possible where unblocked; blocked by a reason
+    /// that resolves to exactly the text the block paints.
+    #[test]
+    fn link_possibility_is_blocked_by_the_painted_text() {
+        assert!(bridge_link_possibility(&bridge(false, None), 1).is_possible());
+        assert!(bridge_link_possibility(&bridge(true, None), 0).is_possible());
+        for b in [bridge(false, Some("status flaky")), bridge(false, None)] {
+            let answer = bridge_link_possibility(&b, 0);
+            let reason = answer.reason().expect("blocked");
+            assert_eq!(
+                reason.resolve(fauna_i18n::strings::lookup),
+                link_block(&b, 0).unwrap().text()
+            );
+        }
     }
 }

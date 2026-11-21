@@ -36,6 +36,42 @@ use fauna_conversations::ConversationsManager;
 
 use crate::conversations::observer;
 
+/// The shared answer for a thread or room control a role or the rail decides
+/// (`ThreadCapabilities::possibility`; `ui/conversations.md` § Errors & edge
+/// cases → *Controls this person can never use*), for the viewer's role in
+/// the room (`None` on a policy-less thread). Every such control on this page
+/// is painted from it through [`crate::possible::paint`] and its handler asks
+/// the same answer, so linux never decides absent-versus-blocked itself.
+pub(crate) fn thread_control(
+    detail: &fauna_conversations::snapshot::ThreadDetail,
+    control: fauna_conversations::ThreadControl,
+) -> fauna_core::possibility::Possibility {
+    let my_role = detail.room.as_ref().and_then(|room| room.my_role);
+    detail.capabilities.possibility(control, my_role)
+}
+
+/// Whether `control` is possible in the open new-thread composer — the same
+/// `new_thread_possibility` answer [`compose_bar::ComposeBar::paint_new_thread_controls`]
+/// painted, asked again by the handler (`ui/README.md` § Offer only what is
+/// possible, rule 6). A refusal is said on `error-message` with the reason the
+/// paint showed, never dropped (rule 7); `false` means the handler stops.
+pub(crate) fn new_thread_control(
+    manager: &ConversationsManager,
+    client: &crate::client::FaunaClient,
+    control: fauna_conversations::NewThreadControl,
+) -> bool {
+    let compose = manager.snapshot().new_thread_compose;
+    let answer = fauna_conversations::new_thread_possibility(compose.as_ref(), control);
+    if let Some(reason) = answer.reason() {
+        client.tx().send(crate::app::UiMessage::Action(
+            crate::app::ActionResult::FailedLocalized {
+                message: reason.resolve(crate::i18n::strings::lookup),
+            },
+        ));
+    }
+    answer.is_possible()
+}
+
 /// Build the conversations page widget. Returns the outer `NavigationSplitView`
 /// for placement into the main window's `gtk::Stack`. The page owns its own
 /// observer subscription; calling `build_conversations_view` repeatedly
@@ -171,8 +207,10 @@ fn refresh(
         .as_ref()
         .and_then(|id| manager.thread_detail(id.clone()));
     list_pane.render_invitations(&snap.room_invitations);
+    list_pane.render_sort(snap.sort);
     list_pane.render(
         &snap.threads,
+        snap.loaded,
         snap.selected_thread_id.as_ref().map(|i| i.0.as_str()),
     );
     // Linux app doesn't yet thread the local user's display handle

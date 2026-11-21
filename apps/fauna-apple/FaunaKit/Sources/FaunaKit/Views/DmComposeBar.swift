@@ -38,6 +38,11 @@ public struct DmComposeBar: View {
     /// (index)` seam the caller routes to.
     public var onRemoveAttachment: (Int) -> Void
     public var onSend: () -> Void
+    /// Say a control's refusal on the page's `error-message` — the new-thread
+    /// composer's handlers ask the shared answer again before they act and
+    /// never drop a refusal silently (`ui/README.md` § Offer only what is
+    /// possible, rule 7).
+    public var onRefuse: (String) -> Void
     /// Whether this send founds a community room (gated on
     /// `fauna.conversations.room.create`); every plain send is ungated.
     public var sendFoundsRoom: Bool
@@ -56,6 +61,7 @@ public struct DmComposeBar: View {
         onAttachError: @escaping (String) -> Void = { _ in },
         onRemoveAttachment: @escaping (Int) -> Void = { _ in },
         onSend: @escaping () -> Void = {},
+        onRefuse: @escaping (String) -> Void = { _ in },
         sendFoundsRoom: Bool = false
     ) {
         self.compose = compose
@@ -71,6 +77,7 @@ public struct DmComposeBar: View {
         self.onAttachError = onAttachError
         self.onRemoveAttachment = onRemoveAttachment
         self.onSend = onSend
+        self.onRefuse = onRefuse
         self.sendFoundsRoom = sendFoundsRoom
     }
 
@@ -124,14 +131,76 @@ public struct DmComposeBar: View {
     /// read and its caret keys (`MarkdownFieldHandle`), which only the live view answers.
     @State private var bodyField = MarkdownFieldHandle()
 
-    /// `ThreadCapabilities.canSend` (shared Rust): `false` on a bridged room whose
-    /// bridge is disconnected, where the backend refuses every send. The field and
-    /// Send stay in view but disabled (`bridged-adapter.md`; tui's `reply_compose_bar`).
-    /// nil capabilities = new-thread compose, which always can.
-    private var canSend: Bool { capabilities?.canSend ?? true }
+    /// The reply bar's shared answer (`threadSendPossibility`, over
+    /// `ThreadCapabilities::send_possibility`): blocked with
+    /// `conversations.unified.room_notice_bridge_disconnected` on a bridged room
+    /// whose bridge is disconnected, where the backend refuses every send. The
+    /// field and Send stay in view but disabled (`bridged-adapter.md`; tui's
+    /// `reply_compose_bar`), painted from this one answer — never `canSend`.
+    /// nil capabilities = new-thread compose, which answers per control below.
+    private var replyAnswer: Possibility { Self.replyAnswerFor(capabilities) }
+
+    /// ``replyAnswer`` for `capabilities` — static so the unit pin reads the
+    /// same decision the bar paints.
+    static func replyAnswerFor(_ capabilities: ThreadCapabilities?) -> Possibility {
+        guard let capabilities else { return .possible }
+        return threadSendPossibility(capabilities: capabilities)
+    }
     private var supportsAttachments: Bool { capabilities?.supportsAttachments ?? true }
     private var supportsMarkdown: Bool { capabilities?.supportsMarkdown ?? true }
-    private var supportsSubject: Bool { capabilities?.supportsSubject ?? true }
+    /// The new-thread composer's shared answer for `control`
+    /// (``NewThreadControlAnswers``: the rail is decided by who the thread goes
+    /// to); `nil` on an existing thread, which answers from its capabilities.
+    private func newThreadAnswer(_ control: NewThreadControl) -> Possibility? {
+        capabilities == nil ? NewThreadControlAnswers(compose)(control) : nil
+    }
+
+    /// The shared `ThreadControl.subject` answer: absent on a rail with no
+    /// subject (`ui/conversations.md` § Errors & edge cases → *Controls this
+    /// person can never use*). The rail decides it, never the role, so no role
+    /// is asked. nil capabilities = new-thread compose: the shared
+    /// `NewThreadControl.topic` answer (possible until a recipient decides a
+    /// rail, then as that rail allows).
+    private var subjectPossibility: Possibility {
+        guard let capabilities else { return newThreadAnswer(.topic) ?? .possible }
+        return ThreadControlAnswers(capabilities: capabilities, myRole: nil)(.subject)
+    }
+
+    /// `attachment-button`: the new-thread composer's shared `.attach` answer;
+    /// an existing thread keeps its `supportsAttachments` disable.
+    private var attachPossibility: Possibility { newThreadAnswer(.attach) ?? .possible }
+
+    /// `dm-send-button`: the new-thread composer's shared `.send` answer
+    /// (blocked with `needs_recipient` until there is anyone to send to); an
+    /// existing thread's reply answer (``replyAnswer``) beside its non-empty-body
+    /// disable.
+    private var sendPossibility: Possibility { newThreadAnswer(.send) ?? replyAnswer }
+
+    /// Run `action` only when `answer` is possible; a blocked answer's reason
+    /// goes to `error-message` (rules 6 and 7 — the handler asks what the
+    /// paint asked, and a refusal is never silent). An absent answer has no
+    /// reason to add: its control should not have been on screen.
+    private func ifPossible(_ answer: Possibility, _ action: () -> Void) {
+        if let refusal = answer.refusal {
+            if !refusal.isEmpty { onRefuse(refusal) }
+            return
+        }
+        action()
+    }
+
+    private func toggleTopic() { ifPossible(subjectPossibility) { onToggleTopic() } }
+    private func openAttachPicker() { ifPossible(attachPossibility) { showAttachImporter = true } }
+    private func send() { ifPossible(sendPossibility) { onSend() } }
+
+    /// Send's own local disable beside the shared answer: never while a send is
+    /// in flight; on an existing thread also not with an empty body (the rail's
+    /// refusal is the shared answer's). The new-thread composer leaves the rest
+    /// to the shared answer, as tui does (`compose_elements`).
+    private var sendLocallyEnabled: Bool {
+        if sending { return false }
+        guard capabilities != nil else { return true }
+        return !body_.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
     /// The editable reply "To" line shows only on rails that select recipients
     /// (mail). nil capabilities = new-thread compose, which uses the
     /// recipient-picker instead, so the To line stays hidden there.
@@ -199,7 +268,7 @@ public struct DmComposeBar: View {
                 selection: $bodySelection,
                 placeholder: L.conversations.compose.writeMessage,
                 markersShown: markersShown,
-                isEditable: canSend,
+                isEditable: replyAnswer.isPossible,
                 handle: bodyField
             )
             // `dm-text-field`'s a11y id lives on the underlying NSTextView/UITextView
@@ -245,7 +314,7 @@ public struct DmComposeBar: View {
                         onBodyChange(newValue)
                     }
                 ),
-                isEnabled: { canSend },
+                isEnabled: { replyAnswer.isPossible },
                 visibleText: {
                     MarkdownDecorator.visibleText(
                         source: body_,
@@ -256,6 +325,10 @@ public struct DmComposeBar: View {
                 textRuns: { bodyField.textRuns() },
                 pressKey: { bodyField.pressKey($0) }
             )
+            // The reply answer, outside the automation modifier so the registry
+            // publishes its reason (`FaunaPossibleModifier`); the room notice
+            // above the thread already shows that reason in view.
+            .faunaPossible(replyAnswer)
             .onChange(of: body_) { _, newValue in onBodyChange(newValue) }
 
             if let listSend = compose.listSend {
@@ -264,11 +337,11 @@ public struct DmComposeBar: View {
 
             // Toolbar row
             HStack(spacing: 8) {
-                Button(L.conversations.unified.topicToggleAdd) { onToggleTopic() }
+                Button(L.conversations.unified.topicToggleAdd) { toggleTopic() }
                     .buttonStyle(.borderless)
-                    .disabled(!supportsSubject)
                     .accessibilityIdentifier(Ids.topicToggleButton)
-                    .automationActivate(Ids.topicToggleButton, isEnabled: { supportsSubject }) { onToggleTopic() }
+                    .automationActivate(Ids.topicToggleButton) { toggleTopic() }
+                    .faunaPossible(subjectPossibility)
 
                 markdownToolbar
 
@@ -294,13 +367,16 @@ public struct DmComposeBar: View {
                 // `target: "attachment-button"`, which calls the very same
                 // `onAttachFile` seam — mirroring linux's disambiguation seam.
                 Button {
-                    showAttachImporter = true
+                    openAttachPicker()
                 } label: { Image(systemName: "paperclip") }
                     .buttonStyle(.borderless)
                     .disabled(!supportsAttachments)
                     .help(L.conversations.unified.attachmentButton)
                     .accessibilityIdentifier(Ids.attachmentButton)
                     .automationValue(Ids.attachmentButton, isEnabled: { supportsAttachments })
+                    // Outside the automation modifier, so the registry folds
+                    // the same enabled-ness (`AutomationRegistry.folding`).
+                    .faunaPossible(attachPossibility)
                     .fileImporter(
                         isPresented: $showAttachImporter,
                         // Any file, matching every sibling that ships this:
@@ -357,15 +433,15 @@ public struct DmComposeBar: View {
     /// declaration follows the paint both ways). The kind is spelled out at the
     /// call site because `offline-gate-check` cannot check a computed one.
     @ViewBuilder private var sendButton: some View {
-        let button = Button(sending ? L.common.sending : L.common.send) { onSend() }
+        let button = Button(sending ? L.common.sending : L.common.send) { send() }
             .buttonStyle(.borderedProminent)
-            .disabled(!canSend || sending || body_.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(!sendLocallyEnabled)
             .accessibilityIdentifier(Ids.dmSendButton)
             // Live re-read of the same predicate the `.disabled(...)` uses.
-            .automationActivate(
-                Ids.dmSendButton,
-                isEnabled: { canSend && !(sending || body_.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
-            ) { onSend() }
+            .automationActivate(Ids.dmSendButton, isEnabled: { sendLocallyEnabled }) { send() }
+            // The shared answer, outside the automation modifier so the
+            // registry folds it (`AutomationRegistry.folding`).
+            .faunaPossible(sendPossibility)
         if sendFoundsRoom {
             button.faunaGate("fauna.conversations.room.create")
         } else {

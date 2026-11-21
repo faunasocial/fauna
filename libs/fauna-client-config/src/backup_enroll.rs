@@ -895,6 +895,116 @@ pub async fn list_folder_destinations<R: RpcRequester + Clone>(
         .collect())
 }
 
+/// Blocked reason: the destination read answered and the owner has no
+/// enrolled backup destination to attach the folder to — the step is
+/// enrolling one on the Backups page.
+pub const FOLDER_DESTINATION_NEEDS_DESTINATION: &str =
+    "devices.folder_destination_needs_destination";
+
+/// The folders page's attach pair (`folder-destination-attach-select` /
+/// `-button`) answer over the expanded row's destination read
+/// (`docs/goal/ui/README.md` § Offer only what is possible, rules 2, 3 and 5;
+/// the ruling is `docs/goal/ui/folders.md` § Errors & edge cases, *Own-tier
+/// and mail gates*): *blocked* "still loading" / "failed to load" while the
+/// read has not answered; *blocked* [`FOLDER_DESTINATION_NEEDS_DESTINATION`]
+/// when it answered with no enrolled destination — the pair itself stays
+/// absent then, and the reason is painted beside [`folder_destination_step`]'s
+/// jump; *absent* when every destination already holds the folder (nothing
+/// left to attach); *possible* otherwise.
+pub fn folder_destination_attach_possibility(
+    read: fauna_core::possibility::ReadState,
+    places: &[FolderDestinationPlace],
+) -> fauna_core::possibility::Possibility {
+    use fauna_core::localized::LocalizedText;
+    use fauna_core::possibility::{Possibility, ReadState};
+    match read {
+        ReadState::Resolved if places.is_empty() => {
+            Possibility::blocked(LocalizedText::key(FOLDER_DESTINATION_NEEDS_DESTINATION))
+        }
+        ReadState::Resolved if places.iter().all(|p| p.attached) => Possibility::Absent,
+        other => Possibility::from_read(other),
+    }
+}
+
+/// The unblocking step a blocked [`folder_destination_attach_possibility`]
+/// answer names, and so the place rule 3's one-press jump goes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FolderDestinationStep {
+    /// The Backups page, where a destination is enrolled.
+    EnrolDestination,
+}
+
+/// The step [`folder_destination_attach_possibility`]'s reason names, from
+/// the same inputs: `Some` only for an answered read with no destination.
+pub fn folder_destination_step(
+    read: fauna_core::possibility::ReadState,
+    places: &[FolderDestinationPlace],
+) -> Option<FolderDestinationStep> {
+    match read {
+        fauna_core::possibility::ReadState::Resolved if places.is_empty() => {
+            Some(FolderDestinationStep::EnrolDestination)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod folder_destination_possibility_tests {
+    use super::*;
+    use fauna_core::possibility::{Possibility, ReadState};
+
+    fn place(attached: bool) -> FolderDestinationPlace {
+        FolderDestinationPlace {
+            destination_id: "d".into(),
+            label: "D".into(),
+            attached,
+            folder_set: None,
+        }
+    }
+
+    fn key(p: &Possibility) -> Option<&str> {
+        p.reason().map(|r| r.key.as_str())
+    }
+
+    #[test]
+    fn an_unanswered_read_is_loading_or_failed_never_enrol_one() {
+        let pending = folder_destination_attach_possibility(ReadState::Pending, &[]);
+        assert_eq!(key(&pending), Some("common.still_loading"));
+        let failed = folder_destination_attach_possibility(ReadState::Failed, &[]);
+        assert_eq!(key(&failed), Some("common.load_failed"));
+        assert_eq!(folder_destination_step(ReadState::Pending, &[]), None);
+        assert_eq!(folder_destination_step(ReadState::Failed, &[]), None);
+    }
+
+    #[test]
+    fn an_answered_read_with_no_destination_names_the_backups_step() {
+        let p = folder_destination_attach_possibility(ReadState::Resolved, &[]);
+        assert_eq!(key(&p), Some(FOLDER_DESTINATION_NEEDS_DESTINATION));
+        assert_eq!(
+            folder_destination_step(ReadState::Resolved, &[]),
+            Some(FolderDestinationStep::EnrolDestination)
+        );
+    }
+
+    #[test]
+    fn a_destination_left_to_attach_is_possible_and_names_no_step() {
+        let places = [place(true), place(false)];
+        assert!(folder_destination_attach_possibility(ReadState::Resolved, &places).is_possible());
+        assert_eq!(folder_destination_step(ReadState::Resolved, &places), None);
+    }
+
+    #[test]
+    fn every_destination_attached_leaves_nothing_to_attach() {
+        let places = [place(true)];
+        assert_eq!(
+            folder_destination_attach_possibility(ReadState::Resolved, &places),
+            Possibility::Absent
+        );
+        assert_eq!(folder_destination_step(ReadState::Resolved, &places), None);
+    }
+}
+
 /// Record the owner's **Keep** verdict on a destination raised for review — the
 /// other half of the post-succession adjudication pair
 /// (`succession-aftermath.md` § Re-key scope → *Adjudicating what the aftermath

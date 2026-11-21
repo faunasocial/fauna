@@ -514,9 +514,9 @@ pub(crate) async fn run_reseed(
     state: &Arc<SyncServiceState>,
     nest_key: &[u8; 32],
 ) -> fauna_ipc::sync::CustodianReseedState {
-    use fauna_client_backup::reseed::run_reseed as drive;
     use fauna_core::crypto::NestBackupKey;
     use fauna_ipc::sync::CustodianReseedState;
+    use fauna_sync_engine::recovery::{OwnStoreRecovery, reseed_with_own_store_recovery};
     use fauna_sync_engine::reseed::{ReseedDelivery, SyncClientSink};
 
     let failed = |phase: &str, detail: String| CustodianReseedState::Failed {
@@ -574,7 +574,24 @@ pub(crate) async fn run_reseed(
     }
 
     tracing::info!("custodian: re-seeding the provisioned nest from this device's copy");
-    let outcome = drive(&BackupClient::new(nest.as_ref()), nest_key.to_vec(), &leg).await;
+    // A lived-in segment set goes to the store end of the recovery leg in the
+    // same run (`backup-destinations.md` § Third destination kind → *A
+    // lived-in segment set is completed by record in the same gesture*, rule
+    // (1)), over the same store, connections and key.
+    let outcome = reseed_with_own_store_recovery(
+        OwnStoreRecovery {
+            store: &store,
+            source: nest.as_ref(),
+            bytes: &sync_client,
+            scope_id: inputs.actor_id,
+            device_id: inputs.device_id.clone(),
+            local: OwnerSealKey::Client(BackupKey::from_bytes(inputs.backup_key)),
+            nest_key: &nest_backup_key,
+            now: fauna_core::data::Timestamp::now_secs_or_zero(),
+        },
+        &leg,
+    )
+    .await;
     fauna_client_sync::reseed_wire::state_from_driver(outcome)
 }
 

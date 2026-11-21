@@ -20,6 +20,8 @@ import com.fauna.app.testing.FaunaRobolectricTestRunner
 import com.fauna.app.testing.LabelerCatalogEntryFixture
 import org.robolectric.annotation.Config
 import uniffi.fauna_labeler_catalog_machine.LabelerCatalogSnapshot
+import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
 
 /**
  * Compose-level coverage for the stateless [PersonalizationContent] (the
@@ -62,6 +64,7 @@ class PersonalizationContentTest {
         isRenaming: Boolean = false,
         topicsBusy: Boolean = false,
         publishState: PublishSheetUiState? = null,
+        publishManagerReady: Boolean = true,
         shareSignals: Boolean = false,
         signalPublished: List<FfiReportShareEntry> = emptyList(),
         onUnsubscribe: (Int) -> Unit = {},
@@ -80,6 +83,8 @@ class PersonalizationContentTest {
         onCancelPublish: () -> Unit = {},
         onToggleShareSignals: (Boolean) -> Unit = {},
         onClearEngagementData: () -> Unit = {},
+        shareSignalsAnswer: Possibility = Possibility.Possible,
+        clearEngagementAnswer: Possibility = Possibility.Possible,
     ) {
         composeTestRule.setContent {
             PersonalizationContent(
@@ -89,6 +94,7 @@ class PersonalizationContentTest {
                 isRenaming = isRenaming,
                 topicsBusy = topicsBusy,
                 publishState = publishState,
+                publishManagerReady = publishManagerReady,
                 shareSignals = shareSignals,
                 signalPublished = signalPublished,
                 onBack = {},
@@ -111,6 +117,8 @@ class PersonalizationContentTest {
                 onCancelPublish = onCancelPublish,
                 onToggleShareSignals = onToggleShareSignals,
                 onClearEngagementData = onClearEngagementData,
+                shareSignalsAnswer = shareSignalsAnswer,
+                clearEngagementAnswer = clearEngagementAnswer,
             )
         }
     }
@@ -211,14 +219,22 @@ class PersonalizationContentTest {
     @Test
     fun createButtonSubmitsTypedName() {
         var submitted = false
-        var typed = ""
         render(
-            onTopicNameChange = { typed = it },
+            topicName = "Cats",
             onSubmitTopic = { submitted = true },
         )
-        composeTestRule.onNodeWithTag("personalization-trained-factor-name-input").performTextInput("Cats")
         composeTestRule.onNodeWithTag("personalization-trained-factor-create-button").performScrollTo().performClick()
         assertTrue(submitted)
+    }
+
+    /** The create button paints from the shared `drafts::factor_name_possibility`:
+     *  disabled while the name is blank (`docs/goal/ui/settings.md` § Errors &
+     *  edge cases). */
+    @Test
+    fun createButtonDisabledWhileTheNameIsBlank() {
+        render(topicName = "  ")
+        composeTestRule.onNodeWithTag("personalization-trained-factor-create-button").performScrollTo()
+            .assertIsNotEnabled()
     }
 
     @Test
@@ -248,9 +264,19 @@ class PersonalizationContentTest {
         assertEquals("Cats", toggled?.name)
     }
 
+    /** A row with no addressable model offers no publish at all — the shared
+     *  `drafts::publish_open_possibility` answers absent. */
     @Test
-    fun publishButtonDisabledWhenFactorKeyIsNull() {
+    fun publishButtonAbsentWhenFactorKeyIsNull() {
         render(topics = listOf(topic(factorKey = null)))
+        composeTestRule.onNodeWithTag("personalization-trained-factor-publish-button").assertDoesNotExist()
+    }
+
+    /** Without the live feed manager the Publish… is disabled, so no sheet
+     *  opens onto nothing. */
+    @Test
+    fun publishButtonDisabledWhileTheFeedManagerIsDown() {
+        render(topics = listOf(topic(factorKey = "topic:010203")), publishManagerReady = false)
         composeTestRule.onNodeWithTag("personalization-trained-factor-publish-button").performScrollTo()
             .assertIsNotEnabled()
     }
@@ -306,6 +332,19 @@ class PersonalizationContentTest {
             publishState = PublishSheetUiState(
                 exemplars = listOf(PublishExemplarUi("post-1", "a cat post", 900L, included = false)),
                 name = "a name",
+                busy = false,
+            ),
+        )
+        composeTestRule.onNodeWithTag("personalization-trained-factor-publish-submit-button")
+            .assertIsNotEnabled()
+    }
+
+    @Test
+    fun publishSubmitDisabledWhileThePublicNameIsBlank() {
+        render(
+            publishState = PublishSheetUiState(
+                exemplars = listOf(PublishExemplarUi("post-1", "a cat post", 900L, included = true)),
+                name = "",
                 busy = false,
             ),
         )
@@ -378,6 +417,19 @@ class PersonalizationContentTest {
         composeTestRule.onNodeWithTag("personalization-share-signals-toggle")
             .performScrollTo().performClick()
         assertEquals(true, toggled)
+    }
+
+    /** `engagement-cues.md` § Layer B: a blocked answer disables the toggle
+     *  and the erase, each with its reason painted beside it. */
+    @Test
+    fun blockedAnswersDisableTheEngagementControlsWithWhy() {
+        val stillLoading = Possibility.Blocked(LocalizedText("common.still_loading", emptyMap()))
+        val feedNotReady = Possibility.Blocked(LocalizedText("errors.feed_not_ready", emptyMap()))
+        render(shareSignalsAnswer = stillLoading, clearEngagementAnswer = feedNotReady)
+        composeTestRule.onNodeWithTag("personalization-share-signals-toggle").assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("personalization-clear-engagement-data-button").assertIsNotEnabled()
+        composeTestRule.onNodeWithText("Still loading — try again in a moment").assertExists()
+        composeTestRule.onNodeWithText("Feed isn't ready yet. Try again in a moment.").assertExists()
     }
 
     @Test

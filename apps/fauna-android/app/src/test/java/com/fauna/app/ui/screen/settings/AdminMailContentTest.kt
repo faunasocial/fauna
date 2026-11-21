@@ -22,6 +22,8 @@ import uniffi.fauna_client_mail_settings.MicrosoftRegistrationView
 import uniffi.fauna_client_mail_settings.OutboundPolicyView
 import uniffi.fauna_client_mail_settings.SpamPolicyView
 import uniffi.fauna_client_mail_settings.SubmissionPolicyView
+import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
 
 /**
  * Compose-level coverage for the stateless [AdminMailContent] (the flat
@@ -140,11 +142,20 @@ class AdminMailContentTest {
         // parse) so Robolectric stays off the native path — no host JNA needed.
         parseCount: (String) -> UInt? = { it.trim().toUIntOrNull() },
         parseCountU64: (String) -> ULong? = { it.trim().toULongOrNull() },
+        onRefused: (String) -> Unit = {},
+        writeAnswer: Possibility = Possibility.Possible,
     ) {
         composeTestRule.setContent {
             AdminMailContent(
                 mailEnabled = mailEnabled,
-                mailUnavailableHere = mailUnavailableHere,
+                // FFI-free stand-in for the shared `enable_toggle_possibility`
+                // (Rust-tested): blocked by the notice key while mail is off on
+                // a box that cannot enable it.
+                enableToggle = if (!mailEnabled && mailUnavailableHere) {
+                    Possibility.Blocked(LocalizedText("mail_settings.unavailable_notice", emptyMap()))
+                } else {
+                    Possibility.Possible
+                },
                 spam = spam(),
                 auth = auth(),
                 submission = submission(),
@@ -172,8 +183,12 @@ class AdminMailContentTest {
                 formatDate = { "2026-10-10" },
                 parseCount = parseCount,
                 parseCountU64 = parseCountU64,
+                knobsDraft = AdminDraftFakes.knobs,
+                microsoftDraft = AdminDraftFakes.microsoft,
+                onRefused = onRefused,
                 // The shared `dmarc_forensic_retention_warns` threshold (30), FFI-free.
                 dmarcRetentionWarns = { it > 30u },
+                writeAnswer = writeAnswer,
             )
         }
     }
@@ -225,11 +240,14 @@ class AdminMailContentTest {
         // toggle reads `unavailable`, is disabled, the notice beneath it.
         var set: Boolean? = null
         render(mailEnabled = false, mailUnavailableHere = true, onSetMailEnabled = { set = it })
+        val notice = RuntimeEnvironment.getApplication().getString(R.string.mail_settings_unavailable_notice)
+        // The blocked toggle publishes the notice as its automation `reason`,
+        // packed beside its `state` (which still reads `unavailable`).
         composeTestRule.onNodeWithTag("admin-mail-enabled-toggle")
             .assertIsNotEnabled()
-            .assert(stateIs("unavailable"))
+            .assertPaintedReason(notice, state = "unavailable")
         composeTestRule.onNodeWithTag("admin-mail-unavailable-notice")
-            .assertTextEquals(RuntimeEnvironment.getApplication().getString(R.string.mail_settings_unavailable_notice))
+            .assertTextEquals(notice)
         assertEquals(null, set)
     }
 
@@ -472,9 +490,136 @@ class AdminMailContentTest {
         composeTestRule.onNodeWithText("Using your organisation", substring = true).assertExists()
     }
 
+    // ── Draft validity (admin.md § Errors & edge cases, the form bullet) ──
+
+    private fun reason(id: Int) = RuntimeEnvironment.getApplication().getString(id)
+
+    @Test
+    fun aBlankKnobBlocksItsGroupSaveWithTheReasonAndNeverSendsTheStoredValue() {
+        var saved: AuthPolicyView? = null
+        render(onSaveAuth = { saved = it })
+        composeTestRule.onNodeWithTag("admin-mail-auth-max-conn-per-ip-input")
+            .performScrollTo().performTextClearance()
+        composeTestRule.onNodeWithTag("admin-mail-auth-save-button").performScrollTo()
+            .assertIsNotEnabled().performClick()
+        composeTestRule.onNodeWithText(reason(R.string.admin_mail_page_knob_invalid)).assertExists()
+        assertEquals("a malformed draft must never be sent with the old number", null, saved)
+        // The other groups are untouched: their saves stay live.
+        composeTestRule.onNodeWithTag("admin-mail-submission-save-button").performScrollTo().assertIsEnabled()
+        // The input stays editable, and a parsing draft makes the save live again.
+        composeTestRule.onNodeWithTag("admin-mail-auth-max-conn-per-ip-input")
+            .performScrollTo().performTextReplacement("64")
+        composeTestRule.onNodeWithTag("admin-mail-auth-save-button").performScrollTo().performClick()
+        assertEquals(64u, saved?.maxConnPerIp)
+    }
+
+    @Test
+    fun aRetryScheduleLineThatDoesNotParseBlocksTheOutboundSave() {
+        var saved: OutboundPolicyView? = null
+        render(onSaveOutbound = { saved = it })
+        composeTestRule.onNodeWithTag("admin-mail-outbound-retry-schedule")
+            .performScrollTo().performTextReplacement("60\nsoon")
+        composeTestRule.onNodeWithTag("admin-mail-outbound-save-button").performScrollTo()
+            .assertIsNotEnabled().performClick()
+        composeTestRule.onNodeWithText(reason(R.string.admin_mail_page_knob_list_invalid)).assertExists()
+        assertEquals(null, saved)
+        composeTestRule.onNodeWithTag("admin-mail-outbound-retry-schedule")
+            .performScrollTo().performTextReplacement("60\n600")
+        composeTestRule.onNodeWithTag("admin-mail-outbound-save-button").performScrollTo().performClick()
+        assertEquals(listOf(60uL, 600uL), saved?.retryScheduleSeconds)
+    }
+
+    @Test
+    fun aBadMicrosoftPairBlocksItsSave() {
+        var sent: Pair<String, String>? = null
+        render(onSaveMicrosoft = { id, tenant -> sent = id to tenant })
+        composeTestRule.onNodeWithTag("admin-mail-microsoft-client-id-input")
+            .performScrollTo().performTextReplacement("00000000-0000-0000-0000-000000000000")
+        composeTestRule.onNodeWithTag("admin-mail-microsoft-save-button").performScrollTo()
+            .assertIsNotEnabled().performClick()
+        assertEquals(null, sent)
+    }
+
     @Test
     fun outboundPostmasterCcIsReadOnly() {
         render()
         composeTestRule.onNodeWithTag("admin-mail-outbound-postmaster-cc-toggle").assertIsNotEnabled()
+    }
+
+
+    // ── Controls wait for their read (admin.md § Errors & edge cases) ──
+
+    @Test
+    fun writeControlsWaitForThePolicyRead() {
+        var set: Boolean? = null
+        var savedSpam = false
+        var pressed: MailPolicyConfirm? = null
+        render(
+            mailEnabled = false,
+            writeAnswer = ReadGateFakes.stillLoading,
+            onSetMailEnabled = { set = it },
+            onSaveSpam = { savedSpam = true },
+            onPress = { pressed = it },
+        )
+        // The toggle publishes its reason beside its own `state`.
+        composeTestRule.onNodeWithTag("admin-mail-enabled-toggle")
+            .assertIsNotEnabled()
+            .assertPaintedReason(ReadGateFakes.stillLoadingText, state = "off")
+            .performClick()
+        // A group's save says the page is still loading — before any draft
+        // complaint — and sends nothing over a policy the page has not shown.
+        composeTestRule.onNodeWithTag("admin-mail-spam-save-button")
+            .performScrollTo()
+            .assertIsNotEnabled()
+            .assertPaintedReason(ReadGateFakes.stillLoadingText)
+            .performClick()
+        composeTestRule.onNodeWithTag("admin-mail-publish-spam-baseline-button")
+            .performScrollTo()
+            .assertIsNotEnabled()
+            .assertPaintedReason(ReadGateFakes.stillLoadingText)
+        composeTestRule.onNodeWithTag("admin-mail-spam-baseline-standing-toggle")
+            .performScrollTo()
+            .assertIsNotEnabled()
+            .assertPaintedReason(ReadGateFakes.stillLoadingText)
+        composeTestRule.onNodeWithTag("admin-mail-microsoft-save-button")
+            .performScrollTo()
+            .assertIsNotEnabled()
+            .assertPaintedReason(ReadGateFakes.stillLoadingText)
+        composeTestRule.onNodeWithTag("admin-mail-list-unsubscribe-secret-rotate-button")
+            .performScrollTo()
+            .assertIsNotEnabled()
+            .assertPaintedReason(ReadGateFakes.stillLoadingText)
+            .performClick()
+        assertEquals(null, set)
+        assertEquals(false, savedSpam)
+        assertEquals(null, pressed)
+    }
+
+    @Test
+    fun writeControlsSayFailedAfterAFailedRead() {
+        render(writeAnswer = ReadGateFakes.loadFailed)
+        composeTestRule.onNodeWithTag("admin-mail-enabled-toggle")
+            .assertIsNotEnabled()
+            .assertPaintedReason(ReadGateFakes.loadFailedText, state = "on")
+        composeTestRule.onNodeWithTag("admin-mail-spam-save-button")
+            .performScrollTo()
+            .assertIsNotEnabled()
+            .assertPaintedReason(ReadGateFakes.loadFailedText)
+    }
+
+    @Test
+    fun confirmsSayStillSavingWhileAWriteIsOnItsWay() {
+        render(writeAnswer = ReadGateFakes.inFlight)
+        composeTestRule.onNodeWithTag("admin-mail-forward-srs-secret-rotate-button")
+            .performScrollTo()
+            .assertIsNotEnabled()
+            .assertPaintedReason(ReadGateFakes.inFlightText)
+    }
+
+    @Test
+    fun readPageIsLiveAndPublishesNoReason() {
+        render(writeAnswer = Possibility.Possible)
+        composeTestRule.onNodeWithTag("admin-mail-enabled-toggle").assertIsEnabled()
+        composeTestRule.onNodeWithTag("admin-mail-spam-save-button").performScrollTo().assertIsEnabled().assertNoPaintedReason()
     }
 }

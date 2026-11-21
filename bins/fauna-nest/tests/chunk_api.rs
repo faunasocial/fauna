@@ -152,6 +152,7 @@ fn canonical_manifest_bytes(chunk: &[u8]) -> Vec<u8> {
         stored_hashes: None,
         sealed_hashes: None,
         min_reader: None,
+        pages: None,
     };
     fauna_core::encoding::canonical_encode(&manifest).unwrap()
 }

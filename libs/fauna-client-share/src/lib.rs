@@ -122,6 +122,20 @@ pub fn share_link_eligible(folder: &ShareFolderFacts) -> bool {
     folder.public_audience || (folder.unbound && folder.owner_root_held)
 }
 
+/// [`share_link_eligible`] as the typed answer every gated affordance gives
+/// (`ui/README.md` § Offer only what is possible, rule 6), from the verdict
+/// the media machine stamps on each item: *possible* where the nest will serve
+/// the link, *absent* elsewhere — a file this person can never link here is
+/// left out, never painted inert (`share-links.md` § Which files can be
+/// linked). The bool stays for the callers that read it off the item.
+pub fn share_link_possibility(eligible: bool) -> fauna_core::possibility::Possibility {
+    if eligible {
+        fauna_core::possibility::Possibility::Possible
+    } else {
+        fauna_core::possibility::Possibility::Absent
+    }
+}
+
 // ── States ──────────────────────────────────────────────────────────────────
 
 /// A listed link's state (`share-links.md` § Flows → List).
@@ -323,7 +337,12 @@ pub fn mint_link(
 /// Mint a **fragment-keyed private link** to a file in an owner-only folder
 /// (`share-links.md` § The private-file extension). `manifest` is the
 /// version's manifest as fetched — the sealed wire form, whose hashes open
-/// under the owner root this seat holds (or a predecessor's).
+/// under the owner root this seat holds (or a predecessor's). `pages` are a
+/// paged root's page blobs in root order (`file-sync.md` § Paged manifests —
+/// `fauna_core::file_download::fetch_manifest_blobs` hands them over), empty
+/// for a single manifest: the root is opened and its pages walked through the
+/// one walk, each verified against what the root names, so the envelope
+/// carries every chunk's hash whichever shape the file's manifest has.
 ///
 /// A fresh random link key seals a [`KeyEnvelope`] of exactly this file's
 /// chunk keys, hashes and name; the token declares `key_in_fragment` and names
@@ -337,6 +356,7 @@ pub fn mint_private_link(
     author: &ShareAuthor,
     file: &LinkFile,
     manifest: ChunkManifest,
+    pages: &[Vec<u8>],
     lifetime_secs: u64,
     now_secs: u64,
 ) -> Result<MintedLink, MintError> {
@@ -348,9 +368,18 @@ pub fn mint_private_link(
             "a plaintext manifest takes a public link, not a fragment-keyed one".into(),
         ));
     }
+    let open_under = |root: &[u8; 32]| {
+        let walk = fauna_core::manifest_paging::PageWalk::open(manifest.clone(), Some(root))?;
+        let mut next = pages.iter();
+        walk.flatten(|_| {
+            next.next()
+                .cloned()
+                .ok_or_else(|| std::io::Error::other("a page of the root was not supplied").into())
+        })
+    };
     let (root, opened) = author
         .owner_chunk_roots()
-        .find_map(|root| Some((root, manifest.clone().unseal_hashes(&root).ok()?)))
+        .find_map(|root| Some((root, open_under(&root).ok()?)))
         .ok_or_else(|| MintError::Manifest("no owner root this seat holds opens it".into()))?;
     let envelope = KeyEnvelope::derive(
         &root,
@@ -527,10 +556,11 @@ impl<R: RpcRequester> ShareClient<R> {
         author: &ShareAuthor,
         file: &LinkFile,
         manifest: ChunkManifest,
+        pages: &[Vec<u8>],
         lifetime_secs: u64,
         now_secs: u64,
     ) -> Result<(ShareRecord, String), CreateError<R::Error>> {
-        let minted = mint_private_link(author, file, manifest, lifetime_secs, now_secs)
+        let minted = mint_private_link(author, file, manifest, pages, lifetime_secs, now_secs)
             .map_err(CreateError::Mint)?;
         self.register_and_reveal(minted).await
     }

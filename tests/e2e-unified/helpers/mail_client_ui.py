@@ -76,6 +76,24 @@ def deliver_inbound(mx_port, server_name, sender_addr, recipient_addr, raw_messa
         conn.cmd("QUIT", "221", deadline)
 
 
+def turn_mail_on(app) -> None:
+    """Mail on for the app's signed-in account, through the app's own Mail &
+    Calendar page (convention 8), idempotently: an account a prior test already
+    turned on pays only the page's read.
+
+    The precondition of every mail sub-page — Mail aliases, Mail spam, Export
+    mailbox, Import mailbox, Mail lists, Mail list members. Each opens behind
+    the mail-usable gate (``docs/goal/ui/mail-settings.md`` § Errors & edge
+    cases, *The mail-usable gate*): while mail is off it shows only its heading,
+    the reason and Back, so none of its forms or wizards is there to drive. The
+    session-shared account starts with mail off and is turned on by whichever
+    test needs it first, so a test that opens a sub-page without this passes or
+    fails on the order the run happened to take — red alone, green after a
+    mail-enabling neighbour."""
+    app.mail_settings.navigate()
+    app.mail_settings.ensure_mail_enabled()
+
+
 def route_inbound_mail_to_app(app, mail_bridge_mta, nest_instance, test_user, local_part):
     """Make ``<local_part>@<bridge domain>`` deliver to the logged-in app's user, and
     return that address — the preamble of every test that delivers a real inbound
@@ -92,8 +110,7 @@ def route_inbound_mail_to_app(app, mail_bridge_mta, nest_instance, test_user, lo
     test's own and is deleted at its teardown
     (``helpers.mail_aliases.add_test_scoped_exact_alias``), so a long run of mail
     tests on the session-shared user never reaches the per-account alias cap."""
-    app.mail_settings.navigate()
-    app.mail_settings.ensure_mail_enabled()
+    turn_mail_on(app)
     return add_test_scoped_exact_alias(
         nest_instance["url"], test_user["signing_key"], mail_bridge_mta.domain, local_part
     )

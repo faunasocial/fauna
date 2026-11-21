@@ -4,6 +4,9 @@
   import { byteSize } from '#lib/value-format';
   import { resolveGateSelection } from '#lib/compose-gate';
   import { IDS } from '#lib/generated/uiIds';
+  import { onMount } from 'svelte';
+  import { ensureWasm, feedPostSubmitPossibility } from '#lib/wasm';
+  import { askPossibility, formGate } from '#lib/form-gate';
   // The sell composer whole — its three controls and the select's "Sell this
   // post…" answer — is inside the `payments` plane (dynamic-features.md
   // § Platform-family surface excision → *The price-and-route class*). The
@@ -135,6 +138,17 @@
       ongatetierchange?.(name);
     }
   }
+
+  // `post-submit-button` painted from the shared draft-validity answer
+  // (`fauna_feed::forms::post_submit_possibility`, `feed.md` § Errors & edge
+  // cases): disabled with its reason on `title`, re-asked as the user types.
+  // The page's `handleCompose` asks it again on submit. Read once the wasm
+  // core is up (`wasmUp`), so the first paint never throws on a cold load.
+  let wasmUp = $state(false);
+  onMount(() => { ensureWasm().then(() => { wasmUp = true; }, () => {}); });
+  const submitGate = $derived(
+    formGate(wasmUp ? askPossibility(() => feedPostSubmitPossibility(composeBody)) : null),
+  );
 
   let composeTextarea: HTMLTextAreaElement | undefined = $state();
   let showCompose = $state(true);
@@ -273,7 +287,8 @@
     <button
       class="btn-primary"
       data-testid={IDS.POST_SUBMIT_BUTTON}
-      disabled={composing || !composeBody.trim() || !composeReady}
+      disabled={composing || submitGate.disabled || !composeReady}
+      title={submitGate.reason || undefined}
       onclick={onsubmit}
     >
       {composing ? t.feed.post.posting : t.common.post}

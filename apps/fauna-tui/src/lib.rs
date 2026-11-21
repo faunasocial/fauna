@@ -80,6 +80,7 @@ mod settings;
 /// endpoints sink, and the transfer surface's state cell.
 #[cfg(feature = "p2p-share")]
 mod share_glue;
+mod spinner;
 mod subscriptions_author;
 mod sync_agent;
 #[cfg(test)]
@@ -281,6 +282,11 @@ async fn run(
         fauna_onboarding_machine::INVITE_RECHECK_POLL_MS,
     ));
     invite_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The launch-collision chooser's watch (`launch::watch_chooser`): while
+    // the chooser is shown it notices the serving instance quitting and
+    // continues as the plain launch with no input.
+    let mut chooser_watch = tokio::time::interval(fauna_client_accounts::CHOOSER_WATCH_INTERVAL);
+    chooser_watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut lock_tick = tokio::time::interval(screen_lock::LOCK_TICK);
     lock_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // The mail-import Progress screen's live-refresh poll
@@ -313,6 +319,12 @@ async fn run(
     // drains tell nothing to the surfaces that mark an unsent change, so the
     // three re-read it while one of them is painted — a local store read.
     let mut unsent_tick = tokio::time::interval(UNSENT_REFRESH_INTERVAL);
+    // The activity glyph's frame tick (`crate::spinner`): a running
+    // provisioning step's checkbox animates, and the machine notifies only on
+    // a change, so nothing else would redraw it between notifications.
+    let mut spinner_tick =
+        tokio::time::interval(std::time::Duration::from_millis(spinner::FRAME_MS));
+    spinner_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     unsent_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     cue_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // The blessed-grant auto-renew loop's tick (`ui/nests.md` § Expiry /
@@ -401,6 +413,12 @@ async fn run(
             // from the same page geometry the registry's `in-viewport` reads
             // (`fauna_e2e_agent::PAINTED_TEXT_AREA_KEY`).
             app.painted_text_area.observe(page.laid_out_text());
+            // What this frame showed at the root, from the same paint
+            // (`fauna_e2e_agent::ROOT_SURFACE_KEY`): one entry per change, so a
+            // blank frame between the wizard and the app is recorded however
+            // briefly it stood.
+            let showing = ui::root_surface(&app, &page);
+            app.root_surface.observe(showing);
             agent.publish(&app, None);
         }
 
@@ -482,6 +500,12 @@ async fn run(
                     wizard::Action::RecheckInviteStatus,
                     String::new(),
                 );
+            }
+            _ = periodic_tick(
+                &mut chooser_watch,
+                matches!(app.launch, launch::LaunchSurface::InstanceChooser { .. }),
+            ) => {
+                launch::watch_chooser(&mut app, &tx);
             }
             // A held first press whose double-press window closed: it was a
             // single press after all, so its own gesture runs now (`press`).
@@ -569,6 +593,9 @@ async fn run(
             // frame the user actually sees. Gated on the post list having been
             // on screen at the last sample, so no other page is ever woken.
             _ = periodic_tick(&mut cue_tick, app.feed.cue_capture.showing()) => {}
+            // The spinner tick — like the cue tick, the redraw at the top of
+            // the loop is the whole work: the page paints the frame for now.
+            _ = periodic_tick(&mut spinner_tick, spinner_showing(&app)) => {}
             _ = periodic_tick(&mut unsent_tick, unsent_surface_showing(&app)) => {
                 crate::session::spawn_unsent_refresh(&app);
             }
@@ -802,6 +829,15 @@ const UNSENT_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_s
 
 /// Whether a surface that marks an unsent change is painted: the feed, a
 /// conversation, or the account page's list — and there is an outbox to read.
+/// Whether the screen paints an activity glyph — a `Running` step row on the
+/// wizard's provisioning or retire page — so the spinner tick has a frame to
+/// advance (`crate::spinner`). Off everywhere else: an idle tui is never woken.
+fn spinner_showing(app: &app::App) -> bool {
+    app.showing_launch_surface()
+        && app.launch == launch::LaunchSurface::Wizard
+        && app.wizard.shows_running_step()
+}
+
 fn unsent_surface_showing(app: &app::App) -> bool {
     use crate::pages::Page;
     app.account_outbox.is_some()

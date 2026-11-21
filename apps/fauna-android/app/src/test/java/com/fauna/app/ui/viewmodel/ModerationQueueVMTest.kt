@@ -73,4 +73,39 @@ class ModerationQueueVMTest {
 
         verify(api, never()).trainModerationCorrection("msg-1", false)
     }
+
+    /** A local correction trains FIRST; a train dispatch that failed keeps the
+     *  flag and says so on `error-message` (`moderation.md` § Errors & edge
+     *  cases; tui `moderation.rs` `Op::Correct`). */
+    @Test
+    fun localRowCorrection_failedTrainKeepsTheFlagAndSaysSo() = runTest {
+        val (vm, api) = makeVm()
+        whenever(api.moderationMessageBody("msg-2")).thenReturn("hello there")
+        whenever(api.trainSpamModelClient("hello there", false))
+            .thenThrow(RuntimeException("train dispatch failed"))
+
+        vm.correct("msg-2", isLocal = true)
+
+        verify(api, never()).moderationRemoveLocalDetection("msg-2")
+        assertEquals("train dispatch failed", vm.errorMessage.value)
+    }
+
+    /** A degraded train (an `Ok` no-op — not sealed) stays silent and the flag
+     *  goes, after the train. */
+    @Test
+    fun localRowCorrection_trainsThenRemovesTheFlagSilently() = runTest {
+        val (vm, api) = makeVm()
+        whenever(api.moderationMessageBody("msg-3")).thenReturn("hello there")
+        whenever(api.trainSpamModelClient("hello there", false)).thenReturn(false)
+        val before = vm.errorMessage.value
+
+        vm.correct("msg-3", isLocal = true)
+
+        val order = org.mockito.Mockito.inOrder(api)
+        order.verify(api).trainSpamModelClient("hello there", false)
+        order.verify(api).moderationRemoveLocalDetection("msg-3")
+        // The reload after the removal hits the stubbed-to-fail queue read, so
+        // the line equals what construction left there — the train added nothing.
+        assertEquals(before, vm.errorMessage.value)
+    }
 }

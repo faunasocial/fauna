@@ -5,9 +5,13 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.fauna.app.R
 import com.fauna.app.core.ApiClient
+import com.fauna.app.ui.util.pressAsked
+import com.fauna.ffi.readPossibility
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import uniffi.fauna_client_mail_settings.CredentialKind
 import uniffi.fauna_client_mail_settings.MailSettingsAction
@@ -15,6 +19,9 @@ import uniffi.fauna_client_mail_settings.MailSettingsMachine
 import uniffi.fauna_client_mail_settings.MailSettingsSnapshot
 import uniffi.fauna_client_mail_settings.MuaInstructions
 import uniffi.fauna_client_mail_settings.SettingsStatus
+import uniffi.fauna_client_mail_settings.mailSettingsEnableTogglePossibility
+import uniffi.fauna_core.Possibility
+import uniffi.fauna_core.ReadState
 import javax.inject.Inject
 
 /**
@@ -35,7 +42,9 @@ class MailSettingsVM @Inject constructor(
     private val api: ApiClient,
 ) : ViewModel() {
 
-    private val machine: MailSettingsMachine? = api.buildMailSettingsMachine()
+    // The session's shared machine, the one [MailUsableVM] reads, so an enable
+    // here is the snapshot the mail-usable gate answers from.
+    private val machine: MailSettingsMachine? = api.sharedMailSettingsMachine()
 
     val snapshot = MutableStateFlow(machine?.snapshot() ?: EMPTY_SNAPSHOT)
     val errorMessage = MutableStateFlow<String?>(null)
@@ -71,6 +80,56 @@ class MailSettingsVM @Inject constructor(
     val autorespondMessage = MutableStateFlow("")
     val quotas = MutableStateFlow<uniffi.fauna_client_mail_settings.MailQuotas?>(null)
 
+    // Controls wait for their reads (mail-settings.md § Errors & edge cases,
+    // *Controls wait for their reads*; tui's `forward_all_read` /
+    // `autorespond_read`): where the forward-all and automatic-reply reads
+    // stand, held beside the reads they track. Each control's answer is the
+    // shared `Possibility::from_read` over it, so an empty pre-read draft
+    // never clears a forward and never writes a reply filter.
+    private var forwardAllRead = ReadState.PENDING
+    private var autorespondRead = ReadState.PENDING
+    private var forwardPerHourRead = ReadState.PENDING
+    private val _forwardPerHourAnswer = MutableStateFlow(readPossibility(ReadState.PENDING))
+    private val _forwardAllAnswer = MutableStateFlow(readPossibility(ReadState.PENDING))
+    private val _autorespondAnswer = MutableStateFlow(readPossibility(ReadState.PENDING))
+
+    /** `mail-settings-forward-all-to-input` and its commit. */
+    val forwardAllAnswer: StateFlow<Possibility> = _forwardAllAnswer.asStateFlow()
+
+    /** `mail-settings-forward-per-hour-input` and its commit: waits for the
+     *  read that brings the ceiling bounding the value (tui's
+     *  `forward_per_hour_answer`). */
+    val forwardPerHourAnswer: StateFlow<Possibility> = _forwardPerHourAnswer.asStateFlow()
+
+    /** `mail-settings-autorespond-message-input` and its commit. */
+    val autorespondAnswer: StateFlow<Possibility> = _autorespondAnswer.asStateFlow()
+
+    private fun forwardAllReadAs(read: ReadState) {
+        forwardAllRead = read
+        _forwardAllAnswer.value = readPossibility(read)
+    }
+
+    private fun forwardPerHourReadAs(read: ReadState) {
+        forwardPerHourRead = read
+        _forwardPerHourAnswer.value = readPossibility(read)
+    }
+
+    private fun autorespondReadAs(read: ReadState) {
+        autorespondRead = read
+        _autorespondAnswer.value = readPossibility(read)
+    }
+
+    /** `mail-settings-enabled-toggle`'s answer, the shared
+     *  `MailSettingsSnapshot::enable_toggle_possibility` over the machine's
+     *  snapshot: still loading before the first hydrate (the never-read
+     *  default carries `read = false`). */
+    fun enableAnswer(): Possibility = mailSettingsEnableTogglePossibility(snapshot.value)
+
+    /** Rule 6 at the press: ask [answer] again; a blocked one names its
+     *  reason on `error-message` and sends nothing. */
+    private inline fun asked(answer: Possibility, go: () -> Unit) =
+        pressAsked(context, answer, onRefuse = { errorMessage.value = it }, go = go)
+
     init {
         hydrate()
         hydrateForwarding()
@@ -81,7 +140,12 @@ class MailSettingsVM @Inject constructor(
     private fun hydrateAccountControls() {
         viewModelScope.launch {
             try { switches.value = api.mailSwitchesGet() } catch (_: Exception) { }
-            try { publishAutorespond(api.autorespondGet()) } catch (_: Exception) { }
+            try {
+                publishAutorespond(api.autorespondGet())
+                autorespondReadAs(ReadState.RESOLVED)
+            } catch (_: Exception) {
+                autorespondReadAs(afterFailedRead(autorespondRead))
+            }
             try { quotas.value = api.mailQuotasGet() } catch (_: Exception) { }
         }
     }
@@ -133,7 +197,7 @@ class MailSettingsVM @Inject constructor(
 
     /** The toggle: while the reply is on it turns it off; otherwise it is the
      *  message commit (the draft check first). */
-    fun toggleAutorespond() {
+    fun toggleAutorespond() = asked(_autorespondAnswer.value) {
         if (autorespond.value?.enabled == true) {
             viewModelScope.launch {
                 try {
@@ -151,8 +215,11 @@ class MailSettingsVM @Inject constructor(
 
     /** Commit the message draft, which also turns the reply on. The shared
      *  check decides first: a blank draft names its reason on the error banner
-     *  and sends nothing. */
-    fun commitAutorespondMessage() {
+     *  and sends nothing — and before that, the reply's read: a pre-read
+     *  commit refuses with the read's reason. */
+    fun commitAutorespondMessage() = asked(_autorespondAnswer.value) { sendAutorespondMessage() }
+
+    private fun sendAutorespondMessage() {
         val text = when (val outcome = uniffi.fauna_client_mail_settings.autorespondMessageDraftOutcome(autorespondMessage.value)) {
             is uniffi.fauna_client_mail_settings.AutorespondMessageDraftOutcome.Set -> outcome.text
             is uniffi.fauna_client_mail_settings.AutorespondMessageDraftOutcome.Refused -> {
@@ -173,12 +240,19 @@ class MailSettingsVM @Inject constructor(
 
     private fun hydrateForwarding() {
         viewModelScope.launch {
+            // One attempt each: the transport already waits out a socket that
+            // has not landed yet (NestClient::request_inner). The forward-all
+            // read is tracked on its own, so its control waits for it alone.
             try {
                 forwardAllTo.value = api.forwardAllToGet().orEmpty()
+                forwardAllReadAs(ReadState.RESOLVED)
+            } catch (_: Exception) {
+                forwardAllReadAs(afterFailedRead(forwardAllRead))
+            }
+            try {
                 publishForwardPerHour(api.forwardPerHourGet())
             } catch (_: Exception) {
-                // One attempt: the transport already waits out a socket that has
-                // not landed yet (NestClient::request_inner).
+                forwardPerHourReadAs(afterFailedRead(forwardPerHourRead))
             }
         }
     }
@@ -186,12 +260,18 @@ class MailSettingsVM @Inject constructor(
     private fun publishForwardPerHour(reply: com.fauna.ffi.ForwardPerHour) {
         forwardPerHour.value = reply.value.toString()
         forwardCeiling.value = reply.ceiling
+        // The ceiling is only ever set from a read.
+        forwardPerHourReadAs(ReadState.RESOLVED)
     }
 
     /** Commit the forward-all draft. The shared parser decides first: a refused
      *  draft names its reason on the error banner and sends nothing (the nest
-     *  would refuse it for the same reason — one rule, priority #2). Blank clears. */
-    fun commitForwardAllTo(draft: String) {
+     *  would refuse it for the same reason — one rule, priority #2). Blank clears.
+     *  Before that, the forward-all read: a pre-read commit refuses with the
+     *  read's reason, so an empty pre-read draft never clears a forward. */
+    fun commitForwardAllTo(draft: String) = asked(_forwardAllAnswer.value) { sendForwardAllTo(draft) }
+
+    private fun sendForwardAllTo(draft: String) {
         val address = when (val outcome = uniffi.fauna_client_mail_settings.forwardAllToDraftOutcome(draft)) {
             is uniffi.fauna_client_mail_settings.ForwardAllToDraftOutcome.Clear -> null
             is uniffi.fauna_client_mail_settings.ForwardAllToDraftOutcome.Set -> outcome.address
@@ -210,8 +290,12 @@ class MailSettingsVM @Inject constructor(
         }
     }
 
-    /** Commit the hourly-limit draft, bounded by the nest's ceiling. */
-    fun commitForwardPerHour(draft: String) {
+    /** Commit the hourly-limit draft, bounded by the nest's ceiling. Before
+     *  the read that brings the ceiling, the commit refuses with the read's
+     *  reason (still loading, or failed to load) — never silently. */
+    fun commitForwardPerHour(draft: String) = asked(_forwardPerHourAnswer.value) { sendForwardPerHour(draft) }
+
+    private fun sendForwardPerHour(draft: String) {
         val ceiling = forwardCeiling.value ?: return
         val value = when (val outcome = uniffi.fauna_client_mail_settings.forwardPerHourDraftOutcome(draft, ceiling)) {
             is uniffi.fauna_client_mail_settings.ForwardPerHourDraftOutcome.Value -> outcome.value
@@ -265,8 +349,13 @@ class MailSettingsVM @Inject constructor(
 
     fun clearToken() { lastToken.value = null }
 
-    fun enableMail(displayName: String, kind: CredentialKind, autogenerate: Boolean, manualPassword: String) =
-        provision(isEnable = true, displayName, kind, autogenerate, manualPassword)
+    /** The enable form's submit asks the enable toggle's answer again
+     *  (rule 6). A never-built machine is [dispatch]'s unbuilt refusal (rule 7),
+     *  not a "still loading" that would never end. */
+    fun enableMail(displayName: String, kind: CredentialKind, autogenerate: Boolean, manualPassword: String) {
+        if (machine == null) return provision(isEnable = true, displayName, kind, autogenerate, manualPassword)
+        asked(enableAnswer()) { provision(isEnable = true, displayName, kind, autogenerate, manualPassword) }
+    }
 
     fun addCredential(displayName: String, kind: CredentialKind, autogenerate: Boolean, manualPassword: String) =
         provision(isEnable = false, displayName, kind, autogenerate, manualPassword)
@@ -326,7 +415,12 @@ class MailSettingsVM @Inject constructor(
     fun resumeRotation() = dispatch(MailSettingsAction.ResumeRotation)
 
     private fun dispatch(action: MailSettingsAction, onDone: () -> Unit = {}) {
-        val m = machine ?: return onDone()
+        // Rule 7 (ui/README.md § Offer only what is possible): a gesture whose
+        // machine was never built says so on `error-message`, never silently.
+        val m = machine ?: run {
+            errorMessage.value = api.mailUnbuiltRefusal()
+            return onDone()
+        }
         viewModelScope.launch {
             try {
                 m.dispatch(action)
@@ -345,6 +439,12 @@ class MailSettingsVM @Inject constructor(
     }
 
     private companion object {
+        /** A read that failed keeps an earlier success (`Possibility::from_read`'s
+         *  rule; tui's `after_read`): the page still holds a value the nest
+         *  confirmed. */
+        fun afterFailedRead(was: ReadState): ReadState =
+            if (was == ReadState.RESOLVED) ReadState.RESOLVED else ReadState.FAILED
+
         val EMPTY_SNAPSHOT = MailSettingsSnapshot(
             enabled = false,
             caldavEnabled = false,

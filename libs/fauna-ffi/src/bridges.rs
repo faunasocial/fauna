@@ -206,6 +206,28 @@ pub fn bridge_link_block(
     )
 }
 
+/// A bridge card's Link control: the shared
+/// [`fauna_client_bridges::bridge_link_possibility`]'s rule over the same
+/// three fields [`bridge_link_block`] takes — possible where no block applies,
+/// else blocked by the block's reason (the nest's own explanation verbatim, or
+/// the generic no-method sentence; `bridges.md` § Errors & edge cases, rule 4,
+/// *One answer for the button*). The Link action asks it again and refuses with
+/// the same reason. Gated `value-format` for the bare-`fauna_core`-type reason
+/// [`crate::offline::offline_possibility`] gives.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn bridge_link_possibility(
+    linked: bool,
+    error: Option<String>,
+    applicable_modes: u32,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_bridges::bridge_link_possibility_of(
+        linked,
+        error.as_deref(),
+        applicable_modes as usize,
+    )
+}
+
 /// UniFFI face of [`fauna_client_bridges::bridge_card_title`] — a Bridges page
 /// network row's title: `"<emoji> <name>"` when the row declares a glyph (a
 /// consented bridge app's), the bare name otherwise (`bridges.md` § Coverage
@@ -1106,5 +1128,33 @@ mod offline_composer_tests {
         assert!(added.is_err(), "the follow was sent");
         assert!(removed.is_err(), "the unfollow was sent");
         assert!(queue.queued().is_empty());
+    }
+}
+
+#[cfg(all(test, feature = "value-format"))]
+mod link_possibility_face_tests {
+    use super::*;
+    use fauna_core::possibility::Possibility;
+
+    #[test]
+    fn link_is_blocked_by_the_same_reason_the_block_names() {
+        assert_eq!(
+            bridge_link_possibility(true, None, 0),
+            Possibility::Possible
+        );
+        assert_eq!(
+            bridge_link_possibility(false, None, 1),
+            Possibility::Possible
+        );
+        let no_mode = bridge_link_possibility(false, None, 0);
+        assert_eq!(
+            no_mode.reason().map(|r| r.key.as_str()),
+            Some("bridges.no_link_method")
+        );
+        let provider = bridge_link_possibility(false, Some("quota spent".into()), 0);
+        assert_eq!(
+            provider.reason().map(|r| r.key.as_str()),
+            Some("bridges.link_blocked_by_provider")
+        );
     }
 }

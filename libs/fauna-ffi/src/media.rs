@@ -43,7 +43,20 @@ pub fn build_media_machine(
     });
     #[cfg(not(all(feature = "folders-author", not(target_arch = "wasm32"))))]
     let folder_keys = None;
-    fauna_media_machine::build_media_machine_with_folder_keys(nest_arc, observer, folder_keys)
+    let machine = fauna_media_machine::build_media_machine_with_folder_keys(
+        Arc::clone(&nest_arc),
+        observer,
+        folder_keys,
+    );
+    // The first folder's maker (`media.md` § Errors & edge cases → *No folder
+    // to upload into*): a folderless account's first upload makes `Personal`
+    // through the ordinary folder create — wired here, once, for apple,
+    // android and windows, the same call tui and linux make.
+    machine.set_folder_maker(fauna_folders_machine::build_first_folder_maker(
+        nest_arc,
+        crate::folders::folder_custody(),
+    ));
+    machine
 }
 
 /// Wire the Media page's **followed public folders** source — the
@@ -112,6 +125,11 @@ mod tests {
         let nest = FfiNestClient::new("wss://unreachable.invalid".into(), vec![7u8; 32]).unwrap();
         let observer: Arc<dyn MediaObserver> = Arc::new(NullObserver);
         let machine = build_media_machine(nest, observer);
+        assert!(
+            machine.has_folder_maker(),
+            "a folderless account's first upload makes its first folder through \
+             the maker the builder wires (`media.md` § No folder to upload into)",
+        );
         assert!(
             machine.has_folder_keys(),
             "a shared set's gesture paths must seal resolver-first and its files open \

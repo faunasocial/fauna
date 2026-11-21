@@ -3518,7 +3518,7 @@ async fn stage_pending_upload(
         .expect("manifest present in store");
     let manifest: fauna_core::chunk::ChunkManifest =
         fauna_core::encoding::canonical_decode(&manifest_bytes).expect("decode manifest");
-    manifest.store_keys()
+    manifest.store_keys().expect("a single manifest")
 }
 
 /// D3: a writer crosses a content-key rotation with a **pending

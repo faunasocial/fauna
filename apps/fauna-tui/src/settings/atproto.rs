@@ -66,6 +66,7 @@ use fauna_atproto_settings_machine::{
 };
 use fauna_client::NestClient;
 use fauna_core::localized::LocalizedText;
+use fauna_core::possibility::Possibility;
 use fauna_i18n::strings::{atproto_settings as t, common};
 
 use super::Action;
@@ -87,6 +88,12 @@ pub struct AtprotoState {
     /// The shared machine. `None` pre-login, or if construction failed (an
     /// undecodable secret — see [`Self::build`]).
     pub machine: Option<Arc<AtprotoSettingsMachine>>,
+    /// Set by [`Self::build`] when it was attempted and the machine could not
+    /// be built: the page then paints [`t::PAGE_UNAVAILABLE`] in place of every
+    /// control (`ui/README.md` § Offer only what is possible, rule 7) instead
+    /// of a page of rungs whose presses are dropped. `false` for the
+    /// pre-login default, where there is no page to open.
+    pub unavailable: bool,
     /// The last snapshot the page painted. `None` until the nav-edge hydrate
     /// folds one — the page then renders off [`AtprotoSettingsSnapshot::
     /// default`] (the same pre-fetch shape the real machine starts from:
@@ -140,6 +147,7 @@ impl AtprotoState {
             }
         };
         AtprotoState {
+            unavailable: machine.is_none(),
             machine,
             snapshot: None,
             revealed: HashMap::new(),
@@ -219,6 +227,14 @@ pub(super) fn atproto_elements(app: &App, state: &AtprotoState) -> Vec<Element> 
         Element::label(ids::ATPROTO_PAGE, String::new()),
     ];
 
+    // A machine that failed to build offers nothing (rule 7): every gesture
+    // below would drop on `machine.clone()?`, so no control is painted.
+    if state.unavailable {
+        els.push(Element::chrome(t::PAGE_UNAVAILABLE));
+        els.push(nav_back());
+        return els;
+    }
+
     let empty = AtprotoSettingsSnapshot::default();
     let snap = state.snapshot.as_ref().unwrap_or(&empty);
 
@@ -230,14 +246,18 @@ pub(super) fn atproto_elements(app: &App, state: &AtprotoState) -> Vec<Element> 
     // Rungs, titles, descriptions and the hosted-gate flag all come from the
     // shared catalog (`atproto.md` § Where logic lives already declared the
     // machine the owner of "level logic … all of it").
+    let mut rung_reasons: Vec<String> = Vec::new();
     for rung in depth_level_options() {
         let active = snap.level == rung.level;
         let gated = rung.hosted && !snap.hosted_allowed;
-        // A hosted rung the user is already AT stays selectable so a step-down
+        // The machine's own predicate (rule 6): blocked "still loading" until
+        // the status read resolves (rule 5 — Off → Linked is an immediate nest
+        // write, so a rung is never offered on the default level), and a
+        // hosted rung the user is already AT stays selectable so a step-down
         // is reachable even if the domain later stops being public; the gate
-        // only ever blocks ENTERING a hosted level from a lower one (mirrors
-        // linux's `!gated || active`).
-        let enabled = !gated || active;
+        // only ever blocks ENTERING a hosted level from a lower one.
+        let answer = rung_possibility(state, snap, &rung.level, gated && !active);
+        let enabled = answer.is_possible();
         let title = resolve(&rung.title);
         let desc = resolve(&rung.description);
         // ui.yaml declares the four rungs `radio` — one-of-N, radio paint. The
@@ -252,10 +272,23 @@ pub(super) fn atproto_elements(app: &App, state: &AtprotoState) -> Vec<Element> 
         .attr("state", if active { "active" } else { "inactive" })
         .attr("reason", if gated { "gated" } else { "ok" });
         el.enabled = enabled;
-        els.push(el);
+        if let Some(reason) = answer.reason() {
+            let text = resolve(reason);
+            if !rung_reasons.contains(&text) {
+                rung_reasons.push(text);
+            }
+        }
+        els.push(el.possible(answer));
+    }
+    // A greyed rung owes its reason on the same surface (rule 2). The rungs
+    // carry their own labels, so the reason rides one untagged line, once per
+    // distinct reason — the hosted gate's own line follows when it differs.
+    for text in &rung_reasons {
+        els.push(Element::chrome(text.clone()));
     }
     if !snap.hosted_allowed
         && let Some(reason) = &snap.hosted_gate_reason
+        && !rung_reasons.contains(&resolve(reason))
     {
         // Untagged — ui.yaml gives the gate-reason LINE no id of its own; the
         // rung's own `reason` attr is what the e2e reads (`depth_gate_marker`).
@@ -395,6 +428,11 @@ pub(super) fn atproto_elements(app: &App, state: &AtprotoState) -> Vec<Element> 
                 Gesture::Settings(Action::AtprotoSetDeleteRetireIdentity(!retire.selected)),
             )
             .enabled(retire.available && !card.in_progress)
+            // The machine's own gate, adapted from the snapshot's reason (the
+            // snapshot field is `retire_identity_possibility`'s source).
+            .possible(Possibility::from_blocked_reason(
+                retire.unavailable_reason.clone(),
+            ))
             .attr(
                 "state",
                 match (retire.available, retire.selected) {
@@ -467,7 +505,14 @@ pub(super) fn atproto_elements(app: &App, state: &AtprotoState) -> Vec<Element> 
     // through the consent card, so a mint control there would be a grant with
     // no consumer.
     if snap.level == "hosted_full" || snap.delegation.is_some() {
-        delegation_elements(snap.delegation.as_ref(), &mut els);
+        // The entry is gated on the identity, not at the submit (rule 4): no
+        // signing identity → blocked with the machine's reason. A page with
+        // no machine is a unit-test page and keeps the control live.
+        let authorize = state
+            .machine
+            .as_ref()
+            .map_or(Possibility::Possible, |m| m.authorize_possibility());
+        delegation_elements(snap.delegation.as_ref(), authorize, &mut els);
     }
 
     // `settings-nav-back` — Esc already returns to the Settings hub
@@ -487,6 +532,38 @@ pub(super) fn atproto_elements(app: &App, state: &AtprotoState) -> Vec<Element> 
     els
 }
 
+/// `settings-nav-back`, the page's one way out (see its comment below).
+fn nav_back() -> Element {
+    Element::gesture_button(
+        ids::SETTINGS_NAV_BACK,
+        common::BACK,
+        true,
+        Gesture::Settings(Action::NavBack),
+    )
+    .nav_back()
+}
+
+/// The answer for one depth rung. With the machine built, its own predicate
+/// (`AtprotoSettingsMachine::rung_possibility`, the one `select_level` asks
+/// too). Without one — only a unit-test page, since a built page always holds
+/// its machine — the same rule over the snapshot: blocked "still loading"
+/// until a snapshot has been folded, then the hosted gate's reason when
+/// `entering_gated`.
+fn rung_possibility(
+    state: &AtprotoState,
+    snap: &AtprotoSettingsSnapshot,
+    level: &str,
+    entering_gated: bool,
+) -> Possibility {
+    if let Some(machine) = &state.machine {
+        return machine.rung_possibility(level.to_string());
+    }
+    Possibility::once_read(state.snapshot.is_some()).and(match &snap.hosted_gate_reason {
+        Some(reason) if entering_gated => Possibility::blocked(reason.clone()),
+        _ => Possibility::Possible,
+    })
+}
+
 /// The D10 authoring-delegation row — what authorizes an external ATProto app
 /// (or an approved Fauna principal) to *post* as this account, as opposed to
 /// merely signing in (the credentials and connected-apps groups above govern
@@ -504,17 +581,24 @@ pub(super) fn atproto_elements(app: &App, state: &AtprotoState) -> Vec<Element> 
 ///   rows: scope, lasts-until, liveness. `-authorize` STAYS rendered, because
 ///   re-authorizing is the renewal gesture — provisioning overwrites the cert,
 ///   so a lapsed grant recovers in one gesture with no revoke first.
-fn delegation_elements(row: Option<&DelegationRow>, els: &mut Vec<Element>) {
+fn delegation_elements(
+    row: Option<&DelegationRow>,
+    authorize: Possibility,
+    els: &mut Vec<Element>,
+) {
     els.push(Element::chrome(t::DELEGATION_HEADING));
 
     let Some(row) = row else {
         els.push(Element::chrome(t::DELEGATION_EMPTY));
-        els.push(Element::gesture_button(
-            ids::ATPROTO_DELEGATION_AUTHORIZE,
-            t::DELEGATION_AUTHORIZE_BUTTON,
-            true,
-            Gesture::Settings(Action::AtprotoAuthorizeDelegation),
-        ));
+        els.push(
+            Element::gesture_button(
+                ids::ATPROTO_DELEGATION_AUTHORIZE,
+                t::DELEGATION_AUTHORIZE_BUTTON,
+                authorize.is_possible(),
+                Gesture::Settings(Action::AtprotoAuthorizeDelegation),
+            )
+            .possible(authorize),
+        );
         return;
     };
 
@@ -580,12 +664,15 @@ fn delegation_elements(row: Option<&DelegationRow>, els: &mut Vec<Element>) {
     els.push(Element::chrome(t::DELEGATION_LAST_USED_HINT));
 
     // Renewal is the same control, relabeled — never a revoke-then-re-mint.
-    els.push(Element::gesture_button(
-        ids::ATPROTO_DELEGATION_AUTHORIZE,
-        t::DELEGATION_REAUTHORIZE_BUTTON,
-        true,
-        Gesture::Settings(Action::AtprotoAuthorizeDelegation),
-    ));
+    els.push(
+        Element::gesture_button(
+            ids::ATPROTO_DELEGATION_AUTHORIZE,
+            t::DELEGATION_REAUTHORIZE_BUTTON,
+            authorize.is_possible(),
+            Gesture::Settings(Action::AtprotoAuthorizeDelegation),
+        )
+        .possible(authorize),
+    );
     els.push(Element::gesture_button(
         ids::ATPROTO_DELEGATION_REVOKE,
         t::DELEGATION_REVOKE_BUTTON,
@@ -708,14 +795,19 @@ fn contest_elements(snap: &AtprotoSettingsSnapshot, els: &mut Vec<Element>) {
         ));
     }
     // Decision 2: the button exists only where pressing it can work. The three
-    // states are honest states, not three renderings of one control.
+    // states are honest states, not three renderings of one control — declared
+    // as the machine's `contest_possibility` answer (absent when not
+    // contestable), which `open_contest_confirm` asks too.
     if card.show_contest {
-        els.push(Element::gesture_button(
-            ids::ATPROTO_CONTEST,
-            t::CONTEST_BUTTON,
-            true,
-            Gesture::Settings(Action::AtprotoOpenContestConfirm),
-        ));
+        els.push(
+            Element::gesture_button(
+                ids::ATPROTO_CONTEST,
+                t::CONTEST_BUTTON,
+                true,
+                Gesture::Settings(Action::AtprotoOpenContestConfirm),
+            )
+            .possible(Possibility::Possible),
+        );
     }
     let Some(confirm) = &snap.contest_confirm else {
         return;
@@ -814,6 +906,9 @@ mod tests {
                 "atproto-depth-linked",
                 "atproto-depth-hosted-visible",
                 "atproto-depth-hosted-full",
+                // The rungs' own reason (still loading), then the hosted
+                // gate's pending line.
+                "",
                 "",
                 "settings-nav-back",
             ]
@@ -838,6 +933,57 @@ mod tests {
                 .any(|e| e.text == fauna_i18n::strings::atproto_settings::GATE_REASON_PENDING),
             "the greyed rungs must carry their reason on the first paint too"
         );
+    }
+
+    /// Rule 5: before the first read resolves no rung is offered on
+    /// the default level — Off → Linked would be an immediate nest write — and
+    /// each says why. Once a snapshot is folded the same rungs come alive.
+    #[test]
+    fn no_rung_is_enabled_before_the_first_read_and_each_says_why() {
+        let app = authed_app();
+        let els = atproto_elements(&app, &app.settings.atproto);
+        for id in [
+            "atproto-depth-off",
+            "atproto-depth-linked",
+            "atproto-depth-hosted-visible",
+            "atproto-depth-hosted-full",
+        ] {
+            let rung = els.iter().find(|e| e.id == id).expect("rung paints");
+            assert!(!rung.enabled, "{id} must not be enabled pre-hydrate");
+            assert_eq!(
+                rung.possibility
+                    .as_ref()
+                    .and_then(|p| p.reason())
+                    .map(|r| r.key.as_str()),
+                Some("common.still_loading"),
+                "{id} declares its reason"
+            );
+        }
+        let app = app_with_snapshot(snap(|s| s.hosted_allowed = true));
+        let els = atproto_elements(&app, &app.settings.atproto);
+        assert!(
+            els.iter()
+                .filter(
+                    |e| e.id.starts_with("atproto-depth-") && matches!(e.role, Role::Radio { .. })
+                )
+                .all(|e| e.enabled)
+        );
+    }
+
+    /// Rule 7: a machine that failed to build blocks the page with
+    /// its reason, in the archive-import UNAVAILABLE shape — no rung, no
+    /// authorize, only the reason and the way back.
+    #[test]
+    fn a_machine_that_failed_to_build_blocks_the_page_with_a_reason() {
+        let mut app = authed_app();
+        app.settings.atproto.unavailable = true;
+        let els = atproto_elements(&app, &app.settings.atproto);
+        assert!(els.iter().any(|e| e.text == t::PAGE_UNAVAILABLE));
+        assert!(
+            !els.iter().any(|e| e.id.starts_with("atproto-depth-")),
+            "no control that would be dropped on `machine.clone()?`"
+        );
+        assert!(els.iter().any(|e| e.id == "settings-nav-back"));
     }
 
     #[test]

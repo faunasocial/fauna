@@ -88,6 +88,9 @@ test-helpers = [
   # The author drain's hold (`subscriptionsHoldAuthorDrainForTest`, the
   # `subscriptions_hold_author_drain` command's mechanism) — forwarded, rule (b).
   "fauna-client-subscriptions/test-helpers",
+  # The Folders page's mail-custody read hold (`foldersHoldCustodyReadsForTest`,
+  # the `folders_hold_custody_reads` command's mechanism) — forwarded, rule (b).
+  "fauna-client-folders/test-helpers",
   # The submission-token refresh's clock (`mailTokenRefreshSetClockOffsetForTest`,
   # the `mail_token_refresh_advance_clock` command's mechanism) — forwarded,
   # rule (b).

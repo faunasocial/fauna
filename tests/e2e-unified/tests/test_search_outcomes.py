@@ -160,6 +160,51 @@ def test_narrowing_a_search_to_one_kind_shows_only_that_kind(
 @pytest.mark.ios
 @pytest.mark.android
 @pytest.mark.feature("search")
+def test_a_kind_chosen_before_typing_is_the_kind_the_search_runs_under(
+    logged_in_app, nest_instance, test_user
+):
+    """`search.md` § User actions (`search-type-filter`): a choice is never
+    dropped. A person picks "Posts" while the query field is still blank, THEN
+    types and submits — the search must run narrowed to posts. Before the
+    shared manager held the token, the blank-field filter change returned early
+    on tui, web, android and the Apple apps, and the submit ran under All."""
+    app = logged_in_app
+    post, profile = S.search_page.badge_post, S.search_page.badge_profile
+    needle = f"prepick{uuid.uuid4().hex[:10]}"
+    _seed_a_post_and_a_profile_sharing(needle, nest_instance, test_user)
+
+    reset_search_page(app)
+    try:
+        app.driver.clear_and_type("search-query-field", "")
+        app.search.set_type_filter("post")
+        app.search.query(needle)
+        # A dropped pick shows BOTH kinds (the unfiltered search finds the
+        # profile too); a held one shows the post alone. Waiting for the post
+        # row first gives the profile row the same commit to appear in.
+        wait_until(
+            lambda: post in kinds_shown(app),
+            NEST_HIT_S,
+            diagnose=lambda: (
+                f"a search for {needle!r} with Posts chosen before typing should "
+                f"find the post; rows={rows(app)} error={app.error_text()!r}"
+            ),
+        )
+        assert kinds_shown(app) == {post}, (
+            f"Posts was chosen before typing, so no {profile} row may show; "
+            f"rows={rows(app)} error={app.error_text()!r}"
+        )
+    finally:
+        reset_search_page(app)
+
+
+@pytest.mark.web
+@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
+@pytest.mark.feature("search")
 def test_each_search_result_shows_its_matching_snippet_and_its_kind(
     logged_in_app, nest_instance, test_user
 ):

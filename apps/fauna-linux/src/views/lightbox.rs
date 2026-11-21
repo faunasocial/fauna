@@ -69,15 +69,6 @@ fn show_lightbox_with(parent: Option<&gtk::Window>, title: &str, content: &impl 
 
     // Escape closes the lightbox — the keyboard's way out on every app (web's
     // `Lightbox.svelte`, tui's `lightbox.rs`); ui.yaml declares no dismiss element.
-    let w = window.clone();
-    let escape = gtk::ShortcutController::new();
-    escape.add_shortcut(gtk::Shortcut::new(
-        gtk::ShortcutTrigger::parse_string("Escape"),
-        Some(gtk::CallbackAction::new(move |_, _| {
-            w.close();
-            gtk::glib::Propagation::Stop
-        })),
-    ));
-    window.add_controller(escape);
+    crate::modal_escape::close_on_escape(&window);
     window.present();
 }

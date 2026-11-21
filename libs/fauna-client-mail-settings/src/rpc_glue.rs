@@ -3168,6 +3168,14 @@ mod native {
     /// future once per signed-in client, at its post-auth edge; a per-app
     /// reconnect leg of its own is what this replaces.
     ///
+    /// Each connect pass's first step is the **account key at first connect**
+    /// ([`MailSettingsMachine::ensure_account_key`], inside
+    /// `refresh_epoch_schedule`): an awaited walk, then the mint when the
+    /// walked custody holds no key — so every account holds its MSEK from its
+    /// first connect, whatever the deployment serves (`mail-credentials.md`
+    /// § MSEK lifecycle → *Every account holds the key*, ruling 3). Web's
+    /// post-auth edge runs the same `refresh_epoch_schedule`.
+    ///
     /// Each pass also runs the **submission-token refresh**
     /// ([`MailSettingsMachine::refresh_submission_tokens`] on the token clock,
     /// `mail-credentials.md` § Architectural rules, rule 10), and between
@@ -3254,7 +3262,9 @@ mod native {
     /// Runs [`crate::serving_enablement::plan`] to the end and publishes the
     /// `{started, completed}` anchor
     /// ([`crate::serving_enablement::serving_enablement_json`]). The caller
-    /// spawns the returned future; it resolves once every step has answered.
+    /// spawns the returned future; it resolves once every step has succeeded
+    /// or been refused for good (or the session ended), and hands the
+    /// refusals back for the page's `error-message`.
     pub async fn dispatch_post_claim_serving_enablement(
         nest: Arc<NestClient>,
         keypair: ActorKeypair,
@@ -3262,11 +3272,16 @@ mod native {
         node_url: String,
         ledger: Arc<dyn SuccessionLedgerStore>,
         intents: crate::serving_enablement::ServingEnablementIntents,
-    ) {
+    ) -> crate::serving_enablement::ServingEnablementReport {
         let actor_id_hex = keypair.actor_id_hex();
         let secret = zeroize::Zeroizing::new(*keypair.secret_bytes());
         let mail_nest = Arc::clone(&nest);
+        let live = NativeConnectionLive {
+            state: tokio::sync::Mutex::new(nest.connection_state()),
+            client: Arc::downgrade(&nest),
+        };
         let executor = crate::serving_enablement::RpcServingEnablement {
+            live,
             nest: Arc::clone(&nest),
             build_mail_machine: move || {
                 build_mail_settings_machine(
@@ -3282,6 +3297,34 @@ mod native {
             bridges: build_bridge_approval_machine(nest),
         };
         crate::serving_enablement::apply_serving_enablement(actor_id_hex, intents, &executor).await
+    }
+
+    /// The native transport's half of the serving enablement's precondition:
+    /// the client's own `connection_state` watch. Holds the client weakly, so a
+    /// signed-out session's client is never kept alive by a pending run.
+    struct NativeConnectionLive {
+        state: tokio::sync::Mutex<tokio::sync::watch::Receiver<fauna_client::ConnectionState>>,
+        client: std::sync::Weak<NestClient>,
+    }
+
+    impl crate::serving_enablement::ConnectionLive for NativeConnectionLive {
+        async fn wait_until_live(&self) -> bool {
+            let mut state = self.state.lock().await;
+            loop {
+                // A stopped supervisor never reconnects on its own: the
+                // session is over for this run (`NestClient::supervisor_stop`).
+                match self.client.upgrade() {
+                    Some(client) if client.supervisor_stop().is_none() => {}
+                    _ => return false,
+                }
+                if *state.borrow_and_update() == fauna_client::ConnectionState::Connected {
+                    return true;
+                }
+                if state.changed().await.is_err() {
+                    return false;
+                }
+            }
+        }
     }
 
     // ── Relay mailbox provisioning (home-with-public-relay auto-trigger) ──────
@@ -3320,7 +3363,8 @@ mod native {
     /// [`PostLinkHook`] that auto-provisions the user's mailbox onto a just-linked
     /// peer nest (the home-with-public-relay home box), reusing the account's
     /// MSEK. Holds the **primary** connection, the user's secret and the mail
-    /// custody; on `after_link_both` it gates on the account holding an MSEK (a
+    /// custody; on `after_link_both` it gates on the account holding a live mail
+    /// credential (a
     /// no-op for content-only multi-homing), opens an authenticated connection to
     /// the peer with the same identity, and dispatches `ProvisionRelayMailbox` on
     /// a peer-bound machine carrying the same mail custody.
@@ -3347,15 +3391,18 @@ mod native {
     #[async_trait]
     impl PostLinkHook for MailRelayProvisionHook {
         async fn after_link_both(&self, peer_url: &str) -> Result<(), PairDispatchError> {
-            // Gate: only provision when the account holds a mailbox. Linking two
-            // of the user's nests for content-only multi-homing is valid — there
-            // is no mailbox to provision then, so the link succeeds untouched.
+            // Gate: only provision when the account holds a mailbox — a live
+            // credential, never the key alone, which every account holds from
+            // its first connect (`mail-credentials.md` § MSEK lifecycle →
+            // *Every account holds the key*, ruling 2). Linking two of the
+            // user's nests for content-only multi-homing is valid — there is
+            // no mailbox to provision then, so the link succeeds untouched.
             let mail = self.mail.load().await.map_err(|e| {
                 PairDispatchError::Nest(PairNestError::Transient(format!(
                     "read the account's mail custody: {e}"
                 )))
             })?;
-            if mail.msek.is_none() {
+            if mail.msek.is_none() || mail.live_credentials().next().is_none() {
                 return Ok(());
             }
 
@@ -5982,6 +6029,25 @@ mod wasm {
         MailSettingsMachine::new(actor_id, nest_seam, ledger, mail, signer, mua)
     }
 
+    /// The browser transport's half of the serving enablement's precondition:
+    /// its own `wait_until_connected`, waited out across failed attempts until
+    /// a connection is live or the client's reconnect loop has stopped for good.
+    struct WasmConnectionLive(WsRpcClient);
+
+    impl crate::serving_enablement::ConnectionLive for WasmConnectionLive {
+        async fn wait_until_live(&self) -> bool {
+            loop {
+                if self.0.supervisor_stop().is_some() {
+                    return false;
+                }
+                if self.0.wait_until_connected(5_000).await.is_ok() {
+                    return true;
+                }
+                provision_backoff(1_000).await;
+            }
+        }
+    }
+
     /// The wasm twin of the native `dispatch_post_claim_serving_enablement` —
     /// the web app's `LoggedIn` handoff runs the identical
     /// [`crate::serving_enablement::apply_serving_enablement`] over the browser
@@ -5994,11 +6060,12 @@ mod wasm {
         node_url: String,
         ledger: Arc<dyn SuccessionLedgerStore>,
         intents: crate::serving_enablement::ServingEnablementIntents,
-    ) {
+    ) -> crate::serving_enablement::ServingEnablementReport {
         let actor_id_hex = keypair.actor_id_hex();
         let secret = zeroize::Zeroizing::new(*keypair.secret_bytes());
         let mail_nest = nest.clone();
         let executor = crate::serving_enablement::RpcServingEnablement {
+            live: WasmConnectionLive(nest.clone()),
             nest: nest.clone(),
             build_mail_machine: move || {
                 build_mail_settings_machine(

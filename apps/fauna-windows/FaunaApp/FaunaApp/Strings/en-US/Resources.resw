@@ -17,6 +17,9 @@
     <data name="common/enable" xml:space="preserve"><value>Enable</value></data>
     <data name="common/disable" xml:space="preserve"><value>Disable</value></data>
     <data name="common/load_failed" xml:space="preserve"><value>Failed to load</value></data>
+    <data name="common/in_flight" xml:space="preserve"><value>Still saving — wait for it to finish</value></data>
+    <data name="common/nothing_to_confirm" xml:space="preserve"><value>Nothing is waiting to be confirmed</value></data>
+    <data name="common/nothing_to_save" xml:space="preserve"><value>Nothing has changed, so there is nothing to save</value></data>
     <data name="common/not_found" xml:space="preserve"><value>Not found</value></data>
     <data name="common/search" xml:space="preserve"><value>Search</value></data>
     <data name="common/clear_search" xml:space="preserve"><value>Clear search</value></data>
@@ -46,6 +49,8 @@
     <data name="common/unfollow" xml:space="preserve"><value>Unfollow</value></data>
     <data name="common/copy" xml:space="preserve"><value>Copy</value></data>
     <data name="common/copied" xml:space="preserve"><value>Copied!</value></data>
+    <data name="common/copy_failed" xml:space="preserve"><value>Could not copy to the clipboard: {error}</value></data>
+    <data name="common/pref_not_saved" xml:space="preserve"><value>This choice could not be saved and lasts only until Fauna restarts: {error}</value></data>
     <data name="common/archive" xml:space="preserve"><value>Archive</value></data>
     <data name="common/today" xml:space="preserve"><value>Today</value></data>
     <data name="common/upcoming" xml:space="preserve"><value>Upcoming</value></data>
@@ -310,6 +315,7 @@
     <data name="onboarding/recovery/empty_message" xml:space="preserve"><value>No saved server keys were found for your boxes. If another of your nests is still running, and your devices have signed in to it or linked it since saving those keys, it holds a copy of them — choose Recover a lost box on the Set Up Your Identity screen, import your identity, and enter your handle on that nest.</value></data>
     <data name="onboarding/recovery/method_cloud" xml:space="preserve"><value>Re-provision on a cloud host</value></data>
     <data name="onboarding/recovery/method_selfhosted" xml:space="preserve"><value>Install on my own server</value></data>
+    <data name="onboarding/recovery/method_blocked_pick_box" xml:space="preserve"><value>Choose the box to recover first.</value></data>
     <data name="onboarding/recovery/selfhosted_title" xml:space="preserve"><value>Install on your own server</value></data>
     <data name="onboarding/recovery/selfhosted_desc" xml:space="preserve"><value>Put your server's key, from the line below, into the setup file of a fresh box before you start it for the first time — the setup guide's section on rebuilding after a total loss shows where it goes and how to write it. The rebuilt box is then the same nest, and your installed Fauna apps reconnect to it automatically once it's back online, with no warning that its identity changed.</value></data>
     <data name="onboarding/recovery/selfhosted_command_pending" xml:space="preserve"><value>The line with your server's key will appear here.</value></data>
@@ -331,6 +337,8 @@
     <data name="onboarding/retire/transfer_code_available_after" xml:space="preserve"><value>The registry locks this domain against transfer until {when}. Ask again after that — the code is never refused, only delayed.</value></data>
     <data name="onboarding/retire/transfer_code_from_registrar" xml:space="preserve"><value>Get this domain's transfer code from your registrar's own dashboard.</value></data>
     <data name="onboarding/retire/delete_button" xml:space="preserve"><value>Delete this server…</value></data>
+    <data name="onboarding/retire/delete_blocked_pick_server" xml:space="preserve"><value>Choose the server to delete first.</value></data>
+    <data name="onboarding/retire/confirm_blocked_name" xml:space="preserve"><value>Type the server's name exactly as it is listed to confirm.</value></data>
     <data name="onboarding/retire/confirm_what" xml:space="preserve"><value>You are about to permanently delete {name} at {provider} ({address}).</value></data>
     <data name="onboarding/retire/confirm_domain" xml:space="preserve"><value>Domain: {domain}</value></data>
     <data name="onboarding/retire/confirm_secondary_domains" xml:space="preserve"><value>Also serves: {domains}</value></data>
@@ -397,9 +405,10 @@
     <data name="onboarding/provision/step/dns" xml:space="preserve"><value>DNS</value></data>
     <data name="onboarding/provision/step/online" xml:space="preserve"><value>Online</value></data>
     <data name="onboarding/provision/step_failed" xml:space="preserve"><value>Step {step} failed: {cause}</value></data>
-    <data name="onboarding/provision/step_attempt_template" xml:space="preserve"><value> (attempt {attempt} of {max_attempts})</value></data>
     <data name="onboarding/provision/substep/domain_checking_availability" xml:space="preserve"><value>Checking domain availability</value></data>
     <data name="onboarding/provision/substep/domain_registering" xml:space="preserve"><value>Registering domain</value></data>
+    <data name="onboarding/provision/substep/domain_creating_zone" xml:space="preserve"><value>Creating the DNS zone</value></data>
+    <data name="onboarding/provision/substep/domain_setting_nameservers" xml:space="preserve"><value>Pointing the domain at its DNS</value></data>
     <data name="onboarding/provision/substep/domain_verifying_zone" xml:space="preserve"><value>Verifying DNS zone</value></data>
     <data name="onboarding/provision/substep/server_generating_dkim" xml:space="preserve"><value>Generating DKIM keys</value></data>
     <data name="onboarding/provision/substep/server_creating" xml:space="preserve"><value>Creating server</value></data>
@@ -407,6 +416,7 @@
     <data name="onboarding/provision/substep/dns_adding_email_records" xml:space="preserve"><value>Adding email records</value></data>
     <data name="onboarding/provision/substep/dns_setting_reverse_dns" xml:space="preserve"><value>Setting reverse DNS</value></data>
     <data name="onboarding/provision/substep/online_waiting" xml:space="preserve"><value>Waiting for your nest to start</value></data>
+    <data name="onboarding/provision/substep/online_still_starting" xml:space="preserve"><value>The server is still starting. This can take several minutes — you can leave this window open.</value></data>
     <data name="onboarding/provision/substep/online_claiming" xml:space="preserve"><value>Signing you in to your new nest</value></data>
     <data name="onboarding/provision/substep/status_skipped" xml:space="preserve"><value>Already configured — skipped</value></data>
     <data name="onboarding/provision/substep/status_retrying" xml:space="preserve"><value>Retrying after error: {cause}</value></data>
@@ -420,9 +430,51 @@
     <data name="onboarding/handle/prompt" xml:space="preserve"><value>Enter your handle</value></data>
     <data name="onboarding/handle/examples_help" xml:space="preserve"><value>Example: alice@example.com or alice@bsky.social. Format: user@domain.</value></data>
     <data name="onboarding/handle/localhost_hint" xml:space="preserve"><value>test@localhost is allowed for trying out the app.</value></data>
-    <data name="onboarding/handle/control_checkbox" xml:space="preserve"><value>I control DNS for this domain</value></data>
+    <data name="onboarding/provider_choice/title" xml:space="preserve"><value>Choose providers</value></data>
+    <data name="onboarding/provider_choice/description" xml:space="preserve"><value>Connect the providers that will set up your nest. Nothing is bought or changed until you press Buy and set up on the next page.</value></data>
+    <data name="onboarding/provider_choice/goal_domain" xml:space="preserve"><value>Register {domain}</value></data>
+    <data name="onboarding/provider_choice/goal_dns" xml:space="preserve"><value>DNS for {domain}</value></data>
+    <data name="onboarding/provider_choice/goal_vps" xml:space="preserve"><value>A server</value></data>
+    <data name="onboarding/provider_choice/goal_covered_by" xml:space="preserve"><value>Covered by {provider}</value></data>
+    <data name="onboarding/provider_choice/goal_open" xml:space="preserve"><value>Not covered yet — connect a provider below.</value></data>
+    <data name="onboarding/provider_choice/goal_price" xml:space="preserve"><value>{price} first year, then {renewal} a year</value></data>
+    <data name="onboarding/provider_choice/goal_price_first_year" xml:space="preserve"><value>{price} first year</value></data>
+    <data name="onboarding/provider_choice/cannot_cover_no_dns" xml:space="preserve"><value>Doesn't run DNS.</value></data>
+    <data name="onboarding/provider_choice/cannot_cover_no_server" xml:space="preserve"><value>Doesn't rent servers.</value></data>
+    <data name="onboarding/provider_choice/cannot_cover_no_registrar" xml:space="preserve"><value>Doesn't register domains.</value></data>
+    <data name="onboarding/provider_choice/cannot_cover_not_registrable" xml:space="preserve"><value>Can't register this domain.</value></data>
+    <data name="onboarding/provider_choice/cannot_cover_zone_missing" xml:space="preserve"><value>This account doesn't hold {domain}.</value></data>
+    <data name="onboarding/provider_choice/cannot_cover_no_zone_door" xml:space="preserve"><value>Can't set up DNS for a domain registered elsewhere.</value></data>
+    <data name="onboarding/provider_choice/cannot_cover_no_nameserver_door" xml:space="preserve"><value>{provider} can't point a domain at another provider's DNS.</value></data>
+    <data name="onboarding/provider_choice/cannot_cover_pointed_elsewhere" xml:space="preserve"><value>Your domain now points at {provider}'s DNS.</value></data>
+    <data name="onboarding/provider_choice/dns_not_pointed_yet" xml:space="preserve"><value>{domain} doesn't point at {provider} yet.</value></data>
+    <data name="onboarding/provider_choice/held_credential" xml:space="preserve"><value>Connected with a sign-in this device already holds.</value></data>
+    <data name="onboarding/provider_choice/status_cover_domain" xml:space="preserve"><value>Connect a provider that can register {domain} to continue.</value></data>
+    <data name="onboarding/provider_choice/status_cover_dns" xml:space="preserve"><value>Connect a provider that can run DNS for your domain, or set DNS up later, to continue.</value></data>
+    <data name="onboarding/provider_choice/status_cover_vps" xml:space="preserve"><value>Connect a provider that rents servers to continue.</value></data>
+    <data name="onboarding/provider_choice/status_contact_missing" xml:space="preserve"><value>Open {provider} and fill in the registration contact to continue.</value></data>
+    <data name="onboarding/provider_choice/start_blocked_price" xml:space="preserve"><value>Tick the box under the domain's price to agree to it.</value></data>
+    <data name="onboarding/provider_choice/start_blocked_server_type" xml:space="preserve"><value>Choose a server type to continue.</value></data>
+    <data name="onboarding/provider_choice/manual_row_help" xml:space="preserve"><value>Shows you the DNS records to add yourself once your nest is built.</value></data>
+    <data name="onboarding/provider_choice/providers_heading" xml:space="preserve"><value>Providers</value></data>
+    <data name="onboarding/provider_choice/capability_registrar" xml:space="preserve"><value>registers domains</value></data>
+    <data name="onboarding/provider_choice/capability_dns" xml:space="preserve"><value>runs DNS</value></data>
+    <data name="onboarding/provider_choice/capability_vps" xml:space="preserve"><value>rents servers</value></data>
+    <data name="onboarding/provider_choice/state_connected" xml:space="preserve"><value>connected</value></data>
+    <data name="onboarding/provider_choice/state_available" xml:space="preserve"><value>not connected</value></data>
+    <data name="onboarding/provider_choice/state_connecting" xml:space="preserve"><value>connecting…</value></data>
+    <data name="onboarding/provider_choice/manual_row" xml:space="preserve"><value>I will set DNS up later</value></data>
+    <data name="onboarding/provider_choice/goal_select" xml:space="preserve"><value>Covered by</value></data>
+    <data name="onboarding/provider_choice/connect" xml:space="preserve"><value>Connect</value></data>
+    <data name="onboarding/provider_choice/disconnect" xml:space="preserve"><value>Disconnect</value></data>
+    <data name="onboarding/provider_choice/close" xml:space="preserve"><value>Close</value></data>
+    <data name="onboarding/provider_choice/dialog_connected" xml:space="preserve"><value>Connected.</value></data>
+    <data name="onboarding/provider_choice/dialog_connecting" xml:space="preserve"><value>Connecting…</value></data>
+    <data name="onboarding/provider_choice/refused_not_buying" xml:space="preserve"><value>No domain is being bought, so there is no registration to choose.</value></data>
+    <data name="onboarding/provider_choice/refused_registration_fixed" xml:space="preserve"><value>{domain} is registered at {provider}; that cannot change now.</value></data>
+    <data name="onboarding/provider_choice/refused_not_connected" xml:space="preserve"><value>Connect {provider} first.</value></data>
     <data name="onboarding/dns_config/title" xml:space="preserve"><value>Configure DNS</value></data>
-    <data name="onboarding/dns_config/buy_domain_checkbox" xml:space="preserve"><value>Buy domain on Continue (this page)</value></data>
+    <data name="onboarding/dns_config/buy_domain_checkbox" xml:space="preserve"><value>Buy domain</value></data>
     <data name="onboarding/dns_config/same_provider_checkbox" xml:space="preserve"><value>Buy VPS with same provider (next page)</value></data>
     <data name="onboarding/dns_config/ineligible_needs_registrar" xml:space="preserve"><value>Can't register domains — untick the buy-domain box above to pick it.</value></data>
     <data name="onboarding/dns_config/ineligible_needs_vps" xml:space="preserve"><value>Doesn't sell VPS servers — untick the same-provider box above to pick it.</value></data>
@@ -482,6 +534,14 @@
     <data name="onboarding/nest_provisioning/bom_line" xml:space="preserve"><value>{label}: {price}</value></data>
     <data name="onboarding/nest_provisioning/bom_line_recurring" xml:space="preserve"><value>{label}: {price}/month</value></data>
     <data name="onboarding/nest_provisioning/bom_line_domain" xml:space="preserve"><value>{label}: {price} for the first year, then {renewal}/year</value></data>
+    <data name="onboarding/nest_provisioning/dns_plan_heading" xml:space="preserve"><value>DNS records at {domain} — what setup will do:</value></data>
+    <data name="onboarding/nest_provisioning/dns_plan_loading" xml:space="preserve"><value>Reading the current DNS records at {domain}…</value></data>
+    <data name="onboarding/nest_provisioning/dns_plan_read_failed" xml:space="preserve"><value>Could not read the current DNS records at {domain} ({cause}). Setup reads them again when it runs; if it still cannot, it adds each record and removes none. Where a record with another value is already there, your DNS provider may keep it beside the new one, replace it, or refuse the new one, which stops setup at the DNS step.</value></data>
+    <data name="onboarding/nest_provisioning/dns_plan_new_server" xml:space="preserve"><value>the new server's address</value></data>
+    <data name="onboarding/nest_provisioning/dns_plan_row_keep" xml:space="preserve"><value>{name} {record_type} {value} — already right, kept</value></data>
+    <data name="onboarding/nest_provisioning/dns_plan_row_add" xml:space="preserve"><value>{name} {record_type} {value} — added</value></data>
+    <data name="onboarding/nest_provisioning/dns_plan_row_change" xml:space="preserve"><value>{name} {record_type} {old} → {value} — changed</value></data>
+    <data name="onboarding/nest_provisioning/dns_plan_row_remove" xml:space="preserve"><value>{name} {record_type} {old} — removed, so visitors are not sent to the old address</value></data>
     <data name="onboarding/nest_provisioning/ssh_door_command_template" xml:space="preserve"><value>SSH door: {command} (admits only {address}; key {path}, fingerprint {fingerprint})</value></data>
     <data name="onboarding/nest_provisioning/ssh_door_command_no_path_template" xml:space="preserve"><value>SSH door: {command} (admits only {address}; fingerprint {fingerprint})</value></data>
     <data name="onboarding/nest_provisioning/ssh_door_address_unknown" xml:space="preserve"><value>the address you set the server up from</value></data>
@@ -502,7 +562,7 @@
     <data name="onboarding/handle_check/outcome/domain_available_unpriced" xml:space="preserve"><value>{domain} appears to be available for purchase.</value></data>
     <data name="onboarding/handle_check/outcome/domain_available_not_buyable_via_provider" xml:space="preserve"><value>{domain} appears to be available, but none of our supported registrars carry .{tld}. You'll need to buy it elsewhere.</value></data>
     <data name="onboarding/handle_check/outcome/domain_available_inside_zone" xml:space="preserve"><value>Nothing is set up at {domain} yet. It sits inside {zone}: if you hold {zone}, continue and pick the DNS provider that hosts it. If not, you can register {domain} on the next page.</value></data>
-    <data name="onboarding/handle_check/outcome/registered_no_nest" xml:space="preserve"><value>{domain} resolves but no nest is running. To set one up, confirm you control DNS for this domain.</value></data>
+    <data name="onboarding/handle_check/outcome/registered_no_nest" xml:space="preserve"><value>No nest is answering at {domain}. If your server is only down, try again later. If you hold {domain}, continue to set up a new nest there — the domain is kept and its DNS records are pointed at the new server.</value></data>
     <data name="onboarding/handle_check/outcome/local_no_nest" xml:space="preserve"><value>No nest is running at {domain}. Start a nest there, then check again.</value></data>
     <data name="onboarding/handle_check/outcome/kids_no_joinable_nest" xml:space="preserve"><value>There is no nest at {domain} you can join. Ask for an invite to a nest that is already set up.</value></data>
     <data name="onboarding/handle_check/outcome/already_on_nest_handle_matches" xml:space="preserve"><value>Welcome back, {handle}.</value></data>
@@ -510,7 +570,7 @@
     <data name="onboarding/handle_check/outcome/user_unregistered" xml:space="preserve"><value>There's a nest at {domain} but you're not registered. Request an invite or paste a code below.</value></data>
     <data name="onboarding/handle_check/outcome/unregistered_unclaimed_nest" xml:space="preserve"><value>There's a nest at {domain} but no one has claimed it yet. Continue to claim it as your own.</value></data>
     <data name="onboarding/handle_check/error/no_network" xml:space="preserve"><value>Couldn't reach the network. Check your connection and try again.</value></data>
-    <data name="onboarding/handle_check/error/nest_unreachable" xml:space="preserve"><value>{domain} is registered but the nest didn't respond. Try again, or check the domain.</value></data>
+    <data name="onboarding/handle_check/error/nest_unreachable" xml:space="preserve"><value>Nothing answered at {domain}. Check that the nest there is running, then try again.</value></data>
     <data name="onboarding/handle_check/error/nest_misbehaving" xml:space="preserve"><value>{domain} responded with an unexpected error. Try again later.</value></data>
     <data name="onboarding/handle_check/error/nest_protocol_mismatch" xml:space="preserve"><value>{domain} returned a malformed response. The nest version may be incompatible.</value></data>
     <data name="onboarding/handle_check/error/challenge_temp" xml:space="preserve"><value>The nest's challenge service is temporarily unavailable. Try again.</value></data>
@@ -646,6 +706,7 @@
     <data name="tui_settings/external_media_always" xml:space="preserve"><value>Always open</value></data>
     <data name="tui_settings/external_media_never" xml:space="preserve"><value>Never open (show details only)</value></data>
     <data name="feed/compose_empty" xml:space="preserve"><value>Post cannot be empty</value></data>
+    <data name="feed/reply_empty" xml:space="preserve"><value>Write your reply first.</value></data>
     <data name="feed/imported_notice" xml:space="preserve"><value>Showing the posts you imported from {platform}</value></data>
     <data name="feed/imported_clear" xml:space="preserve"><value>Show all posts</value></data>
     <data name="feed/video_external_open_confirm_title" xml:space="preserve"><value>Open this video externally?</value></data>
@@ -704,8 +765,11 @@
     <data name="feed/bridge_form/kind" xml:space="preserve"><value>Bridge</value></data>
     <data name="feed/bridge_form/uri" xml:space="preserve"><value>Feed URI</value></data>
     <data name="feed/bridge_form/name" xml:space="preserve"><value>Display Name</value></data>
+    <data name="feed/bridge_form/kind_required" xml:space="preserve"><value>Choose a bridge first.</value></data>
+    <data name="feed/bridge_form/uri_required" xml:space="preserve"><value>Type the feed URI first.</value></data>
     <data name="feed/create/title" xml:space="preserve"><value>New Feed</value></data>
     <data name="feed/create/name_placeholder" xml:space="preserve"><value>My Feed</value></data>
+    <data name="feed/create/name_required" xml:space="preserve"><value>Name the feed first.</value></data>
     <data name="feed/create/add_rule" xml:space="preserve"><value>Add Rule</value></data>
     <data name="feed/create/mode_all" xml:space="preserve"><value>All match</value></data>
     <data name="feed/create/mode_any" xml:space="preserve"><value>Any match</value></data>
@@ -801,6 +865,9 @@
     <data name="conversations/list/title" xml:space="preserve"><value>Conversations</value></data>
     <data name="conversations/list/new_conversation" xml:space="preserve"><value>New Conversation</value></data>
     <data name="conversations/list/sort" xml:space="preserve"><value>Sort</value></data>
+    <data name="conversations/list/sort_latest_activity" xml:space="preserve"><value>Sort: latest activity</value></data>
+    <data name="conversations/list/sort_oldest_first" xml:space="preserve"><value>Sort: oldest first</value></data>
+    <data name="conversations/list/sort_unread" xml:space="preserve"><value>Sort: unread first</value></data>
     <data name="conversations/list/search_placeholder" xml:space="preserve"><value>Search conversations...</value></data>
     <data name="conversations/list/select_conversation" xml:space="preserve"><value>Select a conversation to view.</value></data>
     <data name="conversations/list/select_conversation_short" xml:space="preserve"><value>Select a conversation</value></data>
@@ -812,6 +879,10 @@
     <data name="conversations/compose/body" xml:space="preserve"><value>Body</value></data>
     <data name="conversations/compose/resolve" xml:space="preserve"><value>Resolve</value></data>
     <data name="conversations/compose/write_message" xml:space="preserve"><value>Write your message...</value></data>
+    <data name="conversations/compose/needs_recipient" xml:space="preserve"><value>Add who it goes to first.</value></data>
+    <data name="conversations/compose/recipient_unsupported" xml:space="preserve"><value>This app cannot send to this recipient. Remove it and add another.</value></data>
+    <data name="conversations/compose/no_attachments_here" xml:space="preserve"><value>Files cannot be sent to this recipient.</value></data>
+    <data name="conversations/compose/no_topic_here" xml:space="preserve"><value>A topic cannot be set for this recipient.</value></data>
     <data name="conversations/compose/encrypted" xml:space="preserve"><value>Encrypted</value></data>
     <data name="conversations/detail/badge_encrypted" xml:space="preserve"><value>End-to-end encrypted</value></data>
     <data name="conversations/detail/badge_signed" xml:space="preserve"><value>Cryptographically signed</value></data>
@@ -986,6 +1057,7 @@
     <data name="contacts/looking_up_handle" xml:space="preserve"><value>Looking up @{handle}@{domain}…</value></data>
     <data name="contacts/address_book/title" xml:space="preserve"><value>Address Book</value></data>
     <data name="contacts/address_book/no_addressbooks" xml:space="preserve"><value>No address books yet.</value></data>
+    <data name="contacts/address_book/loading" xml:space="preserve"><value>Your address books are still loading.</value></data>
     <data name="contacts/address_book/no_cards" xml:space="preserve"><value>No contacts yet.</value></data>
     <data name="contacts/address_book/card_not_found" xml:space="preserve"><value>That contact is no longer in your address books.</value></data>
     <data name="contacts/address_book/select_card" xml:space="preserve"><value>Select a contact to view details.</value></data>
@@ -1078,6 +1150,7 @@
     <data name="events/view_agenda" xml:space="preserve"><value>Agenda</value></data>
     <data name="events/view_month" xml:space="preserve"><value>Month</value></data>
     <data name="events/view_day" xml:space="preserve"><value>Day</value></data>
+    <data name="events/pan_none_in_agenda" xml:space="preserve"><value>Agenda lists every event, so there are no dates to move through — switch to Month, Week or Day.</value></data>
     <data name="events/mail_required" xml:space="preserve"><value>Calendars and events require mail to be enabled. Enable mail in Settings to use the calendar.</value></data>
     <data name="events/loading_events" xml:space="preserve"><value>Loading events...</value></data>
     <data name="events/no_events_in_calendar" xml:space="preserve"><value>No events in this calendar.</value></data>
@@ -1107,6 +1180,10 @@
     <data name="events/refused_changes/reason/attendee_unresolvable" xml:space="preserve"><value>The guest they answered for could not be confirmed.</value></data>
     <data name="events/refused_changes/reason/sender_unauthenticated" xml:space="preserve"><value>The message did not come from a confirmed sender.</value></data>
     <data name="events/refused_changes/reason/other" xml:space="preserve"><value>The change was refused.</value></data>
+    <data name="events/create_blocked/loading" xml:space="preserve"><value>Your calendars are still loading.</value></data>
+    <data name="events/create_blocked/provision_failed" xml:space="preserve"><value>Your first calendar could not be set up ({error}). It is tried again the next time Events loads.</value></data>
+    <data name="events/calendars_unreadable" xml:space="preserve"><value>Some of your calendars could not be read and are not shown ({count}).</value></data>
+    <data name="events/save_failed" xml:space="preserve"><value>The event could not be saved ({error}). What you typed is kept; press Save to try again.</value></data>
     <data name="events/error/load_calendars" xml:space="preserve"><value>Failed to load calendars</value></data>
     <data name="events/error/load_events" xml:space="preserve"><value>Failed to load events</value></data>
     <data name="events/error/create_calendar" xml:space="preserve"><value>Failed to create calendar</value></data>
@@ -1245,6 +1322,7 @@
     <data name="atproto_settings/consent_deny_button" xml:space="preserve"><value>Deny</value></data>
     <data name="atproto_settings/consent_folder_label" xml:space="preserve"><value>Folder:</value></data>
     <data name="atproto_settings/consent_folder_prompt" xml:space="preserve"><value>Choose a folder</value></data>
+    <data name="atproto_settings/consent_folder_required" xml:space="preserve"><value>Choose a folder first.</value></data>
     <data name="atproto_settings/consent_folder_none_deposit" xml:space="preserve"><value>None of your folders can receive files from an app — each keeps only its file list on your nest. Let one folder store its files on your nest first.</value></data>
     <data name="atproto_settings/consent_folder_none_read" xml:space="preserve"><value>None of your folders is shared with apps for reading. Turn on serving for a folder first.</value></data>
     <data name="atproto_settings/consent_folder_none_both" xml:space="preserve"><value>None of your folders can both receive files from an app and be read by one. Use a folder that stores its files on your nest and is served.</value></data>
@@ -1257,6 +1335,7 @@
     <data name="atproto_settings/error_authorize" xml:space="preserve"><value>Failed to let external apps post as you: {message}</value></data>
     <data name="atproto_settings/error_deauthorize" xml:space="preserve"><value>Failed to stop external apps posting as you: {message}</value></data>
     <data name="atproto_settings/error_no_identity" xml:space="preserve"><value>This app cannot authorize posting from external apps. Use another of your devices to turn it on.</value></data>
+    <data name="atproto_settings/page_unavailable" xml:space="preserve"><value>Bluesky settings are not available in this session: this device could not read your identity key. Sign in again to try once more.</value></data>
     <data name="atproto_settings/error_delegation_untrusted" xml:space="preserve"><value>The stored authorization for external apps was not created by this account, so it is not being shown. ({message})</value></data>
     <data name="atproto_settings/error_save_local" xml:space="preserve"><value>Created, but this device could not save a copy — copy the password now, it cannot be shown again later. ({message})</value></data>
     <data name="atproto_settings/error_transition" xml:space="preserve"><value>Failed to change the Bluesky integration level: {message}</value></data>
@@ -1325,6 +1404,7 @@
     <data name="bridges/unlink" xml:space="preserve"><value>Unlink {name}</value></data>
     <data name="bridges/link" xml:space="preserve"><value>Link {name}</value></data>
     <data name="bridges/no_link_method" xml:space="preserve"><value>This bridge has no link method available right now.</value></data>
+    <data name="bridges/link_blocked_by_provider" xml:space="preserve"><value>{message}</value></data>
     <data name="bridges/id_to_follow" xml:space="preserve"><value>ID to follow</value></data>
     <data name="bridges/id_to_follow_placeholder" xml:space="preserve"><value>e.g. did:plc:... or user.bsky.social</value></data>
     <data name="bridges/petname_optional" xml:space="preserve"><value>Petname (optional)</value></data>
@@ -1341,6 +1421,7 @@
     <data name="bridges/no_settings" xml:space="preserve"><value>No settings available.</value></data>
     <data name="bridges/no_follows_configured" xml:space="preserve"><value>No follows configured.</value></data>
     <data name="bridges/add_follow" xml:space="preserve"><value>Add Follow</value></data>
+    <data name="bridges/follow_id_required" xml:space="preserve"><value>Type the ID to follow.</value></data>
     <data name="bridges/no_bridges" xml:space="preserve"><value>No bridges available.</value></data>
     <data name="bridges/no_bridges_desc" xml:space="preserve"><value>Bridges connect your nest to other networks.</value></data>
     <data name="bridges/select_bridge" xml:space="preserve"><value>Select a bridge</value></data>
@@ -1361,6 +1442,7 @@
     <data name="bridges/plugins_empty" xml:space="preserve"><value>No plugins installed.</value></data>
     <data name="bridges/plugin_install_label" xml:space="preserve"><value>Plugin document URL</value></data>
     <data name="bridges/plugin_install_submit" xml:space="preserve"><value>Install</value></data>
+    <data name="bridges/plugin_install_url_required" xml:space="preserve"><value>Paste the plugin document's URL.</value></data>
     <data name="bridges/plugin_install_opened" xml:space="preserve"><value>Review the install card in Settings → Connected apps → Requests.</value></data>
     <data name="bridges/plugin_publisher" xml:space="preserve"><value>{domain} — {key}</value></data>
     <data name="bridges/plugin_publisher_development" xml:space="preserve"><value>Development plugin</value></data>
@@ -1427,7 +1509,7 @@
     <data name="media/error_refresh" xml:space="preserve"><value>Failed to load media: {message}</value></data>
     <data name="media/error_upload" xml:space="preserve"><value>Failed to upload: {message}</value></data>
     <data name="media/error_delete" xml:space="preserve"><value>Failed to delete: {message}</value></data>
-    <data name="media/error_no_set" xml:space="preserve"><value>You don't have a folder to upload into yet. Create a folder under Settings → Folders first.</value></data>
+    <data name="media/error_first_folder" xml:space="preserve"><value>Couldn't create your first folder, so nothing was uploaded: {message}. Try the upload again.</value></data>
     <data name="media/error_restore" xml:space="preserve"><value>Failed to restore version: {message}</value></data>
     <data name="media/error_followed_unavailable" xml:space="preserve"><value>This folder is no longer shared publicly. Its owner may have stopped sharing it, or removed it.</value></data>
     <data name="media/error_followed_fetch" xml:space="preserve"><value>Couldn't read that followed folder: {message}</value></data>
@@ -1603,6 +1685,13 @@
     <data name="backups/backup_destination_kind_select_label" xml:space="preserve"><value>Where should the copy live?</value></data>
     <data name="backups/backup_destination_capacity_placeholder" xml:space="preserve"><value>Storage limit, e.g. 50 GB</value></data>
     <data name="backups/backup_destination_capacity_invalid" xml:space="preserve"><value>Enter a storage limit like "50 GB" or "500 MB".</value></data>
+    <data name="backups/backup_destination_url_required" xml:space="preserve"><value>Type the address of the nest to back up to first.</value></data>
+    <data name="backups/snapshot_delete_already_pending" xml:space="preserve"><value>Already scheduled for deletion.</value></data>
+    <data name="backups/snapshot_delete_already_deleted" xml:space="preserve"><value>Already deleted — recover it to keep it.</value></data>
+    <data name="backups/snapshot_select_folder_first" xml:space="preserve"><value>Choose a folder first.</value></data>
+    <data name="backups/restore_kind_unticked" xml:space="preserve"><value>Tick this snapshot's kind to restore it.</value></data>
+    <data name="backups/snapshot_restore_destination_required" xml:space="preserve"><value>Type the folder to restore into first.</value></data>
+    <data name="backups/snapshot_restore_running" xml:space="preserve"><value>A restore is already running.</value></data>
     <data name="backups/backup_destination_usage" xml:space="preserve"><value>{held} of {cap} used</value></data>
     <data name="backups/backup_destination_usage_cap_reached" xml:space="preserve"><value>{held} of {cap} used — full, older copies are being dropped</value></data>
     <data name="backups/backup_destination_usage_uncapped" xml:space="preserve"><value>{held} held, no limit set</value></data>
@@ -1618,7 +1707,7 @@
     <data name="backups/backup_reclaim_still_hosting" xml:space="preserve"><value>This device is still backing up right now, so nothing was deleted. Try again in a moment.</value></data>
     <data name="backups/backup_destination_reseed_button" xml:space="preserve"><value>Restore my data to this nest</value></data>
     <data name="backups/backup_reseed_confirm_title" xml:space="preserve"><value>Restore this device's copy to this nest?</value></data>
-    <data name="backups/backup_reseed_confirm_body" xml:space="preserve"><value>This copies the backup this device holds onto this nest and makes it live again. Nothing is deleted, here or on the nest. If this nest already holds your data, it stops rather than mixing the two.</value></data>
+    <data name="backups/backup_reseed_confirm_body" xml:space="preserve"><value>This copies the backup this device holds onto this nest and makes it live again. Nothing is deleted, here or on the nest. Where this nest already holds some of your mail, posts, calendar or contacts, what is missing is copied in beside it; a folder it already holds is left as it is.</value></data>
     <data name="backups/backup_reseed_confirm_button" xml:space="preserve"><value>Restore</value></data>
     <data name="backups/backup_reseed_cancel_button" xml:space="preserve"><value>Not now</value></data>
     <data name="backups/backup_reseed_running" xml:space="preserve"><value>Restoring your data to this nest…</value></data>
@@ -1626,7 +1715,7 @@
     <data name="backups/backup_reseed_failed" xml:space="preserve"><value>The restore stopped before anything was made live: {reason}</value></data>
     <data name="backups/backup_reseed_reenroll_failed" xml:space="preserve"><value>Your data is back on this nest, but this device could not sign up again as its backup: {reason}. Add this device as a backup destination to keep a copy here.</value></data>
     <data name="backups/backup_reseed_pull_back_confirm_title" xml:space="preserve"><value>Restore the copy on {name} to this nest?</value></data>
-    <data name="backups/backup_reseed_pull_back_confirm_body" xml:space="preserve"><value>This copies the backup {name} holds onto this nest and makes it live again. Nothing is deleted, here or on {name}. If this nest already holds your data, it stops rather than mixing the two.</value></data>
+    <data name="backups/backup_reseed_pull_back_confirm_body" xml:space="preserve"><value>This copies the backup {name} holds onto this nest and makes it live again. Nothing is deleted, here or on {name}. Where this nest already holds some of your mail, posts, calendar or contacts, what is missing is copied in beside it; a folder it already holds is left as it is.</value></data>
     <data name="backups/backup_reseed_pull_back_reenroll_failed" xml:space="preserve"><value>Your data is back on this nest, but {name} could not be set up again as its backup: {reason}. Add {name} as a backup destination again to keep a copy there.</value></data>
     <data name="backups/reseed_result_whole" xml:space="preserve"><value>Your data is back on this nest.</value></data>
     <data name="backups/reseed_result_incomplete" xml:space="preserve"><value>The restore is not complete yet. Run it again to finish what is missing.</value></data>
@@ -1637,6 +1726,9 @@
     <data name="backups/reseed_set_restored" xml:space="preserve"><value>{set}: {count} restored</value></data>
     <data name="backups/reseed_set_already_restored" xml:space="preserve"><value>{set}: already restored</value></data>
     <data name="backups/reseed_set_refused" xml:space="preserve"><value>{set}: not restored. {remedy}</value></data>
+    <data name="backups/reseed_set_recovered" xml:space="preserve"><value>{set}: {count} copied in beside what this nest already had</value></data>
+    <data name="backups/reseed_set_recovered_nothing" xml:space="preserve"><value>{set}: this nest already had everything in the copy</value></data>
+    <data name="backups/reseed_refused_target_lived_in" xml:space="preserve"><value>This nest already holds things here that the restore did not put there, so nothing was copied in. For mail, posts, calendar or contacts, use “Recover what your nest lost” on the Backups page to copy in what is missing. For a folder, restore it under a name this nest does not use yet.</value></data>
     <data name="backups/reseed_refused_target_not_fresh" xml:space="preserve"><value>A folder with this name is already shared or published. Rename it or clear that setting, then run the restore again.</value></data>
     <data name="backups/reseed_refused_custody_incomplete" xml:space="preserve"><value>The copy on this nest is not complete yet. Run the restore again.</value></data>
     <data name="backups/reseed_refused_custody_unsealed" xml:space="preserve"><value>Some files arrived without their names. Run the restore again after this device's next backup.</value></data>
@@ -1646,6 +1738,7 @@
     <data name="backups/reseed_refused_target_missing" xml:space="preserve"><value>The folder to restore into could not be created on this nest. Run the restore again.</value></data>
     <data name="backups/reseed_refused_rehome_unsigned" xml:space="preserve"><value>This device could not sign the folder's files for the restore, so it was left on the nest without being restored. Sign in on this device again, then run the restore again.</value></data>
     <data name="backups/reseed_refused_other" xml:space="preserve"><value>The nest refused it.</value></data>
+    <data name="backups/reseed_refused_recovery_incomplete" xml:space="preserve"><value>Copying in what this nest was missing did not finish. Run the restore again; nothing is copied twice.</value></data>
     <data name="backups/reseed_gap_sidecarless_segments" xml:space="preserve"><value>{count} parts of your mail arrived without their index, so some mail is still missing. Run the restore again after this device's next backup.</value></data>
     <data name="backups/reseed_gap_unnamed_files" xml:space="preserve"><value>{count} files arrived without their names, so some files are still missing.</value></data>
     <data name="backups/reseed_refused_not_accepted" xml:space="preserve"><value>You did not confirm this part of the copy, so it was left where it is. Run the restore again to see it and decide.</value></data>
@@ -1771,11 +1864,14 @@
     <data name="backups/status_title" xml:space="preserve"><value>Backup Status</value></data>
     <data name="backups/last_seq" xml:space="preserve"><value>Last Seq: {seq}</value></data>
     <data name="folders/title" xml:space="preserve"><value>Folders</value></data>
+    <data name="folders/follow_handle_required" xml:space="preserve"><value>Type the folder owner's handle first.</value></data>
+    <data name="folders/follow_name_required" xml:space="preserve"><value>Type the folder's name first.</value></data>
+    <data name="folders/follow_not_ready" xml:space="preserve"><value>Sign in first, then follow the folder.</value></data>
+    <data name="folders/share_recipient_required" xml:space="preserve"><value>Type who to share with first.</value></data>
+    <data name="folders/share_not_ready" xml:space="preserve"><value>Sharing needs your conversations to be ready — wait a moment, then try again.</value></data>
     <data name="folders/photo_library_section" xml:space="preserve"><value>Photo Library</value></data>
     <data name="folders/synced_locations" xml:space="preserve"><value>Synced Locations</value></data>
     <data name="folders/no_locations_bound" xml:space="preserve"><value>No locations bound to this set.</value></data>
-    <data name="folders/location_path_placeholder" xml:space="preserve"><value>Location path</value></data>
-    <data name="folders/bind_location" xml:space="preserve"><value>Bind Location</value></data>
     <data name="folders/choose" xml:space="preserve"><value>Choose…</value></data>
     <data name="folders/deletes_held" xml:space="preserve"><value>This folder looks empty. Deletions held: {count}. Reconnect the folder, or apply them to your nest.</value></data>
     <data name="folders/apply_deletes" xml:space="preserve"><value>Apply held deletions ({count})</value></data>
@@ -1803,6 +1899,7 @@
     <data name="folders/offline_share_set" xml:space="preserve"><value>Shared folder {code}</value></data>
     <data name="folders/offline_share_code_malformed" xml:space="preserve"><value>That does not look like a code. It should be 64 letters and numbers.</value></data>
     <data name="folders/offline_share_code_own" xml:space="preserve"><value>That is this device's own code — type the other person's.</value></data>
+    <data name="folders/offline_share_code_needed" xml:space="preserve"><value>Type the other person's code first.</value></data>
     <data name="folders/error_offline_share" xml:space="preserve"><value>Sharing did not finish: {message}</value></data>
     <data name="folders/share_transfer_section" xml:space="preserve"><value>Peer transfers</value></data>
     <data name="folders/share_serve_status_off" xml:space="preserve"><value>Peer transfers are off — this nest does not enable them</value></data>
@@ -1835,6 +1932,7 @@
     <data name="devices/p2p_participation" xml:space="preserve"><value>Peer transfers</value></data>
     <data name="devices/p2p_participation_unreported" xml:space="preserve"><value>Peer transfers (not reported yet)</value></data>
     <data name="devices/p2p_participation_off_requested" xml:space="preserve"><value>Peer transfers (turning off)</value></data>
+    <data name="devices/p2p_participation_on_there" xml:space="preserve"><value>Turn peer transfers back on from that device.</value></data>
     <data name="devices/own_fingerprint" xml:space="preserve"><value>Key {fingerprint}</value></data>
     <data name="devices/unnamed_device" xml:space="preserve"><value>Unnamed device</value></data>
     <data name="devices/members_title" xml:space="preserve"><value>Signed-in devices without a matching entry</value></data>
@@ -1905,6 +2003,7 @@
     <data name="devices/custody_mint_floor" xml:space="preserve"><value>They will store encrypted copies, on one of their devices or on their nest, that they cannot read, apart from what you have published to everyone. Of the rest they will see only the shape — what kinds of your data they hold, how much is stored, and when it changes — never the content. Choosing custodians is choosing who sees that shape.</value></data>
     <data name="devices/custody_mint_confirm" xml:space="preserve"><value>Send the request</value></data>
     <data name="devices/custody_mint_no_contacts" xml:space="preserve"><value>Start a conversation with them first — the request travels over it.</value></data>
+    <data name="devices/custody_mint_pick_host" xml:space="preserve"><value>Choose who to ask first.</value></data>
     <data name="devices/paths_placeholder" xml:space="preserve"><value>e.g. Documents, Photos</value></data>
     <data name="devices/exclude_placeholder" xml:space="preserve"><value>e.g. node_modules, .git</value></data>
     <data name="devices/follow_public_folder" xml:space="preserve"><value>Follow a public folder</value></data>
@@ -1960,6 +2059,9 @@
     <data name="devices/folder_destination_attach_label" xml:space="preserve"><value>Add a destination place</value></data>
     <data name="devices/folder_destination_detach" xml:space="preserve"><value>Detach</value></data>
     <data name="devices/error_folder_destination" xml:space="preserve"><value>Failed to change the folder's destination places: {message}</value></data>
+    <data name="devices/folder_destination_needs_destination" xml:space="preserve"><value>Add a backup destination on the Backups page first to keep a copy of this folder there.</value></data>
+    <data name="devices/folder_step_open_tiers" xml:space="preserve"><value>Open your subscription tiers</value></data>
+    <data name="devices/folder_step_open_backups" xml:space="preserve"><value>Open Backups</value></data>
     <data name="devices/serve_website_address_off" xml:space="preserve"><value>Your site is published from this folder, but your web address is switched off, so nobody can reach it yet. Switch it on in Settings → Web.</value></data>
     <data name="devices/serve_website_needs_audience" xml:space="preserve"><value>Make this folder public, or paywall it to a tier, for the site to be visible to visitors.</value></data>
     <data name="devices/audience_public_blocked_by_webdav" xml:space="preserve"><value>Turn off WebDAV serving first — WebDAV needs the folder encrypted, and a public folder is not.</value></data>
@@ -1970,7 +2072,6 @@
     <data name="devices/error_serve_website" xml:space="preserve"><value>Failed to change website serving: {message}</value></data>
     <data name="devices/serve_webdav" xml:space="preserve"><value>Serve over WebDAV</value></data>
     <data name="devices/serve_webdav_hint" xml:space="preserve"><value>Browse and edit this folder from any WebDAV client (Finder, GNOME Files, rclone).</value></data>
-    <data name="devices/serve_webdav_needs_mail" xml:space="preserve"><value>Set up mail first — serving over WebDAV uses your mail encryption key.</value></data>
     <data name="devices/show_on_demand_finder" xml:space="preserve"><value>Show in Finder</value></data>
     <data name="devices/show_on_demand_files" xml:space="preserve"><value>Show in Files</value></data>
     <data name="devices/show_on_demand_hint" xml:space="preserve"><value>Browse this set on demand — files download when opened and can be freed again.</value></data>
@@ -1997,6 +2098,7 @@
     <data name="devices/error_rename_device" xml:space="preserve"><value>Couldn't rename the device: {message}</value></data>
     <data name="devices/error_rename_needs_key" xml:space="preserve"><value>This app can't rename devices until it holds your account key.</value></data>
     <data name="devices/error_rename_reserved_name" xml:space="preserve"><value>That name is the one an app gives a device you haven't named. Choose another.</value></data>
+    <data name="devices/rename_blank" xml:space="preserve"><value>Type a name for this device.</value></data>
     <data name="devices/error_remove_fleet_device" xml:space="preserve"><value>Removed the device, but couldn't finish cleanup: {message}</value></data>
     <data name="devices/error_remove_own_device" xml:space="preserve"><value>This is the device you're using, so it wasn't removed. To remove it, sign out on this device.</value></data>
     <data name="devices/error_remove_unverified_device" xml:space="preserve"><value>Couldn't confirm which of your devices this is, so nothing was removed. Try again in a moment.</value></data>
@@ -2058,6 +2160,7 @@
     <data name="devices/conflicts/resolved_latest_wins" xml:space="preserve"><value>Latest kept</value></data>
     <data name="devices/conflicts/delete_declined" xml:space="preserve"><value>Delete declined</value></data>
     <data name="devices/conflicts/type_catchup_failed" xml:space="preserve"><value>Not applied</value></data>
+    <data name="devices/conflicts/type_too_large_for_nest" xml:space="preserve"><value>Too large for this nest — not uploaded</value></data>
     <data name="devices/conflicts/unreadable_path" xml:space="preserve"><value>(unreadable file name)</value></data>
     <data name="devices/conflicts/awaiting_device" xml:space="preserve"><value>Awaiting device</value></data>
     <data name="devices/conflicts/use_other_version" xml:space="preserve"><value>Use the other version</value></data>
@@ -2070,6 +2173,7 @@
     <data name="devices/wizard/retention_days" xml:space="preserve"><value>Keep days</value></data>
     <data name="devices/wizard/review" xml:space="preserve"><value>Review</value></data>
     <data name="devices/wizard/creating_folder" xml:space="preserve"><value>Creating folder...</value></data>
+    <data name="devices/wizard/confirm_public_pending" xml:space="preserve"><value>Answer the public-folder question above to create it.</value></data>
     <data name="devices/wizard/failed_create" xml:space="preserve"><value>Failed to create folder.</value></data>
     <data name="devices/wizard/select_devices_roles" xml:space="preserve"><value>Select devices and choose what each one does (optional — skip to just store files here):</value></data>
     <data name="devices/wizard/review_name" xml:space="preserve"><value>Name</value></data>
@@ -2121,13 +2225,7 @@
     <data name="devices/peers/last_connected" xml:space="preserve"><value>Last Connected</value></data>
     <data name="devices/peers/lan_endpoints" xml:space="preserve"><value>LAN Endpoints</value></data>
     <data name="devices/peers/remove_peer" xml:space="preserve"><value>Remove Peer</value></data>
-    <data name="devices/sync_locations/title" xml:space="preserve"><value>Sync Locations</value></data>
-    <data name="devices/sync_locations/location_placeholder" xml:space="preserve"><value>Location path (or use Browse...)</value></data>
     <data name="devices/sync_locations/browse" xml:space="preserve"><value>Browse...</value></data>
-    <data name="devices/sync_locations/add_location" xml:space="preserve"><value>Add Location</value></data>
-    <data name="devices/sync_locations/no_locations" xml:space="preserve"><value>No sync locations configured.</value></data>
-    <data name="devices/sync_locations/folder_placeholder" xml:space="preserve"><value>Folder name</value></data>
-    <data name="devices/sync_locations/unbound" xml:space="preserve"><value>(unbound)</value></data>
     <data name="devices/sync_locations/on_demand_label" xml:space="preserve"><value>On-demand</value></data>
     <data name="devices/sync_locations/on_demand_needs_fuse3" xml:space="preserve"><value>On-demand needs the fuse3 package. Install it, then restart Fauna.</value></data>
     <data name="devices/sync_locations/on_demand_no_fuse_device" xml:space="preserve"><value>On-demand isn't available on this system.</value></data>
@@ -2163,6 +2261,7 @@
     <data name="sessions/load_failed" xml:space="preserve"><value>Could not load your sessions: {error}</value></data>
     <data name="sessions/act_failed" xml:space="preserve"><value>That did not go through: {error}</value></data>
     <data name="sessions/no_own_session" xml:space="preserve"><value>This app does not know its own sign-in yet, so it cannot tell which one to keep. Try again in a moment.</value></data>
+    <data name="sessions/no_other_sessions" xml:space="preserve"><value>No other sign-ins to end.</value></data>
     <data name="settings/title" xml:space="preserve"><value>Settings</value></data>
     <data name="settings/identity_export/title" xml:space="preserve"><value>Export Identity</value></data>
     <data name="settings/identity_export/desc" xml:space="preserve"><value>Show a QR code that another device can scan to import your identity.</value></data>
@@ -2218,12 +2317,14 @@
     <data name="settings/recovery_kit/review_unknown_person" xml:space="preserve"><value>Someone no longer in any of your groups</value></data>
     <data name="settings/recovery_kit/review_keep" xml:space="preserve"><value>Keep</value></data>
     <data name="settings/recovery_kit/review_remove" xml:space="preserve"><value>Remove From My Groups</value></data>
+    <data name="settings/recovery_kit/review_remove_not_ready" xml:space="preserve"><value>Your groups are still loading — Remove works once they are ready.</value></data>
     <data name="settings/recovery_kit/review_defer" xml:space="preserve"><value>Review The Rest Later</value></data>
     <data name="settings/recovery_kit/review_remove_partial" xml:space="preserve"><value>Removed {who} from {removed} of {groups} of your group conversations. The rest still include them — try again, or ask another member of those groups to remove them.</value></data>
     <data name="settings/recovery_kit/review_remove_done_here" xml:space="preserve"><value>Removed {who} from {removed} of your group conversations.</value></data>
     <data name="settings/recovery_kit/review_remove_none_here" xml:space="preserve"><value>{who} is not in any of your group conversations on this device.</value></data>
     <data name="settings/recovery_kit/review_remove_folder_seats" xml:space="preserve"><value>They are also in {seats} shared folder(s). Remove them in each folder's sharing settings — or leave the folder, if it is not yours — then choose Remove again.</value></data>
     <data name="settings/recovery_kit/review_remove_unsynced_seats" xml:space="preserve"><value>They are also in {seats} group chat(s) not yet synced to this device. Choose Remove again after syncing completes, or from a device that has those chats.</value></data>
+    <data name="settings/recovery_kit/review_keep_failed" xml:space="preserve"><value>Could not record your decision yet: {reason}. They stay listed until it succeeds.</value></data>
     <data name="settings/recovery_kit/review_verdict_failed" xml:space="preserve"><value>Removed {who} from your group conversations, but your review list could not be updated yet: {reason}. They may still be listed here until it succeeds.</value></data>
     <data name="settings/recovery_kit/backup_regrant_running" xml:space="preserve"><value>Restarting your backups under your new identity…</value></data>
     <data name="settings/recovery_kit/backup_regrant_done" xml:space="preserve"><value>Your backups are running again under your new identity.</value></data>
@@ -2274,7 +2375,7 @@
     <data name="settings/recovery_kit/owed_nest_dismiss_failed" xml:space="preserve"><value>This server could not be removed from the list: {reason}. Try again.</value></data>
     <data name="settings/icloud_backup/title" xml:space="preserve"><value>iCloud Backup</value></data>
     <data name="settings/icloud_backup/toggle" xml:space="preserve"><value>Back up identity to iCloud Keychain</value></data>
-    <data name="settings/icloud_backup/footer" xml:space="preserve"><value>When off (the default), your identity stays out of iCloud. On iPhone and iPad, turn it on to let iCloud Keychain restore your identity on a new device; the Mac app cannot make the copy yet. Adding a device and your recovery kit remain the main ways to have your identity in more than one place.</value></data>
+    <data name="settings/icloud_backup/footer" xml:space="preserve"><value>When off (the default), your identity stays out of iCloud. On iPhone and iPad, turn it on to let iCloud Keychain restore your identity on a new device; the Mac app cannot make the copy. Adding a device and your recovery kit remain the main ways to have your identity in more than one place.</value></data>
     <data name="settings/check_for_updates" xml:space="preserve"><value>Check for Updates</value></data>
     <data name="settings/up_to_date" xml:space="preserve"><value>Up to date</value></data>
     <data name="settings/check_failed" xml:space="preserve"><value>Check failed</value></data>
@@ -2554,6 +2655,10 @@
     <data name="settings/p2p_page/connection_group_description" xml:space="preserve"><value>Network information for P2P connectivity</value></data>
     <data name="settings/p2p_page/lan_addresses" xml:space="preserve"><value>LAN Addresses</value></data>
     <data name="settings/p2p_page/lan_none" xml:space="preserve"><value>(no active interfaces detected)</value></data>
+    <data name="settings/p2p_page/service_unavailable" xml:space="preserve"><value>Peer connections did not start on this device. Restart Fauna to try again.</value></data>
+    <data name="settings/p2p_page/node_id_copy_needs_tunnel" xml:space="preserve"><value>Start the tunnel to get a node ID to copy.</value></data>
+    <data name="settings/p2p_page/lan_copy_none" xml:space="preserve"><value>No LAN address to copy.</value></data>
+    <data name="settings/p2p_page/contact_remove_failed" xml:space="preserve"><value>Could not remove {name}: {error}</value></data>
     <data name="settings/sign_out_confirm" xml:space="preserve"><value>Are you sure you want to sign out? You will need your secret key to sign back in.</value></data>
     <data name="settings/sign_out_residue" xml:space="preserve"><value>Signed out, but {count} item(s) of your data could not be removed from this device — another program may still be using them. Press Remove Again to try once more.</value></data>
     <data name="settings/sign_out_residue_credentials" xml:space="preserve"><value>Signed out, but your sign-in credentials could not be removed from this device — its secure storage may be locked or unavailable. Press Remove Again to try once more.</value></data>
@@ -2588,7 +2693,7 @@
     <data name="settings/about" xml:space="preserve"><value>About</value></data>
     <data name="settings/about_name" xml:space="preserve"><value>Fauna for Windows</value></data>
     <data name="settings/about_desc" xml:space="preserve"><value>Your feed, messages, mail, calendar and files, on a server you control.</value></data>
-    <data name="settings/danger_zone_desc" xml:space="preserve"><value>Permanently delete your account and all associated data. This action cannot be undone.</value></data>
+    <data name="settings/danger_zone_desc" xml:space="preserve"><value>Delete your account and all its data on this nest. The deletion waits 14 days first, and until then you can cancel it under Pending actions.</value></data>
     <data name="settings/delete_confirm_placeholder" xml:space="preserve"><value>Type DELETE to confirm</value></data>
     <data name="settings/general" xml:space="preserve"><value>General</value></data>
     <data name="settings/appearance" xml:space="preserve"><value>Appearance</value></data>
@@ -2656,7 +2761,7 @@
     <data name="nests/revoke" xml:space="preserve"><value>Revoke</value></data>
     <data name="nests/grant_unattested_mark" xml:space="preserve"><value>Given before you recovered this account — still active. Keep it, or revoke it if you don't recognise it.</value></data>
     <data name="nests/grant_keep_button" xml:space="preserve"><value>Keep</value></data>
-    <data name="nests/bound_note_standing" xml:space="preserve"><value>On an honest nest, revoking stops future access and re-acquisition. It cannot un-see what was already read, and does not yet block content arriving after revocation.</value></data>
+    <data name="nests/bound_note_standing" xml:space="preserve"><value>On an honest nest, revoking stops future access and re-acquisition. It cannot un-see what was already read, and cannot stop a nest that kept the key from reading content that arrives after revocation.</value></data>
     <data name="nests/bound_note_materialize_mail" xml:space="preserve"><value>On an honest nest, revoking deletes this nest's searchable copy of your mail and its key, and stops it reading more. It cannot un-see what was already read.</value></data>
     <data name="nests/bound_note_materialize_calendar" xml:space="preserve"><value>On an honest nest, revoking deletes this nest's searchable copy of your calendar and its key, and stops it reading more. It cannot un-see what was already read.</value></data>
     <data name="nests/bound_note_materialize_card" xml:space="preserve"><value>On an honest nest, revoking deletes this nest's searchable copy of your contacts and its key, and stops it reading more. It cannot un-see what was already read.</value></data>
@@ -2698,6 +2803,8 @@
     <data name="nests/mint_duration_one_off" xml:space="preserve"><value>For a few hours</value></data>
     <data name="nests/mint_duration_standard" xml:space="preserve"><value>For 90 days</value></data>
     <data name="nests/mint_confirm" xml:space="preserve"><value>Trust</value></data>
+    <data name="nests/mint_pick_scope" xml:space="preserve"><value>Choose what to trust it with.</value></data>
+    <data name="nests/mint_pick_holder" xml:space="preserve"><value>Choose which service on this nest holds it.</value></data>
     <data name="nests/blessed_toggle" xml:space="preserve"><value>Keep this box's trust renewed</value></data>
     <data name="nests/description" xml:space="preserve"><value>Nests you have linked to sync your account's content.</value></data>
     <data name="nests/empty" xml:space="preserve"><value>No linked nests yet.</value></data>
@@ -2706,6 +2813,7 @@
     <data name="nests/add_input_placeholder" xml:space="preserve"><value>Nest address (https://…) — links both ends — or a 64-hex identity</value></data>
     <data name="nests/nest_to_link" xml:space="preserve"><value>Nest to link</value></data>
     <data name="nests/add_submit" xml:space="preserve"><value>Link</value></data>
+    <data name="nests/add_input_blank" xml:space="preserve"><value>Type a nest address or identity to link.</value></data>
     <data name="nests/add_cancel" xml:space="preserve"><value>Cancel</value></data>
     <data name="nests/list_title" xml:space="preserve"><value>Your linked nests</value></data>
     <data name="nests/unlink" xml:space="preserve"><value>Unlink</value></data>
@@ -2736,7 +2844,12 @@
     <data name="mail_settings/title" xml:space="preserve"><value>Mail &amp; Calendar</value></data>
     <data name="mail_settings/unavailable_notice" xml:space="preserve"><value>Mail can't be turned on for this server: it was set up without the virus scanner and spam filter that mail needs. To use mail, set up a server that includes them.</value></data>
     <data name="mail_settings/keys_info" xml:space="preserve"><value>Your mail is protected by an encryption key held on your Fauna devices. Each app password or token you add unlocks that same key for one email app (Thunderbird, Apple Mail, …). Rotate your keys if a password or token may have leaked, or if a device that had your mail set up was lost or stolen — rotating replaces the key so the exposed credential can no longer read your mail (messages you've already received stay readable). If you're just retiring an app you no longer use, revoke that one credential instead — you don't need to rotate.</value></data>
+    <data name="mail_settings/rotate_pending" xml:space="preserve"><value>A key rotation is waiting — resume it from the banner above first.</value></data>
     <data name="mail_settings/credentials_on_connected_apps" xml:space="preserve"><value>Your app passwords are listed under Settings → Connected apps — copy, reveal or disconnect each one there.</value></data>
+    <data name="mail_settings/usable_needs_mail_on" xml:space="preserve"><value>Turn on mail on the Mail &amp; Calendar page first.</value></data>
+    <data name="mail_settings/usable_reading" xml:space="preserve"><value>Checking whether mail is on for your account…</value></data>
+    <data name="mail_settings/usable_unbuilt" xml:space="preserve"><value>Mail settings could not be loaded on this device. Signing out and back in rebuilds them.</value></data>
+    <data name="mail_settings/credentials_need_mail_on" xml:space="preserve"><value>Turn on mail above to add an app password.</value></data>
     <data name="mail_settings/serve_here_label" xml:space="preserve"><value>Serve my mail &amp; calendar over IMAP/CalDAV on this nest</value></data>
     <data name="mail_settings/serve_here_subtitle" xml:space="preserve"><value>When on, this nest answers IMAP and CalDAV for your mailbox so email and calendar apps can connect here. Turn it off if you read your mail on a different nest — your own Fauna apps are unaffected either way.</value></data>
     <data name="mail_settings/forwarding_title" xml:space="preserve"><value>Forwarding</value></data>
@@ -2887,6 +3000,10 @@
     <data name="mail_export/scope_mailboxes_empty" xml:space="preserve"><value>No mailboxes to export.</value></data>
     <data name="mail_export/scope_date_from_placeholder" xml:space="preserve"><value>From date (optional, YYYY-MM-DD)</value></data>
     <data name="mail_export/scope_date_to_placeholder" xml:space="preserve"><value>To date (optional, YYYY-MM-DD)</value></data>
+    <data name="mail_export/scope_needs_mailbox" xml:space="preserve"><value>Choose at least one mailbox to export.</value></data>
+    <data name="mail_export/scope_date_from_invalid" xml:space="preserve"><value>Write the from date as a real date, YYYY-MM-DD.</value></data>
+    <data name="mail_export/scope_date_to_invalid" xml:space="preserve"><value>Write the to date as a real date, YYYY-MM-DD.</value></data>
+    <data name="mail_export/scope_date_range_inverted" xml:space="preserve"><value>The from date is after the to date.</value></data>
     <data name="mail_export/scope_strip_headers_label" xml:space="preserve"><value>Strip transit headers</value></data>
     <data name="mail_export/scope_strip_headers_subtitle" xml:space="preserve"><value>Removes the headers mail servers add in transit — relay hops, server names and IP addresses. Off keeps full forensic fidelity.</value></data>
     <data name="mail_export/confirm_title" xml:space="preserve"><value>Step 3 — Confirm</value></data>
@@ -2935,6 +3052,11 @@
     <data name="mail_lists/archive_off_server_confirm" xml:space="preserve"><value>This archive link is not on your server and goes out with every message. Save anyway?</value></data>
     <data name="mail_lists/members" xml:space="preserve"><value>Members</value></data>
     <data name="mail_lists/no_domain" xml:space="preserve"><value>Add a mail domain before creating lists.</value></data>
+    <data name="mail_lists/local_part_required" xml:space="preserve"><value>Type the list's address first.</value></data>
+    <data name="mail_lists/domain_required" xml:space="preserve"><value>Choose a domain for the list first.</value></data>
+    <data name="mail_lists/per_send_invalid" xml:space="preserve"><value>Recipients per send must be a whole number; your server sets the ceiling.</value></data>
+    <data name="mail_lists/member_address_required" xml:space="preserve"><value>Type an email address first.</value></data>
+    <data name="mail_lists/member_import_required" xml:space="preserve"><value>Paste at least one email address first.</value></data>
     <data name="mail_lists/members_title" xml:space="preserve"><value>Members</value></data>
     <data name="mail_lists/members_no_list" xml:space="preserve"><value>Open a list from the Lists page to manage its members.</value></data>
     <data name="mail_lists/members_loading" xml:space="preserve"><value>Loading members…</value></data>
@@ -2977,7 +3099,7 @@
     <data name="mail_import/microsoft_admin_consent_fmt" xml:space="preserve"><value>Your organisation's administrator has to approve Fauna first. They can do so at {url}</value></data>
     <data name="mail_import/microsoft_failed" xml:space="preserve"><value>Could not sign in with Microsoft. Try again.</value></data>
     <data name="mail_import/microsoft_sign_in_again" xml:space="preserve"><value>Sign in with Microsoft again</value></data>
-    <data name="mail_import/microsoft_unavailable" xml:space="preserve"><value>Microsoft sign-in is not available in this version of Fauna.</value></data>
+    <data name="mail_import/microsoft_unavailable" xml:space="preserve"><value>Microsoft sign-in works once your nest's admin has entered a Microsoft app registration.</value></data>
     <data name="mail_import/microsoft_session_sign_in_again" xml:space="preserve"><value>The import stopped: Microsoft no longer accepts this sign-in. Sign in with Microsoft again to start a new import — mail already imported is kept.</value></data>
     <data name="mail_import/resume_needs_password" xml:space="preserve"><value>Enter the password for your old mailbox again to resume the import.</value></data>
     <data name="mail_import/resume_needs_microsoft" xml:space="preserve"><value>Sign in with Microsoft again to resume the import.</value></data>
@@ -3000,6 +3122,8 @@
     <data name="mail_import/scope_mailboxes_label" xml:space="preserve"><value>Mailboxes</value></data>
     <data name="mail_import/scope_mailboxes_empty" xml:space="preserve"><value>No mailboxes found on the source server.</value></data>
     <data name="mail_import/scope_date_from_placeholder" xml:space="preserve"><value>From date (optional, YYYY-MM-DD)</value></data>
+    <data name="mail_import/scope_needs_mailbox" xml:space="preserve"><value>Choose at least one mailbox to import.</value></data>
+    <data name="mail_import/scope_date_from_invalid" xml:space="preserve"><value>Write the from date as a real date, YYYY-MM-DD.</value></data>
     <data name="mail_import/scope_max_size_label" xml:space="preserve"><value>Max message size (MB)</value></data>
     <data name="mail_import/scope_mailbox_mapping_label" xml:space="preserve"><value>Mailboxes map 1:1 by name — INBOX to INBOX, Sent to Sent, and so on. Mailboxes with no matching Fauna mailbox are created, named after the source.</value></data>
     <data name="mail_import/scope_import_duplicates_label" xml:space="preserve"><value>Import duplicates anyway (advanced) — mail you already have is stored a second time and counts against your storage.</value></data>
@@ -3051,6 +3175,11 @@
     <data name="archive_import/scope_categories_label" xml:space="preserve"><value>Categories</value></data>
     <data name="archive_import/scope_category_row_fmt" xml:space="preserve"><value>{category} ({count})</value></data>
     <data name="archive_import/scope_category_kept_fmt" xml:space="preserve"><value>{category} ({count}) — kept in the archive for later</value></data>
+    <data name="archive_import/archive_needed" xml:space="preserve"><value>Open an archive before choosing what to import.</value></data>
+    <data name="archive_import/scope_date_invalid" xml:space="preserve"><value>Write the dates as real dates, YYYY-MM-DD.</value></data>
+    <data name="archive_import/scope_date_range_inverted" xml:space="preserve"><value>The from date is after the to date.</value></data>
+    <data name="archive_import/profile_prefill_applied" xml:space="preserve"><value>The archive's profile is on your profile now.</value></data>
+    <data name="archive_import/profile_prefill_none" xml:space="preserve"><value>This archive carries no profile to take over.</value></data>
     <data name="archive_import/scope_audience_mode_label" xml:space="preserve"><value>Audience</value></data>
     <data name="archive_import/audience_original" xml:space="preserve"><value>Keep original audiences</value></data>
     <data name="archive_import/audience_only_me" xml:space="preserve"><value>Only me</value></data>
@@ -3118,6 +3247,7 @@
     <data name="search_page/search_failed" xml:space="preserve"><value>Search failed</value></data>
     <data name="search_page/search_failed_reason" xml:space="preserve"><value>Search failed: {reason}</value></data>
     <data name="search_page/load_more_failed" xml:space="preserve"><value>Load more failed</value></data>
+    <data name="search_page/query_required" xml:space="preserve"><value>Type something to search for first.</value></data>
     <data name="search_page/search_messages" xml:space="preserve"><value>Search messages...</value></data>
     <data name="search_page/badge_post" xml:space="preserve"><value>Post</value></data>
     <data name="search_page/badge_profile" xml:space="preserve"><value>Profile</value></data>
@@ -3141,6 +3271,7 @@
     <data name="nostr/link_account/nip07_prompt" xml:space="preserve"><value>Your browser extension will be prompted for the public key.</value></data>
     <data name="nostr/link_account/link_button" xml:space="preserve"><value>Link Account</value></data>
     <data name="nostr/link_account/enter_nsec" xml:space="preserve"><value>Please enter an nsec key</value></data>
+    <data name="nostr/link_account/enter_bunker_url" xml:space="preserve"><value>Paste the bunker URL from your signer app first.</value></data>
     <data name="nostr/link_account/no_nip07" xml:space="preserve"><value>No NIP-07 browser extension detected</value></data>
     <data name="nostr/account/title" xml:space="preserve"><value>Nostr Account</value></data>
     <data name="nostr/account/description" xml:space="preserve"><value>Link a Nostr identity to your Fauna account</value></data>
@@ -3176,12 +3307,15 @@
     <data name="nostr/relays/add" xml:space="preserve"><value>Add Relay</value></data>
     <data name="nostr/relays/placeholder" xml:space="preserve"><value>wss://relay.example.com</value></data>
     <data name="nostr/relays/invalid_url" xml:space="preserve"><value>Relay URL must start with wss:// or ws://</value></data>
+    <data name="nostr/relays/url_required" xml:space="preserve"><value>Type a relay address first.</value></data>
+    <data name="nostr/relays/already_added" xml:space="preserve"><value>This relay is already in your list.</value></data>
     <data name="nostr/relays/private_address" xml:space="preserve"><value>Relays on a private network or on this device can't be used. Use a public relay address.</value></data>
     <data name="nostr/follows/title" xml:space="preserve"><value>Follows</value></data>
     <data name="nostr/follows/add" xml:space="preserve"><value>Add</value></data>
     <data name="nostr/follows/none" xml:space="preserve"><value>No Nostr follows yet.</value></data>
     <data name="nostr/follows/pubkey_placeholder" xml:space="preserve"><value>npub1... or hex pubkey</value></data>
     <data name="nostr/follows/petname_placeholder" xml:space="preserve"><value>Petname</value></data>
+    <data name="nostr/follows/pubkey_required" xml:space="preserve"><value>Type the npub or hex pubkey to follow first.</value></data>
     <data name="nostr/connected_apps/title" xml:space="preserve"><value>Connected apps</value></data>
     <data name="nostr/connected_apps/description" xml:space="preserve"><value>Sign in to Nostr apps with your nest using Nostr Connect. Your key stays on the nest — apps only ask it to sign.</value></data>
     <data name="nostr/connected_apps/connect_button" xml:space="preserve"><value>Connect an app</value></data>
@@ -3204,6 +3338,7 @@
     <data name="nostr/zap_signers/none" xml:space="preserve"><value>You have not designated any signer, so no zap is counted as paid. Add your wallet provider's signer key to start believing its receipts.</value></data>
     <data name="nostr/zap_signers/unnamed" xml:space="preserve"><value>Unnamed signer</value></data>
     <data name="nostr/zap_signers/invalid_pubkey" xml:space="preserve"><value>A signer pubkey must be 64 hexadecimal characters.</value></data>
+    <data name="nostr/zap_signers/pubkey_required" xml:space="preserve"><value>Paste your wallet provider's signer pubkey first.</value></data>
     <data name="status/identity/not_configured" xml:space="preserve"><value>Not configured</value></data>
     <data name="status/connection/service" xml:space="preserve"><value>Service</value></data>
     <data name="status/sync_agent/running" xml:space="preserve"><value>Running</value></data>
@@ -3232,9 +3367,9 @@
     <data name="status/inbox_privacy/open" xml:space="preserve"><value>Open</value></data>
     <data name="status/inbox_privacy/open_desc" xml:space="preserve"><value>Anyone can message you directly.</value></data>
     <data name="status/inbox_privacy/allow_knock" xml:space="preserve"><value>Allow Knocks</value></data>
-    <data name="status/inbox_privacy/allow_knock_desc" xml:space="preserve"><value>New contacts must send a knock request first. This isn't applied yet to someone on another nest who starts a conversation with you, unless they do it by inviting you to a room.</value></data>
+    <data name="status/inbox_privacy/allow_knock_desc" xml:space="preserve"><value>New contacts must send a knock request first. This choice isn't applied to someone on another nest who starts a conversation with you, unless they do it by inviting you to a room.</value></data>
     <data name="status/inbox_privacy/contacts_only" xml:space="preserve"><value>Contacts Only</value></data>
-    <data name="status/inbox_privacy/contacts_only_desc" xml:space="preserve"><value>Only confirmed contacts can message you. This isn't applied yet to someone on another nest who starts a conversation with you, unless they do it by inviting you to a room.</value></data>
+    <data name="status/inbox_privacy/contacts_only_desc" xml:space="preserve"><value>Only confirmed contacts can message you. This choice isn't applied to someone on another nest who starts a conversation with you, unless they do it by inviting you to a room.</value></data>
     <data name="status/inbox_privacy/closed" xml:space="preserve"><value>Closed</value></data>
     <data name="status/inbox_privacy/closed_desc" xml:space="preserve"><value>No new messages accepted.</value></data>
     <data name="status/encryption/key_packages" xml:space="preserve"><value>Key Packages</value></data>
@@ -3329,6 +3464,9 @@
     <data name="admin/users_page/suspend_default_reason" xml:space="preserve"><value>Suspended by admin</value></data>
     <data name="admin/users_page/make_admin" xml:space="preserve"><value>Make Admin</value></data>
     <data name="admin/users_page/remove_admin" xml:space="preserve"><value>Remove Admin</value></data>
+    <data name="admin/users_page/remove_admin_last_superadmin" xml:space="preserve"><value>This is the last admin with full rights. Make another user an admin first.</value></data>
+    <data name="admin/users_page/age_band_needs_guardian" xml:space="preserve"><value>Pick a guardian first. An age band applies only to a supervised account.</value></data>
+    <data name="admin/users_page/no_tier" xml:space="preserve"><value>Add a tier on the Tiers page first. Every account is admitted into a tier.</value></data>
     <data name="admin/users_page/supervised_by" xml:space="preserve"><value>Supervised by {guardian}</value></data>
     <data name="admin/users_page/take_over" xml:space="preserve"><value>Take over</value></data>
     <data name="admin/users_page/take_over_confirm_summary" xml:space="preserve"><value>Take over supervision of {ward} from {guardian}? You become the guardian at once, a pending hand-over is withdrawn, and you manage the policy from your Family page.</value></data>
@@ -3336,6 +3474,8 @@
     <data name="admin/users_page/take_over_cancel" xml:space="preserve"><value>Cancel</value></data>
     <data name="admin/users_page/prev_page" xml:space="preserve"><value>Previous</value></data>
     <data name="admin/users_page/next_page" xml:space="preserve"><value>Next</value></data>
+    <data name="admin/users_page/no_page_before" xml:space="preserve"><value>This is the first page.</value></data>
+    <data name="admin/users_page/no_page_after" xml:space="preserve"><value>This is the last page.</value></data>
     <data name="admin/users_page/page_indicator" xml:space="preserve"><value>Page {current} of {pages}</value></data>
     <data name="admin/users_page/section_requests" xml:space="preserve"><value>Pending requests</value></data>
     <data name="admin/users_page/section_registration" xml:space="preserve"><value>Registration</value></data>
@@ -3358,6 +3498,7 @@
     <data name="admin/users_page/registration_mode_closed" xml:space="preserve"><value>Nobody — only I can admit people</value></data>
     <data name="admin/users_page/max_free_users_label" xml:space="preserve"><value>Limit free accounts</value></data>
     <data name="admin/users_page/max_free_users_hint" xml:space="preserve"><value>Blank for no limit. Counts every free account, including yours.</value></data>
+    <data name="admin/users_page/max_free_users_invalid" xml:space="preserve"><value>Enter a whole number, or leave the limit blank for none.</value></data>
     <data name="admin/users_page/registration_save" xml:space="preserve"><value>Save</value></data>
     <data name="admin/users_page/registration_mode_unknown" xml:space="preserve"><value>This nest uses a registration setting this app version does not recognize ({mode}). Update the app to change it.</value></data>
     <data name="admin/users_page/copy_code" xml:space="preserve"><value>Copy code</value></data>
@@ -3415,7 +3556,11 @@
     <data name="admin/aliases_page/create_forwarder" xml:space="preserve"><value>Add Forwarder</value></data>
     <data name="admin/aliases_page/delete_forwarder" xml:space="preserve"><value>Delete</value></data>
     <data name="admin/aliases_page/no_forwarders" xml:space="preserve"><value>No external forwarders configured yet.</value></data>
+    <data name="admin/aliases_page/no_hosted_domain" xml:space="preserve"><value>A forwarder lives on a domain this nest hosts. Add a domain on the DNS page first.</value></data>
+    <data name="admin/aliases_page/domain_required" xml:space="preserve"><value>Pick the domain the forwarder lives on.</value></data>
+    <data name="admin/aliases_page/open_domains" xml:space="preserve"><value>Open DNS</value></data>
     <data name="admin/aliases_page/forwarder_row" xml:space="preserve"><value>{address} → {target}</value></data>
+    <data name="admin/aliases_page/forwarder_draft_incomplete" xml:space="preserve"><value>Choose a domain and fill in the local part and the destination first.</value></data>
     <data name="admin/settings_page/title" xml:space="preserve"><value>Tiers</value></data>
     <data name="admin/settings_page/load_tiers_error" xml:space="preserve"><value>Failed to load tiers: {message}</value></data>
     <data name="admin/settings_page/save_tier_error" xml:space="preserve"><value>Failed to save tier: {message}</value></data>
@@ -3457,6 +3602,7 @@
     <data name="admin/settings_page/membership_lapses_to" xml:space="preserve"><value>Lapses to</value></data>
     <data name="admin/settings_page/membership_save" xml:space="preserve"><value>Save</value></data>
     <data name="admin/settings_page/membership_clear" xml:space="preserve"><value>Clear</value></data>
+    <data name="admin/settings_page/membership_clear_nothing_set" xml:space="preserve"><value>No tier is set here to clear.</value></data>
     <data name="admin/settings_page/load_membership_tiers_error" xml:space="preserve"><value>Failed to load membership designations: {message}</value></data>
     <data name="admin/settings_page/save_membership_tier_error" xml:space="preserve"><value>Failed to save membership designation: {message}</value></data>
     <data name="admin/settings_page/clear_membership_tier_error" xml:space="preserve"><value>Failed to clear membership designation: {message}</value></data>
@@ -3506,9 +3652,10 @@
     <data name="admin/nest_page/web_app_origin_status_bundled" xml:space="preserve"><value>This server's address serves the app it ships.</value></data>
     <data name="admin/nest_page/web_app_origin_status_central" xml:space="preserve"><value>People who open this server's address are sent to {target}</value></data>
     <data name="admin/nest_page/web_app_origin_status_domainless" xml:space="preserve"><value>Sending people to {origin} is chosen, but this server has no domain to fill in yet, so its address keeps serving the app it ships.</value></data>
+    <data name="admin/nest_page/web_app_origin_status_central_not_live" xml:space="preserve"><value>Sending people to {origin} is chosen, but this server's address keeps serving the app it ships. Choose Serve the app this server ships and save.</value></data>
     <data name="admin/nest_page/web_app_origin_status_unknown_mode" xml:space="preserve"><value>This server uses a web app choice this app doesn't recognize ({mode}). Update the app to change it.</value></data>
     <data name="admin/nest_page/web_app_origin_status_predates" xml:space="preserve"><value>This server is too old to offer this choice; its address always serves the app it ships. Update the server to change it.</value></data>
-    <data name="admin/nest_page/web_app_origin_scope" xml:space="preserve"><value>This changes only what this server's own address answers. Anyone who opens {origin} directly loads the app from there either way, and an address someone types or bookmarks always wins.</value></data>
+    <data name="admin/nest_page/web_app_origin_scope" xml:space="preserve"><value>This changes only what this server's own address answers, and an address someone types or bookmarks always wins. {origin} holds nothing of yours and does not serve the app today, so Serve the app this server ships is the choice that works.</value></data>
     <data name="admin/nest_page/web_app_origin_load_error" xml:space="preserve"><value>Failed to load the web app choice: {message}</value></data>
     <data name="admin/nest_page/web_app_origin_save_error" xml:space="preserve"><value>Failed to save the web app choice: {message}</value></data>
     <data name="admin/nest_page/update_channel_label" xml:space="preserve"><value>Updates</value></data>
@@ -3642,6 +3789,7 @@
     <data name="admin/web_page/apex_select_subtitle" xml:space="preserve"><value>Choose whose website serves at this deployment's main address. None serves the built-in info page.</value></data>
     <data name="admin/web_page/apex_none" xml:space="preserve"><value>None (info page)</value></data>
     <data name="admin/web_page/apex_info" xml:space="preserve"><value>The main address serves at {url}.</value></data>
+    <data name="admin/web_page/apex_no_serving_domain" xml:space="preserve"><value>This nest has no web address yet, so there is no main address to serve. Give it a domain first.</value></data>
     <data name="admin/calendar_page/title" xml:space="preserve"><value>Calendar</value></data>
     <data name="admin/calendar_page/description" xml:space="preserve"><value>Calendar (CalDAV) sync for this deployment.</value></data>
     <data name="admin/calendar_page/enabled_label" xml:space="preserve"><value>Enable calendar (CalDAV) on this nest</value></data>
@@ -3692,6 +3840,7 @@
     <data name="admin/logs_page/audit_entry_system" xml:space="preserve"><value>The nest — {action} on {target}</value></data>
     <data name="admin/logs_page/audit_entry_system_no_target" xml:space="preserve"><value>The nest — {action}</value></data>
     <data name="admin/logs_page/audit_more" xml:space="preserve"><value>Show older</value></data>
+    <data name="admin/logs_page/audit_no_older" xml:space="preserve"><value>The whole record is shown.</value></data>
     <data name="admin/logs_page/audit_verified" xml:space="preserve"><value>The record checks out through the {count} entries shown.</value></data>
     <data name="admin/logs_page/audit_uncheckable" xml:space="preserve"><value>The record checks out through the entries shown, except {count} this app cannot check.</value></data>
     <data name="admin/logs_page/audit_broken" xml:space="preserve"><value>Entry {id} does not check out — the record may have been altered.</value></data>
@@ -3753,6 +3902,7 @@
     <data name="admin/mail_page/health_title" xml:space="preserve"><value>Mail health</value></data>
     <data name="admin/mail_page/health_state_off" xml:space="preserve"><value>Mail: off</value></data>
     <data name="admin/mail_page/health_state_bridge_down" xml:space="preserve"><value>Mail: mail service not connected</value></data>
+    <data name="admin/mail_page/health_state_outbound_blocked" xml:space="preserve"><value>Mail: outgoing mail cannot leave this server</value></data>
     <data name="admin/mail_page/health_state_blocklisted" xml:space="preserve"><value>Mail: server address is blocklisted</value></data>
     <data name="admin/mail_page/health_state_queue_stalled" xml:space="preserve"><value>Mail: outgoing mail is delayed</value></data>
     <data name="admin/mail_page/health_state_records_failing" xml:space="preserve"><value>Mail: DNS records need attention</value></data>
@@ -3801,6 +3951,8 @@
     <data name="admin/mail_page/microsoft_client_id_invalid" xml:space="preserve"><value>The application (client) ID must be a GUID, such as 00000000-0000-0000-0000-000000000000.</value></data>
     <data name="admin/mail_page/microsoft_tenant_invalid" xml:space="preserve"><value>The directory must be a tenant ID, a domain name, or common, organizations or consumers.</value></data>
     <data name="admin/mail_page/microsoft_tenant_needs_client_id" xml:space="preserve"><value>Enter the application (client) ID that goes with this directory.</value></data>
+    <data name="admin/mail_page/knob_invalid" xml:space="preserve"><value>Every number in this section must be a whole number of zero or more.</value></data>
+    <data name="admin/mail_page/knob_list_invalid" xml:space="preserve"><value>Put one whole number of zero or more on each line.</value></data>
     <data name="admin/mail_page/spam_group_title" xml:space="preserve"><value>Spam and inbound perimeter</value></data>
     <data name="admin/mail_page/spam_group_desc" xml:space="preserve"><value>How inbound mail is scored, rate-limited, and gated before delivery.</value></data>
     <data name="admin/mail_page/threshold_junk_label" xml:space="preserve"><value>Junk threshold</value></data>
@@ -3963,6 +4115,15 @@
     <data name="admin/dns/dmarc_policy_reject" xml:space="preserve"><value>Reject (default)</value></data>
     <data name="admin/dns/dmarc_policy_quarantine" xml:space="preserve"><value>Quarantine</value></data>
     <data name="admin/dns/dmarc_policy_none" xml:space="preserve"><value>None — reports only</value></data>
+    <data name="admin/dns/mode_needs_credential" xml:space="preserve"><value>Add a DNS-provider credential that covers this domain first.</value></data>
+    <data name="admin/dns/manage_all_needs_domain" xml:space="preserve"><value>Add a domain first.</value></data>
+    <data name="admin/dns/manage_all_needs_credential" xml:space="preserve"><value>Add a DNS-provider credential that covers every domain first.</value></data>
+    <data name="admin/dns/domain_required" xml:space="preserve"><value>Type a domain name.</value></data>
+    <data name="admin/dns/domain_malformed" xml:space="preserve"><value>Type a domain name such as example.com.</value></data>
+    <data name="admin/dns/domain_duplicate" xml:space="preserve"><value>That domain is already added.</value></data>
+    <data name="admin/dns/remove_primary_blocked" xml:space="preserve"><value>Rename the primary domain onto another domain to remove it.</value></data>
+    <data name="admin/dns/credential_provider_required" xml:space="preserve"><value>Pick a DNS provider.</value></data>
+    <data name="admin/dns/credential_field_required" xml:space="preserve"><value>Fill in every field.</value></data>
     <data name="admin/dns/cert/label" xml:space="preserve"><value>Certificate:</value></data>
     <data name="admin/dns/cert/status_valid" xml:space="preserve"><value>Valid</value></data>
     <data name="admin/dns/cert/status_on_floor" xml:space="preserve"><value>Renew needed</value></data>
@@ -3984,6 +4145,7 @@
     <data name="admin/dns/cert/issuance_failed_domain" xml:space="preserve"><value>Certificate request failed ({date}): {error}</value></data>
     <data name="admin/dns/cert/issuance_failed_ip" xml:space="preserve"><value>IP address certificate request failed ({date}): {error}</value></data>
     <data name="admin/dns/cert/issuance_failed" xml:space="preserve"><value>Certificate request failed ({date}): {error}</value></data>
+    <data name="admin/dns/cert/issue_pending" xml:space="preserve"><value>Finish or cancel the certificate request below first.</value></data>
     <data name="admin/dns/rename/button" xml:space="preserve"><value>Rename primary domain</value></data>
     <data name="admin/dns/rename/promote" xml:space="preserve"><value>Promote to primary</value></data>
     <data name="admin/dns/rename/renaming_to" xml:space="preserve"><value>Renaming to</value></data>
@@ -4004,6 +4166,10 @@
     <data name="admin/dns/rename/abort" xml:space="preserve"><value>Abort rename</value></data>
     <data name="admin/dns/rename/abort_confirm" xml:space="preserve"><value>Confirm abort</value></data>
     <data name="admin/dns/rename/abort_postflip_warning" xml:space="preserve"><value>Aborting after the anchor flip re-flips the primary and rewrites every domain's DNS — expensive but safe.</value></data>
+    <data name="admin/dns/rename/needs_second_domain" xml:space="preserve"><value>Add a second domain to rename onto.</value></data>
+    <data name="admin/dns/rename/in_progress" xml:space="preserve"><value>A rename is already in progress.</value></data>
+    <data name="admin/dns/rename/target_required" xml:space="preserve"><value>Pick the new primary domain.</value></data>
+    <data name="admin/dns/rename/days_invalid" xml:space="preserve"><value>Type a whole number of days from 1 to 30, or leave it blank.</value></data>
     <data name="admin/view/nest_statistics" xml:space="preserve"><value>Nest Statistics</value></data>
     <data name="admin/view/registered_users" xml:space="preserve"><value>Registered Users</value></data>
     <data name="admin/view/total_storage_used" xml:space="preserve"><value>Total Storage Used</value></data>
@@ -4118,6 +4284,7 @@
     <data name="muted_words/description" xml:space="preserve"><value>A new word is set to “Hide”, so posts, messages and notifications containing it collapse behind “Show anyway” and matching posts sink in ranked feeds. A word set to “Show less” only sinks matching posts in ranked feeds — messages and notifications show as usual. A security notice always shows in full. This list is stored encrypted on your nest, and only your devices can read it.</value></data>
     <data name="muted_words/input_placeholder" xml:space="preserve"><value>Add a word to mute</value></data>
     <data name="muted_words/add" xml:space="preserve"><value>Mute word</value></data>
+    <data name="muted_words/term_required" xml:space="preserve"><value>Type a word to mute</value></data>
     <data name="muted_words/empty" xml:space="preserve"><value>You haven’t muted any words yet.</value></data>
     <data name="muted_words/remove" xml:space="preserve"><value>Un-mute</value></data>
     <data name="muted_words/level_hide" xml:space="preserve"><value>Hide</value></data>
@@ -4152,6 +4319,7 @@
     <data name="personalization/publish_submit" xml:space="preserve"><value>Publish</value></data>
     <data name="personalization/publish_name_blank" xml:space="preserve"><value>A published name can’t be blank.</value></data>
     <data name="personalization/publish_name_too_long" xml:space="preserve"><value>A published name is at most {max} characters.</value></data>
+    <data name="personalization/publish_nothing_kept" xml:space="preserve"><value>Keep at least one item to publish.</value></data>
     <data name="personalization/publish_kind_label" xml:space="preserve"><value>Share as</value></data>
     <data name="personalization/publish_kind_list" xml:space="preserve"><value>List of posts</value></data>
     <data name="personalization/publish_kind_model" xml:space="preserve"><value>Word-pattern model</value></data>
@@ -4348,6 +4516,10 @@
     <data name="family/contact_add_placeholder" xml:space="preserve"><value>Actor ID (hex)</value></data>
     <data name="family/contact_add_button" xml:space="preserve"><value>Pre-approve contact</value></data>
     <data name="family/contact_add_invalid_actor_id" xml:space="preserve"><value>Not a valid actor ID (expected hex)</value></data>
+    <data name="family/contact_add_required" xml:space="preserve"><value>Type the actor ID to pre-approve first.</value></data>
+    <data name="family/transfer_required" xml:space="preserve"><value>Type the new guardian's actor ID first.</value></data>
+    <data name="family/transfer_invalid_actor_id" xml:space="preserve"><value>Not a valid actor ID for the new guardian (expected hex)</value></data>
+    <data name="family/policy_screen_time_invalid" xml:space="preserve"><value>Screen time cannot be saved: {reason}</value></data>
     <data name="family/graduate_button" xml:space="preserve"><value>Graduate to full account</value></data>
     <data name="family/graduate_confirm_button" xml:space="preserve"><value>Yes, graduate {handle}</value></data>
     <data name="family/transfer_placeholder" xml:space="preserve"><value>New guardian actor ID (hex)</value></data>
@@ -4426,6 +4598,8 @@
     <data name="notifications/row_interaction" xml:space="preserve"><value>{sender} interacted with your content</value></data>
     <data name="notifications/dismiss" xml:space="preserve"><value>Dismiss</value></data>
     <data name="notifications/clear_all" xml:space="preserve"><value>Clear all</value></data>
+    <data name="notifications/nothing_to_clear" xml:space="preserve"><value>No notifications to clear</value></data>
+    <data name="notifications/nothing_unread" xml:space="preserve"><value>No unread notifications</value></data>
     <data name="notifications/row_tip_sats" xml:space="preserve"><value>{sender} tipped {value} sats on your post</value></data>
     <data name="notifications/row_tip_msats" xml:space="preserve"><value>{sender} tipped {value} msats on your post</value></data>
     <data name="notifications/row_tip" xml:space="preserve"><value>{sender} tipped your post</value></data>
@@ -4454,8 +4628,8 @@
     <data name="notifications/row_security_recovery_replacement_landed" xml:space="preserve"><value>Security: your recovery kit was replaced (new key {new_key}). Your new recovery kit cannot recover this account until you enter it and press Restore Kit Recovery under Settings → Account → Recovery Kit. If you did not request this replacement, your account may be compromised — contact your nest administrator.</value></data>
     <data name="notifications/row_security_recovery_replacement_cancelled" xml:space="preserve"><value>Security: the pending recovery key replacement was cancelled by {cancelled_by}.</value></data>
     <data name="notifications/row_security_identity_succeeded" xml:space="preserve"><value>Security: this identity was succeeded. Your account moved to a new key ({new_actor_id}). If you did NOT perform this recovery, whoever holds your recovery kit now controls the account — contact your nest administrator immediately.</value></data>
-    <data name="notifications/row_security_archive_exported" xml:space="preserve"><value>Security: your full account archive was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Sessions (or use the emergency lockout there) and contact your nest administrator.</value></data>
-    <data name="notifications/row_security_mailbox_export_downloaded" xml:space="preserve"><value>Security: a mailbox export ({format}) was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Sessions (or use the emergency lockout there), discard the export from the mail export page, and contact your nest administrator.</value></data>
+    <data name="notifications/row_security_archive_exported" xml:space="preserve"><value>Security: your full account archive was downloaded from {ip}. If this was not you, remove any device you don't recognise under Settings → Devices, revoke your sessions under Settings → Sessions (or use the emergency lockout there), and contact your nest administrator.</value></data>
+    <data name="notifications/row_security_mailbox_export_downloaded" xml:space="preserve"><value>Security: a mailbox export ({format}) was downloaded from {ip}. If this was not you, discard the export from the mail export page, remove any device you don't recognise under Settings → Devices, revoke your sessions under Settings → Sessions (or use the emergency lockout there), and contact your nest administrator.</value></data>
     <data name="widget/description" xml:space="preserve"><value>Shows unread message count and quick compose</value></data>
     <data name="widget/unread_label" xml:space="preserve"><value>unread</value></data>
     <data name="markdown/bold" xml:space="preserve"><value>Bold</value></data>
@@ -4515,6 +4689,10 @@
     <data name="profile/private_save_failed" xml:space="preserve"><value>Could not save your private notes: {reason}</value></data>
     <data name="profile/private_save_elsewhere" xml:space="preserve"><value>Your private notes can only be saved in the other open instance of this app</value></data>
     <data name="subscriptions/title" xml:space="preserve"><value>Subscriptions</value></data>
+    <data name="subscriptions/tier_name_required" xml:space="preserve"><value>Name the tier first.</value></data>
+    <data name="subscriptions/redeem_code_required" xml:space="preserve"><value>Type the claim code first.</value></data>
+    <data name="subscriptions/claim_needs_tier" xml:space="preserve"><value>Create a tier first — a claim code entitles one of your tiers.</value></data>
+    <data name="subscriptions/provider_needs_tier" xml:space="preserve"><value>Create a tier first — a payment provider sells one of your tiers.</value></data>
     <data name="subscriptions/my_tiers" xml:space="preserve"><value>My Tiers</value></data>
     <data name="subscriptions/my_subscriptions" xml:space="preserve"><value>My Subscriptions</value></data>
     <data name="subscriptions/pending_requests" xml:space="preserve"><value>Pending Requests</value></data>
@@ -4664,6 +4842,7 @@
     <data name="error/nostr/replies_off" xml:space="preserve"><value>Replies to Nostr are switched off, so this wasn't sent. Turn on Publish replies on the Nostr page.</value></data>
     <data name="error/nostr/not_sold" xml:space="preserve"><value>Only a post you sell can be advertised on Nostr. Sell this post first.</value></data>
     <data name="error/nostr/no_asking_price" xml:space="preserve"><value>This post has no asking price, so a zap could not buy it and it can't be advertised. To advertise a post you sell, choose Sell this post… when you write it and give it an asking price in sats.</value></data>
+    <data name="error/admin/web_app_origin/central_not_live" xml:space="preserve"><value>This server can't send people to another address for the web app yet, so nothing was changed. Keep Serve the app this server ships.</value></data>
     <data name="error/nest/outdated" xml:space="preserve"><value>This nest is running an outdated version and must be updated before you can connect.</value></data>
     <data name="error/nest/schema_mismatch" xml:space="preserve"><value>This nest's database does not match its software version and must be updated.</value></data>
     <data name="error/backup/writer_seat_held" xml:space="preserve"><value>This destination already keeps your account's backup from another box. Nothing was added.</value></data>
@@ -4760,10 +4939,15 @@
     <data name="registrar/contact/postal_code" xml:space="preserve"><value>Postal code</value></data>
     <data name="registrar/contact/country" xml:space="preserve"><value>Country</value></data>
     <data name="provisioning/verify_credentials" xml:space="preserve"><value>Verify credentials</value></data>
+    <data name="provisioning/fill_required_fields" xml:space="preserve"><value>Fill in every required field first.</value></data>
+    <data name="provisioning/checking_credentials" xml:space="preserve"><value>Checking the credentials — wait for it to finish.</value></data>
+    <data name="provisioning/connecting" xml:space="preserve"><value>Connecting — wait for it to finish.</value></data>
     <data name="provisioning/hosted_auth/connect" xml:space="preserve"><value>Sign in at the provider…</value></data>
     <data name="provisioning/hosted_auth/pending" xml:space="preserve"><value>Finish signing in in your browser — code {code}</value></data>
     <data name="provisioning/hosted_auth/connected" xml:space="preserve"><value>Connected</value></data>
     <data name="provisioning/hosted_auth/failed" xml:space="preserve"><value>Sign-in failed: {message}</value></data>
+    <data name="provisioning/hosted_auth/base_url_first" xml:space="preserve"><value>Type the provider's address first.</value></data>
+    <data name="provisioning/hosted_auth/finish_first" xml:space="preserve"><value>Finish signing in in your browser first.</value></data>
     <data name="provisioning/bundled/name" xml:space="preserve"><value>Bundled provider (open API)</value></data>
     <data name="provisioning/bundled/help" xml:space="preserve"><value>One company that registers your domain, hosts its DNS and rents you the server — you sign up and pay once, there. Paste the address the company gave you, then sign in; it must implement the open Fauna Bundled Provider API (the link above).</value></data>
     <data name="provisioning/bundled/base_url" xml:space="preserve"><value>Provider address (https://…)</value></data>
@@ -4794,6 +4978,11 @@
     <data name="provisioning/gandi/help" xml:space="preserve"><value>Create a Personal Access Token at account.gandi.net → Security → Personal Access Tokens.</value></data>
     <data name="provisioning/gandi/personal_access_token" xml:space="preserve"><value>Personal access token</value></data>
     <data name="provisioning/gandi/domain" xml:space="preserve"><value>Domain</value></data>
+    <data name="provisioning/spaceship/name" xml:space="preserve"><value>Spaceship</value></data>
+    <data name="provisioning/spaceship/help" xml:space="preserve"><value>Registrar + DNS. Create an API key at spaceship.com → API Manager with the Domains (read, write, billing), DNS records (read, write), Contacts (write) and Async operations (read) permissions, then paste the key and its secret.</value></data>
+    <data name="provisioning/spaceship/api_key" xml:space="preserve"><value>API key</value></data>
+    <data name="provisioning/spaceship/api_secret" xml:space="preserve"><value>API secret</value></data>
+    <data name="provisioning/spaceship/domain" xml:space="preserve"><value>Domain</value></data>
     <data name="provisioning/digitalocean/name" xml:space="preserve"><value>DigitalOcean</value></data>
     <data name="provisioning/digitalocean/help" xml:space="preserve"><value>Create an API token at cloud.digitalocean.com → API → Generate New Token (read and write).</value></data>
     <data name="provisioning/digitalocean/api_token" xml:space="preserve"><value>API token</value></data>
@@ -4902,6 +5091,7 @@
     <data name="connected_apps/connect_hint" xml:space="preserve"><value>If an app on another device shows you a code, type it here.</value></data>
     <data name="connected_apps/connect_placeholder" xml:space="preserve"><value>Code from the app</value></data>
     <data name="connected_apps/connect_submit" xml:space="preserve"><value>Connect</value></data>
+    <data name="connected_apps/code_required" xml:space="preserve"><value>Type the code the app shows you first.</value></data>
     <data name="connected_apps/roster_heading" xml:space="preserve"><value>Your connected apps</value></data>
     <data name="connected_apps/empty" xml:space="preserve"><value>No connected apps yet.</value></data>
     <data name="connected_apps/block" xml:space="preserve"><value>Never show requests from this app</value></data>
@@ -4975,9 +5165,13 @@
     <data name="connected_apps/install_setting" xml:space="preserve"><value>{label} ({kind})</value></data>
     <data name="connected_apps/trust_scope_ext_rw" xml:space="preserve"><value>Keys to your records published by {publisher}: {kinds} — read and write</value></data>
     <data name="connected_apps/trust_scope_ext_ro" xml:space="preserve"><value>Keys to your records published by {publisher}: {kinds} — read only</value></data>
+    <data name="connected_apps/trust_scope_deposit" xml:space="preserve"><value>Put files into your folder "{folder}"</value></data>
+    <data name="connected_apps/trust_scope_deposit_deleted" xml:space="preserve"><value>Put files into a folder you have since deleted</value></data>
+    <data name="connected_apps/trust_scope_deposit_unnamed" xml:space="preserve"><value>Put files into one of your folders</value></data>
+    <data name="connected_apps/trust_scope_op_unknown" xml:space="preserve"><value>An operation your nest does for this app</value></data>
     <data name="connected_apps/trust_status_expired" xml:space="preserve"><value>Expired — the app will ask again if it needs them</value></data>
     <data name="connected_apps/trust_empty" xml:space="preserve"><value>This app holds no keys to your records</value></data>
-    <data name="connected_apps/trust_bound_note" xml:space="preserve"><value>On an honest nest, disconnecting stops this app getting keys again. It cannot un-see what the app already read, and does not yet block content arriving after you disconnect.</value></data>
+    <data name="connected_apps/trust_bound_note" xml:space="preserve"><value>On an honest nest, disconnecting stops this app getting keys again. It cannot un-see what the app already read, and cannot stop an app that kept its keys from opening content that arrives after you disconnect.</value></data>
     <data name="share_link/button" xml:space="preserve"><value>Share a link</value></data>
     <data name="share_link/create_title" xml:space="preserve"><value>Share a link to {name}</value></data>
     <data name="share_link/create_body" xml:space="preserve"><value>Anyone with the link can open this file until it expires or you revoke it.</value></data>

@@ -29,6 +29,19 @@ use fauna_protocol::pending_actions::PendingActionSummary;
 
 use crate::{FfiError, stringify};
 
+/// The admin entry points — the `admin-tab` sidebar row, the Bridges page's
+/// hosted-plugin section: [`fauna_client_account::admin_entry_possibility`]
+/// over the `am_i_admin` gate's answer (`false` until it answers or on any
+/// error) — possible for an admin, absent otherwise (`admin.md` § Errors &
+/// edge cases, *Role and state gates answer one `Possibility` too*). Gated
+/// `value-format` for the bare-`fauna_core`-type reason
+/// [`crate::offline::offline_possibility`] gives.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn admin_entry_possibility(is_admin: bool) -> fauna_core::possibility::Possibility {
+    fauna_client_account::admin_entry_possibility(is_admin)
+}
+
 // ── UsageBytes mirror ──────────────────────────────────────────────────
 
 /// FFI mirror of [`fauna_protocol::account::UsageBytes`] — a `{used, max}`

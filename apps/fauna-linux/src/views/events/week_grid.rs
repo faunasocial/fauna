@@ -1,7 +1,6 @@
 use adw::prelude::*;
 /// Week grid view: 7-day time grid with positioned event blocks.
 use fauna_ui_ids as ids;
-use gtk::gdk;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -306,20 +305,12 @@ pub fn build_day_column_fixed(
             );
             block.set_tooltip_text(Some(&tooltip));
 
-            // Drag source: drag-to-move event blocks.
-            let drag_source = gtk::DragSource::new();
-            drag_source.set_actions(gdk::DragAction::MOVE);
-            let event_id = ev.id.clone();
-            drag_source.connect_prepare(move |_, _, _| {
-                Some(gdk::ContentProvider::for_value(&event_id.to_value()))
-            });
-            drag_source.connect_drag_begin(|source, _drag| {
-                if let Some(widget) = source.widget() {
-                    let icon = gtk::WidgetPaintable::new(Some(&widget));
-                    source.set_icon(Some(&icon), 0, 0);
-                }
-            });
-            block.add_controller(drag_source);
+            // No drag source: drag-to-move is a later, fleet-wide slice
+            // (docs/goal/ui/events.md § Week & day timeline views, the
+            // "Drag-to-move" bullet).
+            // A drag whose drop changes nothing is an affordance that cannot
+            // succeed (docs/goal/ui/README.md § Offer only what is possible),
+            // so the gesture is not wired until the move lands.
 
             // Click handler: select the event in the persistent detail panel and
             // fetch its attendees (the panel re-renders reactively).
@@ -335,29 +326,6 @@ pub fn build_day_column_fixed(
             fixed.put(&block, 0.0, y_pos);
             blocks.push(block);
         }
-    }
-
-    // Drop target on the day column: accept dragged event IDs.
-    {
-        let day_date = date;
-        let drop_target = gtk::DropTarget::new(glib::Type::STRING, gdk::DragAction::MOVE);
-        drop_target.connect_drop(move |_target, value, _x, y| {
-            if let Ok(event_id) = value.get::<String>() {
-                let hour = (y as u32) / 60;
-                let minute = ((y as u32) % 60) / 30 * 30;
-                tracing::debug!(
-                    "drag-move event {} to {:?} {:02}:{:02}",
-                    event_id,
-                    day_date,
-                    hour,
-                    minute
-                );
-                true
-            } else {
-                false
-            }
-        });
-        fixed.add_controller(drop_target);
     }
 
     // On resize, reposition blocks according to overlap columns and stretch
@@ -679,6 +647,72 @@ mod tests {
             }
             assert_eq!(count, 97);
             assert_eq!(last_name, "calendar-event-block");
+        });
+    }
+
+    /// Drag-to-move is not live (events.md § Errors & edge cases): neither an
+    /// event block nor the day column carries a drag source or drop target,
+    /// so no drop can look accepted while nothing moves.
+    #[test]
+    fn day_column_offers_no_drag_or_drop() {
+        run_on_gtk_thread(|| {
+            let state = Rc::new(RefCell::new(CalendarViewState {
+                selected_date: (2026, 11, 16),
+                view_mode: super::super::calendar_view::ViewMode::Week,
+                visible_calendars: Default::default(),
+                events_cache: Vec::new(),
+                calendar_colors: HashMap::new(),
+                attendees_cache: HashMap::new(),
+                reminders_cache: HashMap::new(),
+                selected_event: None,
+                displayed_calendars: Vec::new(),
+                selected_calendar: None,
+                create_gate: Default::default(),
+                said_unreadable: 0,
+            }));
+            let client = Rc::new(FaunaClient::offline_for_test());
+            let ev = EventRow {
+                id: "ev-1".into(),
+                calendar_id: "cal-1".into(),
+                summary: "Standup".into(),
+                start_time: "2026-11-16T09:00:00".into(),
+                end_time: Some("2026-11-16T09:30:00".into()),
+                location: None,
+                description: None,
+                attendance_mode: None,
+                capacity: None,
+            };
+            let fixed = build_day_column_fixed(
+                &[(ev, "blue".into(), 540, 570)],
+                (2026, 11, 16),
+                &state,
+                &client,
+            );
+            fn assert_no_dnd(w: &gtk::Widget) {
+                let controllers = w.observe_controllers();
+                for i in 0..controllers.n_items() {
+                    let c = controllers.item(i);
+                    assert!(
+                        c.clone().and_downcast::<gtk::DragSource>().is_none(),
+                        "{} carries a DragSource",
+                        w.widget_name()
+                    );
+                    assert!(
+                        c.and_downcast::<gtk::DropTarget>().is_none(),
+                        "{} carries a DropTarget",
+                        w.widget_name()
+                    );
+                }
+            }
+            assert_no_dnd(fixed.upcast_ref());
+            let mut child = fixed.first_child();
+            let mut saw_block = false;
+            while let Some(c) = child {
+                saw_block |= c.widget_name() == "calendar-event-block";
+                assert_no_dnd(&c);
+                child = c.next_sibling();
+            }
+            assert!(saw_block, "the column built no event block");
         });
     }
 }

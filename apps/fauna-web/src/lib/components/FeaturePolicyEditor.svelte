@@ -14,11 +14,12 @@
   import { connectionStatus } from '#lib/store';
   import { featureEditorWrite } from '#lib/rpc';
   import {
-    offlineAffordance,
+    offlinePossibility,
     type FeatureAuthoringTier,
     type PolicyEditorHandle,
   } from '#lib/wasm';
   import { makeOfflineGate } from '#lib/offline-gate';
+  import { askPossibility, formGate, formRefusal } from '#lib/form-gate';
   import { resolveLocalized, resolveLocalizedNested, editorNoteText } from '#lib/i18n/localized';
   import { t } from '#lib/i18n/strings';
   import { IDS } from '#lib/generated/uiIds';
@@ -45,23 +46,40 @@
   // write kind declared here); Cancel is local and stays live. The kind is the
   // tier's own — `AuthoringTier::write_kind` — and `check-offline-gate-kinds.py`
   // grades both literals against the shared table.
-  const offlineGate = makeOfflineGate(offlineAffordance, connectionStatus.subscribe);
+  const offlineGate = makeOfflineGate(offlinePossibility, connectionStatus.subscribe);
 
   let view = $state(editor.view());
+  // Save is painted from the draft's own validity (`ui/README.md` § Offer only
+  // what is possible, rule 4's form case), re-read with the view; Remove
+  // carries no draft. `write(false)` asks it again before anything runs.
+  let saveAnswer = $state(askPossibility(() => editor.savePossibility()));
+  const saveGate = $derived(formGate(saveAnswer));
+
+  function repaint() {
+    view = editor.view();
+    saveAnswer = askPossibility(() => editor.savePossibility());
+  }
   let status = $state('');
   let working = $state(false);
 
   function chooseOn(on: boolean) {
     editor.setOn(on);
-    view = editor.view();
+    repaint();
   }
 
   function typeCell(index: number, text: string) {
     editor.setCell(index, text);
-    view = editor.view();
+    repaint();
   }
 
   async function write(remove: boolean) {
+    if (!remove) {
+      const refusal = formRefusal(askPossibility(() => editor.savePossibility()));
+      if (refusal !== null) {
+        onerror(refusal);
+        return;
+      }
+    }
     working = true;
     onerror('');
     try {
@@ -71,7 +89,7 @@
         onerror(resolveLocalizedNested(verdict.invalid));
         return;
       }
-      view = editor.view();
+      repaint();
       status = verdict.status ? resolveLocalized(verdict.status) : '';
       onwritten();
     } catch (e) {
@@ -149,7 +167,8 @@
         type="button"
         class="btn"
         data-testid={IDS.FEATURE_POLICY_EDITOR_SAVE_BUTTON}
-        use:offlineGate={{ kind: 'fauna.features.policy.update', disabled: working }}
+        use:offlineGate={{ kind: 'fauna.features.policy.update', disabled: working || saveGate.disabled }}
+        title={saveGate.reason || undefined}
         onclick={() => write(false)}
       >
         {t.features.editor_save}
@@ -170,7 +189,8 @@
         type="button"
         class="btn"
         data-testid={IDS.FEATURE_POLICY_EDITOR_SAVE_BUTTON}
-        use:offlineGate={{ kind: 'fauna.family.policy.update', disabled: working }}
+        use:offlineGate={{ kind: 'fauna.family.policy.update', disabled: working || saveGate.disabled }}
+        title={saveGate.reason || undefined}
         onclick={() => write(false)}
       >
         {t.features.editor_save}
@@ -191,7 +211,8 @@
         type="button"
         class="btn"
         data-testid={IDS.FEATURE_POLICY_EDITOR_SAVE_BUTTON}
-        use:offlineGate={{ kind: 'fauna.features.self_limits.update', disabled: working }}
+        use:offlineGate={{ kind: 'fauna.features.self_limits.update', disabled: working || saveGate.disabled }}
+        title={saveGate.reason || undefined}
         onclick={() => write(false)}
       >
         {t.features.editor_save}

@@ -2,7 +2,6 @@ import os
 import re
 import secrets
 import shutil
-import tempfile
 import time
 
 import pytest
@@ -16,6 +15,7 @@ from common.auth import (
 )
 from helpers.backup_destinations import DestinationEnrollment
 from helpers.harness_writer import HarnessWriter
+from helpers.scratch_dirs import scratch_mkdtemp
 from helpers.waiting import wait_until
 from i18n.strings import S
 
@@ -148,6 +148,61 @@ def empty_backup_set(nest_instance, test_user):
     return name
 
 
+def _grow_set_to(nest_instance, owner, name: str, first_id: int, count: int) -> int:
+    """Add owner-signed snapshots to set `name` until it holds `count` distinct
+    ones; returns the newest id.
+
+    `create_snapshot_v2` dedups on `UNIQUE(folder_id, created_at)` at SECONDS
+    granularity and returns the EXISTING row, so a same-second retry
+    legitimately adds nothing. Poll for a DISTINCT id rather than sleeping past
+    the second boundary: the new id is the observable that the row landed
+    (convention 14), and the loop paces itself.
+    """
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+
+    owner_client = WsRpcAdminClient(
+        nest_instance["url"],
+        actor_id=owner["actor_id_bytes"],
+        signing_key=bytes(owner["signing_key"]),
+    )
+    newest_id = first_id
+    seen = {first_id}
+    with owner_client:
+        while len(seen) < count:
+            deadline = time.monotonic() + 15
+            while True:
+                got = owner_client.call(
+                    "fauna.filesync.snapshot.create_folder", {"folder": name}
+                )["id"]
+                if got not in seen:
+                    seen.add(got)
+                    newest_id = got
+                    break
+                if time.monotonic() >= deadline:
+                    raise AssertionError(
+                        f"seeding {name!r}: no new snapshot id within 15s "
+                        f"(same-second dedup kept returning {got}); "
+                        f"have {sorted(seen)}"
+                    )
+                time.sleep(0.5)
+    return newest_id
+
+
+def _set_max_one_retention(nest_instance, owner, name: str) -> None:
+    """Rest a `max_snapshots: 1` policy on set `name` — the wizard's write path."""
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+
+    with WsRpcAdminClient(
+        nest_instance["url"],
+        actor_id=owner["actor_id_bytes"],
+        signing_key=bytes(owner["signing_key"]),
+    ) as owner_client:
+        owner_client.call(
+            "fauna.folders.update",
+            {"name": name, "retention_policy": '{"max_snapshots":1,"max_age_days":0}'},
+        )
+
+
 @pytest.fixture
 def pruneable_backup_set(nest_instance, test_user):
     """`(folder_name, newest_snapshot_id)` — a set holding FOUR snapshots under
@@ -170,43 +225,9 @@ def pruneable_backup_set(nest_instance, test_user):
     the API shortcut is the sanctioned one under e2e convention 8; the
     behavior under test is driven entirely through the app UI.
     """
-    from clients.ws_rpc_admin_client import WsRpcAdminClient
-
     name, first_id = _seed_folder_with_snapshot(nest_instance, test_user)
-    owner_client = WsRpcAdminClient(
-        nest_instance["url"],
-        actor_id=test_user["actor_id_bytes"],
-        signing_key=bytes(test_user["signing_key"]),
-    )
-    newest_id = first_id
-    with owner_client:
-        while_ids = {first_id}
-        # `create_snapshot_v2` dedups on `UNIQUE(folder_id, created_at)` at
-        # SECONDS granularity and returns the EXISTING row, so a same-second
-        # retry legitimately adds nothing. Poll for a DISTINCT id rather than
-        # sleeping past the second boundary: the new id is the observable that
-        # the row landed (convention 14), and the loop paces itself.
-        while len(while_ids) < 4:
-            deadline = time.monotonic() + 15
-            while True:
-                got = owner_client.call(
-                    "fauna.filesync.snapshot.create_folder", {"folder": name}
-                )["id"]
-                if got not in while_ids:
-                    while_ids.add(got)
-                    newest_id = got
-                    break
-                if time.monotonic() >= deadline:
-                    raise AssertionError(
-                        f"seeding {name!r}: no new snapshot id within 15s "
-                        f"(same-second dedup kept returning {got}); "
-                        f"have {sorted(while_ids)}"
-                    )
-                time.sleep(0.5)
-        owner_client.call(
-            "fauna.folders.update",
-            {"name": name, "retention_policy": '{"max_snapshots":1,"max_age_days":0}'},
-        )
+    newest_id = _grow_set_to(nest_instance, test_user, name, first_id, 4)
+    _set_max_one_retention(nest_instance, test_user, name)
     return name, newest_id
 
 
@@ -654,38 +675,9 @@ def lifecycle_backup_set(nest_instance, test_user):
     Same same-second dedup pacing as `pruneable_backup_set`: poll for a DISTINCT
     id rather than sleeping past the second boundary (convention 14).
     """
-    from clients.ws_rpc_admin_client import WsRpcAdminClient
-
     name, first_id = _seed_folder_with_snapshot(nest_instance, test_user)
-    owner_client = WsRpcAdminClient(
-        nest_instance["url"],
-        actor_id=test_user["actor_id_bytes"],
-        signing_key=bytes(test_user["signing_key"]),
-    )
-    newest_id = first_id
-    with owner_client:
-        seen = {first_id}
-        while len(seen) < 5:
-            deadline = time.monotonic() + 15
-            while True:
-                got = owner_client.call(
-                    "fauna.filesync.snapshot.create_folder", {"folder": name}
-                )["id"]
-                if got not in seen:
-                    seen.add(got)
-                    newest_id = got
-                    break
-                if time.monotonic() >= deadline:
-                    raise AssertionError(
-                        f"seeding {name!r}: no new snapshot id within 15s "
-                        f"(same-second dedup kept returning {got}); "
-                        f"have {sorted(seen)}"
-                    )
-                time.sleep(0.5)
-        owner_client.call(
-            "fauna.folders.update",
-            {"name": name, "retention_policy": '{"max_snapshots":1,"max_age_days":0}'},
-        )
+    newest_id = _grow_set_to(nest_instance, test_user, name, first_id, 5)
+    _set_max_one_retention(nest_instance, test_user, name)
     return name, newest_id
 
 
@@ -3216,7 +3208,7 @@ def test_snapshot_file_download_button_downloads_sealed_bytes(
             nest_instance["port"], folder, secret_key=secret_key,
             base_url=nest_instance["url"],
         ),
-        tempfile.mkdtemp(prefix="fauna-snapshot-download-"),
+        scratch_mkdtemp("snapshot-download-"),
     )
 
     file_content = f"sealed download proof {secrets.token_hex(16)}\n".encode()
@@ -3300,7 +3292,7 @@ def test_snapshot_restore_writes_the_whole_tree_byte_identically(
             nest_instance["port"], folder, secret_key=secret_key,
             base_url=nest_instance["url"],
         ),
-        tempfile.mkdtemp(prefix="fauna-snapshot-restore-"),
+        scratch_mkdtemp("snapshot-restore-"),
     )
     expected = {
         "top.txt": f"whole restore proof {secrets.token_hex(16)}\n".encode(),
@@ -3331,7 +3323,7 @@ def test_snapshot_restore_writes_the_whole_tree_byte_identically(
 
     # A directory that does not exist yet: the restore creates it.
     destination = os.path.join(
-        tempfile.mkdtemp(prefix="fauna-restore-dest-"), "restored"
+        scratch_mkdtemp("restore-dest-"), "restored"
     )
     try:
         result = logged_in_app.backups.restore_snapshot_to(destination)
@@ -3381,7 +3373,7 @@ def _attach_a_new_folder_to_the_destination(app, nest, owner) -> str:
     writer = HarnessWriter(
         nest["url"], secret_key,
         user_folder_ref(nest["port"], name, secret_key=secret_key, base_url=nest["url"]),
-        tempfile.mkdtemp(prefix="fauna-reseed-folder-"),
+        scratch_mkdtemp("reseed-folder-"),
     )
     writer.write("kept.txt", f"restored with the box {secrets.token_hex(8)}\n".encode())
     # One signed seat pass: it returns once the record is on the nest.
@@ -3495,7 +3487,8 @@ def test_after_losing_the_nest_the_devices_copy_restores_the_mail_onto_the_rebui
 
 
 def _lose_the_nest_and_restore_from_this_device(
-    app, request, nest_mode, tmp_path_factory, *, with_folder, seal=None
+    app, request, nest_mode, tmp_path_factory, *, with_folder, seal=None,
+    lived_in=False,
 ):
     """The after-loss re-seed journey both tests above and below run: box A
     holds the owner's mail (and, with ``with_folder``, a covered folder), this
@@ -3506,6 +3499,14 @@ def _lose_the_nest_and_restore_from_this_device(
     to box A before the device takes its copy — a calendar event, a contact
     card and a post — and makes the journey read each one back through its
     ordinary door on B after the restore (`nest/box-recovery.md` § Goal, item 2).
+
+    ``lived_in`` files one message into the owner's INBOX on B before the
+    gesture, so the mail set is refused lived-in and the driver hands it to the
+    recovery leg in the same run (`behavior/backup-destinations.md` § Third
+    destination kind → *A lived-in segment set is completed by record in the
+    same gesture*, rule (1)): the result is whole with the mail's
+    copied-in line, both messages read back in INBOX once each, and a second
+    press reports nothing new.
     """
     from common.auth import claim_admin
     from conftest import _login_app_as, _start_dedicated_nest
@@ -3556,6 +3557,11 @@ def _lose_the_nest_and_restore_from_this_device(
     # The device keeps its copy across the app's relaunch onto the new address.
     assert app.driver.preserve_state_across_relaunch()
     _login_app_as(app, request, box_b, owner)
+    if lived_in:
+        # A message another server retried, filed before the owner restores —
+        # the case the ruling names. Precondition-only (convention 8).
+        _seed_one_mail_segment(app, box_b, owner)
+        assert _inbox_count(box_b, owner) == 1, "pre-state: B already holds one message"
 
     # The destination list is an account-plane row keyed on the box's identity,
     # which the rebuild re-presents, so the list survives the loss
@@ -3606,6 +3612,8 @@ def _lose_the_nest_and_restore_from_this_device(
     )
     if others is not None:
         _assert_every_other_kind_named_restored(app, result)
+    if lived_in:
+        _assert_the_mail_named_copied_in(app, result)
 
     # Nest-side, independent of the page (convention 5): the owner's mail scope
     # on the rebuilt box now holds live records, which is exactly what makes a
@@ -3639,6 +3647,36 @@ def _lose_the_nest_and_restore_from_this_device(
         "a re-enrolled device's copy is claimed again, so the orphaned row retires"
     )
 
+    if lived_in:
+        # Nest-side first: the old message is back beside the new one, once.
+        assert _inbox_count(box_b, owner) == 2, (
+            f"NEST-SIDE failure: the page says {result!r}, but INBOX on B holds "
+            f"{_inbox_count(box_b, owner)} message(s), not the new one plus the "
+            f"one copied in"
+        )
+        # A second press copies nothing twice and says so, whole.
+        wait_until(lambda: app.backups.reseed_button_on_row_visible(0), 60.0,
+                   diagnose=lambda: f"the row must still carry the gesture; "
+                                    f"error={app.error_text()!r}")
+        app.backups.reseed_from_custodian_row(0)
+        wait_until(
+            lambda: app.backups.reseed_result_text() not in ("", S.backups.backup_reseed_running)
+            and app.backups.reseed_result_text() != result
+            or bool(app.error_text()),
+            300.0,
+            diagnose=lambda: f"the second press never reached a verdict; "
+                             f"result={app.backups.reseed_result_text()!r} "
+                             f"error={app.error_text()!r}",
+        )
+        again = app.backups.reseed_result_text()
+        nothing = S.backups.reseed_set_recovered_nothing(set=S.backups.reseed_set_mail)
+        assert again.startswith(S.backups.reseed_result_whole) and nothing in again, (
+            f"a second press must report nothing new to copy, whole: "
+            f"result={again!r} error={app.error_text()!r}"
+        )
+        assert _inbox_count(box_b, owner) == 2, "the second press copied a message twice"
+        app.backups.wait_for_destination_count(1)
+
     # Leave nothing hosting behind for the next custodian test on this launch
     # (the wait above saw the row, so the count is the loaded list's).
     app.backups.remove_destination(0)
@@ -3650,10 +3688,26 @@ def _lose_the_nest_and_restore_from_this_device(
     # materialize adopts the placement journal with the content
     # (`behavior/backup-destinations.md` § Re-seed → *Where restored mail lands*).
     restored = _inbox_count(box_b, owner)
-    assert restored == 1, (
+    assert restored == (2 if lived_in else 1), (
         f"the restored mail must land back in the owner's INBOX on the rebuilt "
         f"box; INBOX holds {restored} message(s). A live record in no mailbox "
         f"means the placement journal was not restored with the content."
+    )
+
+
+def _assert_the_mail_named_copied_in(app, result: str) -> None:
+    """The mail's own result line says it was completed by record — *N* copied
+    in beside what the nest already had, N at least one — never the lived-in
+    refusal (rule (1) of the 2026-11-20 ruling)."""
+    before, after = S.backups.reseed_set_recovered(
+        set=S.backups.reseed_set_mail, count="\0").split("\0")
+    assert S.backups.reseed_refused_target_lived_in not in result, (
+        f"the lived-in mail set was refused, not handed to the recovery leg: "
+        f"result={result!r}"
+    )
+    assert re.search(re.escape(before) + r"[1-9]\d*" + re.escape(after), result), (
+        f"the result view must say the mail was copied in: "
+        f"result={result!r} error={app.error_text()!r}"
     )
 
 
@@ -3871,6 +3925,40 @@ def test_after_losing_the_nest_every_kind_comes_back_onto_the_rebuilt_one(
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.android
+# web is never a custodian, as in the mail journey above.
+@pytest.mark.real_sync_agent
+@pytest.mark.isolated_sync_agent
+@pytest.mark.feature("backup-destinations-and-restore")
+def test_after_losing_the_nest_mail_filed_before_the_restore_is_kept_and_the_copy_completes_it(
+    app, request, nest_mode, tmp_path_factory
+):
+    """**A rebuilt nest that already took mail before the owner pressed
+    restore keeps it, and the copy is completed by record in the same
+    gesture** (`behavior/backup-destinations.md` § Third destination kind →
+    *A lived-in segment set is completed by record in the same gesture*,
+    rule (1); the store end of the recovery leg,
+    `architecture/client-device-custodian.md` § *Recovery from this device's
+    own store*).
+
+    The mail journey above, with one message filed into B's INBOX after the
+    claim and before the gesture. The mail set's materialize is refused
+    lived-in; the driver hands it to the recovery leg in the same run, which
+    lands the copy, files the lost message in the mailbox it was in under a
+    UID B mints, and runs its duties. The result is whole, naming the mail
+    copied in; B's INBOX holds both messages once each; a second press
+    reports nothing new to copy and copies nothing twice.
+    """
+    _lose_the_nest_and_restore_from_this_device(
+        app, request, nest_mode, tmp_path_factory, with_folder=False,
+        lived_in=True)
+
+
+@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.web
 @pytest.mark.feature("backup-destinations-and-restore")
 def test_after_losing_the_nest_a_surviving_nest_destination_restores_the_mail(
@@ -3928,6 +4016,35 @@ def test_after_losing_the_nest_a_surviving_nest_destination_restores_the_mail(
 @pytest.mark.ios
 @pytest.mark.android
 @pytest.mark.web
+@pytest.mark.feature("backup-destinations-and-restore")
+def test_after_losing_the_nest_mail_filed_before_the_pull_back_is_kept_and_the_copy_completes_it(
+    app, request, nest_mode, tmp_path_factory
+):
+    """**A rebuilt nest that already took mail before the owner pressed
+    restore from a surviving nest keeps it, and the copy is completed by record
+    in the same gesture** (`behavior/backup-destinations.md` § Third destination
+    kind → *A lived-in segment set is completed by record in the same gesture*,
+    rule (1); the nest end of the recovery leg,
+    `architecture/client-device-custodian.md` § Client-device custodian (pull)
+    → *Restore* → *Recovery into the lived-in nest that regressed*).
+
+    The nest-held pull-back journey above, with one message filed into the
+    rebuilt box's INBOX before the press. The mail set's materialize is refused
+    lived-in; the driver hands it to the recovery leg in the same run. The
+    result is whole, naming the mail copied in; the INBOX holds both messages
+    once each; a second press reports nothing new to copy and copies nothing
+    twice."""
+    _lose_the_nest_and_pull_back_from_a_surviving_nest(
+        app, request, nest_mode, tmp_path_factory, lived_in=True)
+
+
+@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
+@pytest.mark.web
 @pytest.mark.requires_surface("backup-destination-reseed-preflight-lines")
 @pytest.mark.feature("backup-destinations-and-restore")
 def test_the_pull_back_confirm_shows_each_sets_standing_before_anything_is_pulled(
@@ -3950,7 +4067,8 @@ def test_the_pull_back_confirm_shows_each_sets_standing_before_anything_is_pulle
 
 
 def _lose_the_nest_and_pull_back_from_a_surviving_nest(
-    app, request, nest_mode, tmp_path_factory, *, seal=None, read_preflight=False
+    app, request, nest_mode, tmp_path_factory, *, seal=None, read_preflight=False,
+    lived_in=False,
 ):
     """The after-loss nest-held pull-back journey the tests above and below
     run: box A holds the owner's mail, nest D holds A's backup, A is lost, A′ is
@@ -3962,7 +4080,13 @@ def _lose_the_nest_and_pull_back_from_a_surviving_nest(
     on A′ after the restore (`nest/box-recovery.md` § Goal, item 2).
 
     ``read_preflight`` stops at the confirm and reads its per-set preflight
-    lines before accepting: mail must read unvouched (outcome 25)."""
+    lines before accepting: mail must read unvouched (outcome 25).
+
+    ``lived_in`` files one message into the owner's INBOX on A′ before the
+    press, so the mail set's materialize is refused lived-in and the driver
+    hands it to the nest end of the recovery leg in the same run
+    (`behavior/backup-destinations.md` § Third destination kind → *A lived-in
+    segment set is completed by record in the same gesture*, rule (1))."""
     from clients.ws_rpc_admin_client import WsRpcAdminClient
     from common.auth import claim_admin
     from conftest import _login_app_as, _start_dedicated_nest
@@ -4038,6 +4162,11 @@ def _lose_the_nest_and_pull_back_from_a_surviving_nest(
 
     assert app.driver.preserve_state_across_relaunch()
     _login_app_as(app, request, box_a2, owner, spa_url=_spa_proxy_for(app, request, box_a2))
+    if lived_in:
+        # A message another server retried, filed before the owner restores.
+        # Precondition-only (convention 8).
+        _seed_one_mail_segment(app, box_a2, owner)
+        assert _inbox_count(box_a2, owner) == 1, "pre-state: A' already holds one message"
 
     # The list is keyed on the box's identity, which the rebuild re-presents, so
     # D's row is still the owner's (`behavior/backup-destinations.md`
@@ -4086,6 +4215,8 @@ def _lose_the_nest_and_pull_back_from_a_surviving_nest(
     )
     if others is not None:
         _assert_every_other_kind_named_restored(app, result)
+    if lived_in:
+        _assert_the_mail_named_copied_in(app, result)
 
     if folder is not None:
         _assert_the_folder_is_back(app, box_a2, owner, folder, result)
@@ -4098,9 +4229,38 @@ def _lose_the_nest_and_pull_back_from_a_surviving_nest(
     _push_backup(box_a2)
     app.backups.wait_for_destination_count(1)
 
+    if lived_in:
+        # Nest-side first: the old message is back beside the new one, once.
+        assert _inbox_count(box_a2, owner) == 2, (
+            f"NEST-SIDE failure: the page says {result!r}, but INBOX on A' holds "
+            f"{_inbox_count(box_a2, owner)} message(s), not the new one plus the "
+            f"one copied in"
+        )
+        # A second press copies nothing twice and says so, whole.
+        wait_until(lambda: app.backups.reseed_button_on_row_visible(0), 60.0,
+                   diagnose=lambda: f"the row must still carry the gesture; "
+                                    f"error={app.error_text()!r}")
+        app.backups.reseed_from_nest_row(0)
+        wait_until(
+            lambda: app.backups.reseed_result_text() not in ("", S.backups.backup_reseed_running)
+            and app.backups.reseed_result_text() != result
+            or bool(app.error_text()),
+            300.0,
+            diagnose=lambda: f"the second press never reached a verdict; "
+                             f"result={app.backups.reseed_result_text()!r} "
+                             f"error={app.error_text()!r}",
+        )
+        again = app.backups.reseed_result_text()
+        nothing = S.backups.reseed_set_recovered_nothing(set=S.backups.reseed_set_mail)
+        assert again.startswith(S.backups.reseed_result_whole) and nothing in again, (
+            f"a second press must report nothing new to copy, whole: "
+            f"result={again!r} error={app.error_text()!r}"
+        )
+        assert _inbox_count(box_a2, owner) == 2, "the second press copied a message twice"
+
     # LAST: the restored message is back in the mailbox it was in.
     restored = _inbox_count(box_a2, owner)
-    assert restored == 1, (
+    assert restored == (2 if lived_in else 1), (
         f"the restored mail must land back in the owner's INBOX on the rebuilt "
         f"box; INBOX holds {restored} message(s)."
     )

@@ -48,6 +48,10 @@ struct SnapshotListView: View {
                     Text(busyOpText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                } else {
+                    // Idle: the toolbar's set actions' own reason (no folder
+                    // selected, or none made yet — and where to make one).
+                    FaunaPossibilityReason(vm.setActionPossibility)
                 }
                 if let result = vm.snapshot?.checkResult {
                     CheckResultView(result: result)
@@ -138,6 +142,8 @@ struct SnapshotListView: View {
                                 .automationActivate(Ids.snapshotImmediateDeleteButton) {
                                     vm.openImmediateDelete(snapshotId: snapshot.id)
                                 }
+                                // Live in every row state; held only by the single-flight gate.
+                                .faunaPossible(vm.immediateDeletePossibility(id: snapshot.id))
                                 // Arms the confirm — it does NOT delete (this leg's
                                 // change; see `pendingDelete`).
                                 Button {
@@ -151,6 +157,9 @@ struct SnapshotListView: View {
                                 .automationActivate(Ids.snapshotDeleteButton) {
                                     pendingDelete = snapshot
                                 }
+                                // Only an active row soft-deletes (a pending or soft-deleted one
+                                // would have the nest schedule a second pending action).
+                                .faunaPossible(vm.deletePossibility(id: snapshot.id))
                                 // Undelete — presence IS the state (§ Snapshot-list
                                 // shape → *Soft-deleted rows*): renders ONLY on a
                                 // SoftDeleted row, same shape as
@@ -163,12 +172,11 @@ struct SnapshotListView: View {
                                         Image(systemName: "arrow.uturn.backward")
                                     }
                                     .buttonStyle(.borderless)
-                                    .disabled(vm.busy)
                                     .accessibilityIdentifier(Ids.snapshotUndeleteButton)
-                                    .automationActivate(Ids.snapshotUndeleteButton,
-                                                        isEnabled: { !vm.busy }) {
+                                    .automationActivate(Ids.snapshotUndeleteButton) {
                                         Task { await vm.undeleteSnapshot(id: snapshot.id) }
                                     }
+                                    .faunaPossible(vm.idlePossibility)
                                 }
                             }
                             .contentShape(Rectangle())
@@ -176,6 +184,7 @@ struct SnapshotListView: View {
                             // Whole-row tap opens detail (not a wrapping `Button`,
                             // so the trailing icon buttons keep working — mirrors
                             // `FeedListView`'s `post-card`).
+                            .faunaActsOnClick()
                             .onTapGesture { Task { await vm.openSnapshot(id: snapshot.id) } }
                             .accessibilityIdentifier(Ids.snapshotItem)
                             .automationActivate(Ids.snapshotItem,
@@ -229,35 +238,32 @@ struct SnapshotListView: View {
                     Button(L.common.create) {
                         Task { await vm.createSnapshot() }
                     }
-                    .disabled(vm.mutationsDisabled)
                     .accessibilityIdentifier(Ids.snapshotCreateButton)
-                    .automationActivate(Ids.snapshotCreateButton,
-                                        isEnabled: { !vm.mutationsDisabled }) {
+                    .automationActivate(Ids.snapshotCreateButton) {
                         Task { await vm.createSnapshot() }
                     }
+                    .faunaPossible(vm.setActionPossibility)
                     // The tagged button RUNS the check (§ Snapshot-list shape,
                     // *Check* ruling) — it no longer opens a sheet whose own
                     // untagged button was the real actuator.
                     Button(L.common.check) {
                         Task { await vm.check() }
                     }
-                    .disabled(vm.mutationsDisabled)
                     .accessibilityIdentifier(Ids.snapshotCheckButton)
-                    .automationActivate(Ids.snapshotCheckButton,
-                                        isEnabled: { !vm.mutationsDisabled }) {
+                    .automationActivate(Ids.snapshotCheckButton) {
                         Task { await vm.check() }
                     }
+                    .faunaPossible(vm.setActionPossibility)
                     // Prune previews THIS SET'S OWN resting policy; execute is
                     // offered from the preview (§ *Prune* ruling).
                     Button(L.common.prune) {
                         Task { await vm.prunePreview() }
                     }
-                    .disabled(vm.mutationsDisabled)
                     .accessibilityIdentifier(Ids.snapshotPruneButton)
-                    .automationActivate(Ids.snapshotPruneButton,
-                                        isEnabled: { !vm.mutationsDisabled }) {
+                    .automationActivate(Ids.snapshotPruneButton) {
                         Task { await vm.prunePreview() }
                     }
+                    .faunaPossible(vm.setActionPossibility)
                     // Preview and execute are one kind with a `dry_run` flag,
                     // and it is `OnlineOnly` for the honest reason that a dry
                     // run with no nest would have nothing to dry-run.

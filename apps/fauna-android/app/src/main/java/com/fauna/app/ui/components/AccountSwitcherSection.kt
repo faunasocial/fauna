@@ -4,6 +4,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -75,60 +76,43 @@ fun AccountSwitcherSection(
             )
             Spacer(Modifier.height(8.dp))
 
-            accounts.forEachIndexed { index, entry ->
-                val isActive = entry.actorId == activeActorId
-                Row(
+            AccountSwitcherRows(
+                accounts = accounts,
+                activeActorId = activeActorId,
+                label = label,
+                onSwitch = onSwitch,
+            ) { index, entry, isActive ->
+                // Require-confirm-to-activate toggle — on EVERY row incl. the
+                // active one (long-term-store.md § Per-account re-auth). The
+                // Switch consumes its own tap, so flipping it does not trigger
+                // the row's switch-account click. Scoped within the row's
+                // account-switcher-item[$index] for the e2e's scoped query.
+                Switch(
+                    checked = entry.requireConfirmToActivate,
+                    onCheckedChange = { onRequireConfirmToggle(entry.actorId, it) },
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("account-switcher-item[$index]")
-                        .then(
-                            if (isActive) Modifier
-                            else Modifier.clickable { onSwitch(entry.actorId) }
-                        )
-                        .padding(vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
+                        .testTag(Ids.ACCOUNT_REQUIRE_CONFIRM_TOGGLE)
+                        .semantics { contentDescription = requireConfirmLabel },
+                )
+                Spacer(Modifier.width(8.dp))
+                if (isActive) {
                     Text(
-                        label(entry),
-                        style = MaterialTheme.typography.bodyLarge,
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("account-item-handle[$index]"),
+                        stringResource(R.string.common_active),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.testTag("account-item-active-indicator[$index]"),
                     )
-                    // Require-confirm-to-activate toggle — on EVERY row incl. the
-                    // active one (long-term-store.md § Per-account re-auth). The
-                    // Switch consumes its own tap, so flipping it does not trigger
-                    // the row's switch-account click. Scoped within the row's
-                    // account-switcher-item[$index] for the e2e's scoped query.
-                    Switch(
-                        checked = entry.requireConfirmToActivate,
-                        onCheckedChange = { onRequireConfirmToggle(entry.actorId, it) },
-                        modifier = Modifier
-                            .testTag(Ids.ACCOUNT_REQUIRE_CONFIRM_TOGGLE)
-                            .semantics { contentDescription = requireConfirmLabel },
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    if (isActive) {
-                        Text(
-                            stringResource(R.string.common_active),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.testTag("account-item-active-indicator[$index]"),
+                } else {
+                    IconButton(
+                        onClick = { onRemove(entry.actorId) },
+                        modifier = Modifier.testTag("account-remove-button[$index]"),
+                    ) {
+                        Icon(
+                            Icons.Default.Delete,
+                            contentDescription = stringResource(R.string.common_remove),
                         )
-                    } else {
-                        IconButton(
-                            onClick = { onRemove(entry.actorId) },
-                            modifier = Modifier.testTag("account-remove-button[$index]"),
-                        ) {
-                            Icon(
-                                Icons.Default.Delete,
-                                contentDescription = stringResource(R.string.common_remove),
-                            )
-                        }
                     }
                 }
-                if (index < accounts.size - 1) HorizontalDivider()
             }
 
             HorizontalDivider()
@@ -145,5 +129,50 @@ fun AccountSwitcherSection(
                 Text(stringResource(R.string.settings_account_page_add_account))
             }
         }
+    }
+}
+
+/**
+ * The switcher's rows, shared by the Settings switcher above and `launch_retry`'s
+ * ([com.fauna.app.ui.screen.LaunchRetryScreen]; `onboarding.md` § Wizard exit
+ * handling → *The finished wizard holds*): one indexed `account-switcher-item`
+ * per account in registry order, carrying its indexed `account-item-handle` — the
+ * active row a plain, non-clickable row, every other a tap that [onSwitch]es.
+ * [trailing] is the caller's per-row extras (Settings' require-confirm toggle,
+ * active indicator and remove button); `launch_retry` passes none.
+ */
+@Composable
+fun AccountSwitcherRows(
+    accounts: List<FfiAccountEntry>,
+    activeActorId: String?,
+    label: (FfiAccountEntry) -> String,
+    onSwitch: (actorId: String) -> Unit,
+    trailing: @Composable RowScope.(index: Int, entry: FfiAccountEntry, isActive: Boolean) -> Unit =
+        { _, _, _ -> },
+) {
+    accounts.forEachIndexed { index, entry ->
+        val isActive = entry.actorId == activeActorId
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("${Ids.ACCOUNT_SWITCHER_ITEM}[$index]")
+                .then(
+                    if (isActive) Modifier
+                    else Modifier.clickable { onSwitch(entry.actorId) }
+                )
+                .padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(
+                label(entry),
+                style = MaterialTheme.typography.bodyLarge,
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("account-item-handle[$index]"),
+            )
+            trailing(index, entry, isActive)
+        }
+        if (index < accounts.size - 1) HorizontalDivider()
     }
 }

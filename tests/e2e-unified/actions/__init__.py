@@ -203,6 +203,16 @@ class ActionLayer:
             return from_state
         return self._message_from_element("error-message")
 
+    def error_for_failure(self) -> str:
+        """The page's error text for a failure message, ``"none"`` when there
+        is none. Reads through ``error_text()`` — the same surface
+        ``has_error()`` uses — and never raises, so a ``diagnose`` callback
+        built on it cannot replace the failure it describes (convention 6)."""
+        try:
+            return self.error_text() or "none"
+        except Exception as exc:  # noqa: BLE001 — a diagnostic must not throw.
+            return f"<unreadable: {type(exc).__name__}: {exc}>"
+
     def has_error(self) -> bool:
         """Check if an error message is currently visible."""
         from_state = self._message_from_state("error")

@@ -27,6 +27,76 @@ use crate::error::{LocalizedText, RpcError};
 use crate::kind::KindRegistry;
 use crate::push_events::PushEvent;
 
+/// The held-read announce's table (`e2e-agent` only): correlation id → the
+/// signal that tells that one call its request is parked by the nest's
+/// rpc-hold hook, so its caller's deadline backstop no longer ends it
+/// (`docs/goal/architecture/e2e-latency-independent-assertions.md`
+/// § The convention, *The held-read announce*). An entry lives from the
+/// request's enqueue until its Reply, its Cancel, the announce itself, or the
+/// driver's exit — the same lifetime as the call's pending entry.
+#[cfg(feature = "e2e-agent")]
+type HeldTable = Arc<StdMutex<HashMap<u64, oneshot::Sender<()>>>>;
+
+/// Remove `correlation_id`'s held signal, if any — every way a call ends.
+#[cfg(feature = "e2e-agent")]
+fn forget_held(held: &HeldTable, correlation_id: u64) {
+    held.lock()
+        .expect("held table mutex poisoned")
+        .remove(&correlation_id);
+}
+
+/// The driver's half of the announce: `true` when `push` was the test-only
+/// `fauna.test.rpc_held` and has been consumed — the call it names, if still
+/// pending, is marked held — so it must never reach the push broadcast.
+#[cfg(feature = "e2e-agent")]
+fn consume_held_announce(held: &HeldTable, push: &crate::envelope::Push) -> bool {
+    if push.kind != crate::push_events::RPC_HELD_PUSH_KIND {
+        return false;
+    }
+    let announced = crate::codec::encode_canonical(&push.payload)
+        .ok()
+        .and_then(|b| fauna_cbor::decode_strict::<crate::push_events::RpcHeldPayload>(&b).ok());
+    // An announce for a call this side no longer has (already answered,
+    // cancelled, or never ours) is dropped: nothing to mark.
+    if let Some(payload) = announced
+        && let Some(signal) = held
+            .lock()
+            .expect("held table mutex poisoned")
+            .remove(&payload.correlation_id)
+    {
+        let _ = signal.send(());
+    }
+    true
+}
+
+/// The caller's deadline backstop, made held-aware (`e2e-agent` only): it
+/// resolves when `budget` has elapsed AND the call has not been announced
+/// held. Once held, a call has no client-side deadline — it ends by its Reply,
+/// by the connection closing, or by its caller dropping it, exactly as any
+/// call does. `held` arriving in the same instant as the budget counts as
+/// held: the announce was already on this side.
+#[cfg(feature = "e2e-agent")]
+async fn held_aware_backstop<Budget>(budget: Budget, held: Option<oneshot::Receiver<()>>)
+where
+    Budget: Future<Output = ()>,
+{
+    let Some(mut held) = held else {
+        return budget.await;
+    };
+    let budget = pin!(budget);
+    match select(budget, &mut held).await {
+        Either::Left(((), _)) => {
+            if held.try_recv().is_ok() {
+                std::future::pending::<()>().await;
+            }
+        }
+        Either::Right((Ok(()), _)) => std::future::pending::<()>().await,
+        // The signal was dropped unsent — the call ended some other way, or
+        // the driver exited — so the call was never held: the budget rules.
+        Either::Right((Err(_), budget)) => budget.await,
+    }
+}
+
 /// Result of a request; either a typed Reply payload or an error.
 pub type RpcResult = Result<Value, RpcError>;
 
@@ -81,6 +151,10 @@ pub struct RpcCall {
     correlation_id: u64,
     cancel_tx: mpsc::UnboundedSender<u64>,
     armed: bool,
+    /// Fires once if the nest announces this call held (`e2e-agent` only;
+    /// [`HeldTable`]).
+    #[cfg(feature = "e2e-agent")]
+    held_rx: Option<oneshot::Receiver<()>>,
 }
 
 impl RpcCall {
@@ -140,6 +214,9 @@ pub struct RpcDispatcher {
     kind_registry: OnceLock<KindRegistry>,
     /// This connection's process-unique number ([`Self::connection_id`]).
     connection_id: u64,
+    /// The held-read announce's per-call signals (`e2e-agent` only).
+    #[cfg(feature = "e2e-agent")]
+    held: HeldTable,
 }
 
 /// The mint behind [`RpcDispatcher::connection_id`]: one process-wide counter,
@@ -203,6 +280,11 @@ impl RpcDispatcher {
         let push_send = push_tx.clone();
         let pending_write = Arc::clone(&pending);
         let pending_read = Arc::clone(&pending);
+        #[cfg(feature = "e2e-agent")]
+        let held: HeldTable = Arc::new(StdMutex::new(HashMap::new()));
+        #[cfg(feature = "e2e-agent")]
+        let (held_write, held_read, held_exit) =
+            (Arc::clone(&held), Arc::clone(&held), Arc::clone(&held));
         let driver = async move {
             let (mut sink, mut stream) = stream.split();
 
@@ -268,6 +350,8 @@ impl RpcDispatcher {
                     }
                     if let Some(corr) = cancelled {
                         pending_write.lock().await.remove(&corr);
+                        #[cfg(feature = "e2e-agent")]
+                        forget_held(&held_write, corr);
                     }
                 }
             };
@@ -283,6 +367,8 @@ impl RpcDispatcher {
                             };
                             match frame {
                                 Frame::Reply(reply) => {
+                                    #[cfg(feature = "e2e-agent")]
+                                    forget_held(&held_read, reply.correlation_id);
                                     if let Some(sender) =
                                         pending_read.lock().await.remove(&reply.correlation_id)
                                     {
@@ -313,6 +399,12 @@ impl RpcDispatcher {
                                     }
                                 }
                                 Frame::Push(push) => {
+                                    // Test-only: the held-read announce is the
+                                    // driver's own, never the app's.
+                                    #[cfg(feature = "e2e-agent")]
+                                    if consume_held_announce(&held_read, &push) {
+                                        continue;
+                                    }
                                     let event = PushEvent::from_push(&push.kind, push.payload);
                                     let _ = push_send.send(event);
                                 }
@@ -353,6 +445,8 @@ impl RpcDispatcher {
             select(write_half, read_half).await;
 
             // Clean up: resolve all pending with disconnected error.
+            #[cfg(feature = "e2e-agent")]
+            held_exit.lock().expect("held table mutex poisoned").clear();
             let mut p = pending_recv.lock().await;
             for (_, sender) in p.drain() {
                 let _ = sender.send(Err(RpcError::new(
@@ -373,6 +467,8 @@ impl RpcDispatcher {
                 inbound_cancel_rx: StdMutex::new(Some(inbound_cancel_rx)),
                 kind_registry: OnceLock::new(),
                 connection_id: NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed),
+                #[cfg(feature = "e2e-agent")]
+                held,
             },
             driver,
         )
@@ -491,6 +587,17 @@ impl RpcDispatcher {
         let correlation_id = self.next_corr_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(correlation_id, tx);
+        // Registered BEFORE the frame can reach the wire, so an announce can
+        // never arrive for a call this side does not know yet.
+        #[cfg(feature = "e2e-agent")]
+        let held_rx = {
+            let (held_tx, held_rx) = oneshot::channel();
+            self.held
+                .lock()
+                .expect("held table mutex poisoned")
+                .insert(correlation_id, held_tx);
+            held_rx
+        };
 
         let req = Request {
             ty: Request::TYPE,
@@ -510,6 +617,8 @@ impl RpcDispatcher {
         };
         if let Some(err) = failure {
             self.pending.lock().await.remove(&correlation_id);
+            #[cfg(feature = "e2e-agent")]
+            forget_held(&self.held, correlation_id);
             return Err(err);
         }
         Ok(RpcCall {
@@ -517,6 +626,8 @@ impl RpcDispatcher {
             correlation_id,
             cancel_tx: self.cancel_tx.clone(),
             armed: true,
+            #[cfg(feature = "e2e-agent")]
+            held_rx: Some(held_rx),
         })
     }
 
@@ -603,6 +714,15 @@ impl RpcDispatcher {
             )
             .await
             .map_err(TypedRequestError::Dispatch)?;
+
+        // Test-only: a call the nest announces held has no client-side
+        // deadline from then on (`held_aware_backstop`) — the held-read
+        // announce, compiled into `e2e-agent` builds alone (convention 15).
+        #[cfg(feature = "e2e-agent")]
+        let mut call = call;
+        #[cfg(feature = "e2e-agent")]
+        let budget = held_aware_backstop(budget, call.held_rx.take());
+        let budget = pin!(budget);
 
         // Race the reply against what is left of the caller's budget. Losing
         // the race drops the reply future, so `RpcCall::drop` sends the Cancel
@@ -1623,5 +1743,303 @@ mod tests {
             .expect("a stalled write must not stop the driver reading its socket")
             .expect("the reply is a success");
         assert_eq!(result, Value::String("ok".into()));
+    }
+
+    // ── The held-read announce (`e2e-latency-independent-assertions.md`
+    // § The convention, *The held-read announce*) ─────────────────────────
+    //
+    // Every test below orders the client's view of the wire by a MARKER push
+    // sent after the frames under test: the driver routes inbound frames in
+    // order, so once the marker reaches a push subscriber every frame sent
+    // before it has been handled — a causal barrier, never a settle-sleep.
+    // The caller's backstop is a oneshot the test fires by hand, so the
+    // "deadline elapsed" moment is a step of the test, not a wall-clock race.
+
+    /// A Push frame of `kind` carrying `payload`.
+    fn push_frame<P: serde::Serialize>(kind: &str, payload: &P, seq: u64) -> Bytes {
+        encode_frame(&Frame::Push(Push {
+            ty: Push::TYPE,
+            kind: kind.into(),
+            payload: fauna_cbor::decode_strict::<Value>(
+                &crate::codec::encode_canonical(payload).unwrap(),
+            )
+            .unwrap(),
+            seq,
+        }))
+        .unwrap()
+    }
+
+    /// The announce for `correlation_id`.
+    fn held_announce(correlation_id: u64, seq: u64) -> Bytes {
+        push_frame(
+            crate::push_events::RPC_HELD_PUSH_KIND,
+            &crate::push_events::RpcHeldPayload {
+                correlation_id,
+                extra: Default::default(),
+            },
+            seq,
+        )
+    }
+
+    const MARKER_KIND: &str = "com.example.test_marker";
+
+    /// Send the marker and wait until the client has routed it — so every
+    /// frame sent before it has been handled. Returns every push event the
+    /// subscriber saw up to and including the marker.
+    async fn barrier(
+        srv_sink: &mut (impl futures_util::Sink<Bytes, Error = std::convert::Infallible> + Unpin),
+        pushes: &mut broadcast::Receiver<PushEvent>,
+        seq: u64,
+    ) -> Vec<PushEvent> {
+        srv_sink
+            .send(push_frame(MARKER_KIND, &Value::Null, seq))
+            .await
+            .expect("the client half is open");
+        let mut seen = Vec::new();
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(10), pushes.recv())
+                .await
+                .expect("the marker push must reach the subscriber")
+                .expect("the broadcast stays open");
+            let is_marker = event.kind() == MARKER_KIND;
+            seen.push(event);
+            if is_marker {
+                return seen;
+            }
+        }
+    }
+
+    /// Issue one typed request on its own task, whose backstop fires when the
+    /// returned sender is used; return the task, the trigger and the
+    /// correlation id the server read off the wire.
+    async fn issue_with_manual_backstop(
+        dispatcher: &Arc<RpcDispatcher>,
+        srv_stream: &mut (
+                 impl futures_util::Stream<Item = Result<Bytes, std::convert::Infallible>> + Unpin
+             ),
+    ) -> (
+        tokio::task::JoinHandle<Result<Value, TypedRequestError>>,
+        oneshot::Sender<()>,
+        u64,
+    ) {
+        let (fire, fired) = oneshot::channel::<()>();
+        let d = Arc::clone(dispatcher);
+        let task = tokio::spawn(async move {
+            d.request_typed::<_, Value, _>(
+                "fauna.protocol.echo",
+                [3u8; 16],
+                Value::Null,
+                Duration::from_secs(5),
+                async move {
+                    let _ = fired.await;
+                },
+            )
+            .await
+        });
+        let bytes = tokio::time::timeout(Duration::from_secs(10), srv_stream.next())
+            .await
+            .expect("the Request reaches the wire")
+            .expect("stream open")
+            .expect("infallible transport");
+        let corr = match decode_frame(&bytes).unwrap() {
+            Frame::Request(req) => req.correlation_id,
+            other => panic!("expected the Request, got {other:?}"),
+        };
+        (task, fire, corr)
+    }
+
+    /// Give a spawned task every chance to run on this current-thread runtime
+    /// — a held call must still be pending afterwards.
+    #[cfg(feature = "e2e-agent")]
+    async fn let_tasks_run() {
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// (a) **A held call outlives its backstop** and returns the Reply that
+    /// arrives later.
+    #[cfg(feature = "e2e-agent")]
+    #[tokio::test]
+    async fn a_held_call_outlives_its_backstop_and_returns_the_late_reply() {
+        let (client, server) = make_pair();
+        let (dispatcher, driver) = RpcDispatcher::new(client);
+        let dispatcher = Arc::new(dispatcher);
+        tokio::spawn(driver);
+        let mut pushes = dispatcher.push_subscriber();
+        let (mut srv_sink, mut srv_stream) = server.split();
+
+        let (task, fire, corr) = issue_with_manual_backstop(&dispatcher, &mut srv_stream).await;
+        srv_sink.send(held_announce(corr, 1)).await.unwrap();
+        barrier(&mut srv_sink, &mut pushes, 2).await;
+
+        fire.send(()).expect("the backstop is still waiting");
+        let_tasks_run().await;
+        assert!(
+            !task.is_finished(),
+            "a held call must not end when its backstop elapses"
+        );
+
+        srv_sink
+            .send(
+                encode_frame(&Frame::Reply(Reply {
+                    ty: Reply::TYPE,
+                    correlation_id: corr,
+                    payload: Value::String("late".into()),
+                    ok: true,
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("the late Reply ends the held call")
+            .unwrap()
+            .expect("the Reply is a success");
+        assert_eq!(reply, Value::String("late".into()));
+    }
+
+    /// (b) **An un-held call still times out** at its backstop and sends its
+    /// `Cancel` — the announce changes nothing for a call it did not name.
+    #[tokio::test]
+    async fn an_unheld_call_still_times_out_and_cancels() {
+        let (client, server) = make_pair();
+        let (dispatcher, driver) = RpcDispatcher::new(client);
+        let dispatcher = Arc::new(dispatcher);
+        tokio::spawn(driver);
+        let (_srv_sink, mut srv_stream) = server.split();
+
+        let (task, fire, corr) = issue_with_manual_backstop(&dispatcher, &mut srv_stream).await;
+        fire.send(()).unwrap();
+        let err = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("an un-held call ends at its backstop")
+            .unwrap()
+            .expect_err("no reply was sent");
+        assert!(matches!(err, TypedRequestError::Timeout), "got {err:?}");
+        let bytes = tokio::time::timeout(Duration::from_secs(10), srv_stream.next())
+            .await
+            .expect("the Cancel reaches the wire")
+            .unwrap()
+            .unwrap();
+        match decode_frame(&bytes).unwrap() {
+            Frame::Cancel(c) => assert_eq!(c.correlation_id, corr),
+            other => panic!("expected the Cancel, got {other:?}"),
+        }
+    }
+
+    /// (c) **An announce naming a call this side does not have is ignored**:
+    /// the real call still times out.
+    #[cfg(feature = "e2e-agent")]
+    #[tokio::test]
+    async fn an_announce_for_an_unknown_call_is_ignored() {
+        let (client, server) = make_pair();
+        let (dispatcher, driver) = RpcDispatcher::new(client);
+        let dispatcher = Arc::new(dispatcher);
+        tokio::spawn(driver);
+        let mut pushes = dispatcher.push_subscriber();
+        let (mut srv_sink, mut srv_stream) = server.split();
+
+        let (task, fire, corr) = issue_with_manual_backstop(&dispatcher, &mut srv_stream).await;
+        srv_sink.send(held_announce(corr + 999, 1)).await.unwrap();
+        barrier(&mut srv_sink, &mut pushes, 2).await;
+
+        fire.send(()).unwrap();
+        let err = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("the call is not held, so its backstop ends it")
+            .unwrap()
+            .expect_err("no reply was sent");
+        assert!(matches!(err, TypedRequestError::Timeout), "got {err:?}");
+    }
+
+    /// (d) **The announce is never forwarded** to the app's push receiver,
+    /// whether or not it names a pending call.
+    #[cfg(feature = "e2e-agent")]
+    #[tokio::test]
+    async fn the_announce_is_never_forwarded_to_the_push_receiver() {
+        let (client, server) = make_pair();
+        let (dispatcher, driver) = RpcDispatcher::new(client);
+        let dispatcher = Arc::new(dispatcher);
+        tokio::spawn(driver);
+        let mut pushes = dispatcher.push_subscriber();
+        let (mut srv_sink, mut srv_stream) = server.split();
+
+        let (_task, _fire, corr) = issue_with_manual_backstop(&dispatcher, &mut srv_stream).await;
+        srv_sink.send(held_announce(corr, 1)).await.unwrap();
+        srv_sink.send(held_announce(corr + 999, 2)).await.unwrap();
+        let seen = barrier(&mut srv_sink, &mut pushes, 3).await;
+        let kinds: Vec<&str> = seen.iter().map(PushEvent::kind).collect();
+        assert_eq!(
+            kinds,
+            vec![MARKER_KIND],
+            "only the marker may reach the app; the announce is the driver's own"
+        );
+    }
+
+    /// (e) **A held call still fails when the connection closes** — held
+    /// removes the client's deadline, never the transport's end.
+    #[cfg(feature = "e2e-agent")]
+    #[tokio::test]
+    async fn a_held_call_fails_when_the_connection_closes() {
+        let (client, server) = make_pair();
+        let (dispatcher, driver) = RpcDispatcher::new(client);
+        let dispatcher = Arc::new(dispatcher);
+        tokio::spawn(driver);
+        let mut pushes = dispatcher.push_subscriber();
+        let (mut srv_sink, mut srv_stream) = server.split();
+
+        let (task, fire, corr) = issue_with_manual_backstop(&dispatcher, &mut srv_stream).await;
+        srv_sink.send(held_announce(corr, 1)).await.unwrap();
+        barrier(&mut srv_sink, &mut pushes, 2).await;
+        fire.send(()).unwrap();
+        let_tasks_run().await;
+        assert!(!task.is_finished(), "held: the backstop does not end it");
+
+        drop(srv_sink);
+        drop(srv_stream);
+        let err = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("a closed connection ends even a held call")
+            .unwrap()
+            .expect_err("no reply was sent");
+        assert!(
+            matches!(err, TypedRequestError::Disconnected),
+            "got {err:?}"
+        );
+    }
+
+    /// **Without `e2e-agent` the kind means nothing to the dispatcher**
+    /// (convention 15): the announce reaches the push receiver as an unknown
+    /// kind, like any kind a client does not know, and the call it names
+    /// still ends at its backstop.
+    #[cfg(not(feature = "e2e-agent"))]
+    #[tokio::test]
+    async fn without_e2e_agent_the_announce_is_an_unknown_push_and_holds_nothing() {
+        let (client, server) = make_pair();
+        let (dispatcher, driver) = RpcDispatcher::new(client);
+        let dispatcher = Arc::new(dispatcher);
+        tokio::spawn(driver);
+        let mut pushes = dispatcher.push_subscriber();
+        let (mut srv_sink, mut srv_stream) = server.split();
+
+        let (task, fire, corr) = issue_with_manual_backstop(&dispatcher, &mut srv_stream).await;
+        srv_sink.send(held_announce(corr, 1)).await.unwrap();
+        let seen = barrier(&mut srv_sink, &mut pushes, 2).await;
+        assert!(
+            matches!(
+                &seen[0],
+                PushEvent::Unknown(u) if u.kind == crate::push_events::RPC_HELD_PUSH_KIND
+            ),
+            "a build without the feature decodes the announce as an unknown kind, got {seen:?}"
+        );
+        fire.send(()).unwrap();
+        let err = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("nothing is held without the feature")
+            .unwrap()
+            .expect_err("no reply was sent");
+        assert!(matches!(err, TypedRequestError::Timeout), "got {err:?}");
     }
 }

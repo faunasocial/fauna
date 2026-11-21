@@ -293,3 +293,38 @@ pub fn web_tokened_url(origin: String, path: String, token: String) -> String {
 pub fn web_disabled_reason_text(reason: Option<SiteLinkDisabledReason>) -> LocalizedText {
     fauna_client_web::disabled_reason_text(reason)
 }
+
+/// `fauna_client_web::subdomain_toggle_possibility` → the `Possibility`
+/// `web-settings-subdomain-toggle` paints from (`docs/goal/ui/README.md`
+/// § Offer only what is possible): not enabled before the read resolves,
+/// absent on a nest with no serving domain, blocked with the step on no or a
+/// reserved handle; switching off is always possible. `view` is
+/// [`web_subdomain_view`]'s answer, or `None` before the page's read lands.
+/// The native twin of the wasm `webSubdomainTogglePossibility`.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn web_subdomain_toggle_possibility(
+    read: fauna_core::possibility::ReadState,
+    view: Option<SubdomainView>,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_web::subdomain_toggle_possibility(read, view.as_ref())
+}
+
+/// `fauna_client_web::site_link_copy_possibility` → the `Possibility` both
+/// published-post copy buttons paint from, over a [`web_site_link_view`]
+/// answer. The native twin of the wasm `webSiteLinkCopyPossibility`.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn web_site_link_copy_possibility(link: SiteLinkView) -> fauna_core::possibility::Possibility {
+    fauna_client_web::site_link_copy_possibility(&link)
+}
+
+/// `fauna_client_web::apex_info_text` → the `admin-web-apex-info` line:
+/// where the apex serves, or why there is no address — never a composed
+/// `https:///` from an empty serving domain. `domain` is
+/// [`FfiWebClient::serving_domain`]'s answer. The native twin of the wasm
+/// `webApexInfoText`.
+#[uniffi::export]
+pub fn web_apex_info_text(domain: String) -> LocalizedText {
+    fauna_client_web::apex_info_text(&domain)
+}

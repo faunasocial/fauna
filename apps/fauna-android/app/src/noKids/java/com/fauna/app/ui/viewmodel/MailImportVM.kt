@@ -193,7 +193,12 @@ class MailImportVM @Inject constructor(
      * the snapshot's own `error`, which [publish] mirrors.
      */
     private fun dispatch(vararg actions: MailImportAction) {
-        val m = machine ?: return
+        // Rule 7 (ui/README.md § Offer only what is possible): a gesture whose
+        // machine was never built says so on `error-message`, never silently.
+        val m = machine ?: run {
+            errorMessage.value = api.mailUnbuiltRefusal()
+            return
+        }
         // The shared answer to "does this dispatch oblige the app to spawn the
         // run" — Start, Resume and the rebuilt-mailbox restart.
         val shouldRun = actions.any { importActionStartsRun(it) }

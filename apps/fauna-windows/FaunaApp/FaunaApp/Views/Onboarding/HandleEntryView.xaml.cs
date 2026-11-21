@@ -33,7 +33,7 @@ public sealed partial class HandleEntryView : UserControl
         // The VM raises PropertyChanged with empty PropertyName on every
         // observer tick from the OnboardingMachine; Bindings.Update()
         // re-runs all x:Bind expressions so HandleCheckMessage,
-        // HandleCheckEnabled, HandleControlCheckboxVisible, and
+        // HandleCheckEnabled and
         // HandleCheckContinueEnabled refresh as the snapshot evolves.
         vm.PropertyChanged += (_, _) =>
         {

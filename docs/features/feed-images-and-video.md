@@ -12,8 +12,9 @@ absences:
 ## What a user gets
 
 Attach a picture or a video and it shows in the post: pictures inline with a
-tap-to-enlarge view, videos as a thumbnail that plays in place when you tap it
-(never on its own). Pictures carry their provenance badge when the file has one.
+tap-to-enlarge view, videos as a thumbnail that plays when you tap it, never on
+its own — right there in the post, or, in the terminal app, in your system's own
+player. Pictures carry their provenance badge when the file has one.
 The hidden tags a camera writes into a photo — where it was taken, when, on what
 — are removed on your own device, before the picture is ever sent. A picture
 linked from somewhere else on the internet stays blocked until you choose to
@@ -81,11 +82,11 @@ Stamped 2026-11-07 at 6a0ded1015.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+646e0070 standalone |
+| web | ✅ full | 0.1.5-dev+646e0070 standalone |
 | linux | ✅ full | 0.1.7-dev+c0e2aa0e standalone |
 | windows | ⚠ partial | |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ⚠ partial | 0.1.5-dev+79c80402 standalone |
+| ios | ✅ full | 0.1.5-dev+79c80402 standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5 docker |
 | android-kids | — absent | |
@@ -123,6 +124,6 @@ Stamped 2026-11-07 at 6a0ded1015.
 | 18 | app | `tests/e2e-unified/tests/test_feed_media_items.py::test_every_media_item_paints_in_order_with_its_alt` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 19 | app | `tests/e2e-unified/tests/test_feed_video_playback.py::test_a_sealed_video_plays_after_its_post_unlocks` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed |
 | 19 | app | `tests/e2e-unified/tests/test_tui_feed_video_external_open.py::test_a_sealed_video_hands_off_once_its_post_unlocks` | tui (linux): passed |
-| 20 | app | `tests/e2e-unified/tests/test_federated_follow_cross_nest.py::test_a_reader_follows_an_author_on_another_nest_and_their_posts_reach_the_readers_feed` | linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
-| 20 | app | `tests/e2e-unified/tests/test_profile_remote_read_cross_nest.py::test_a_remote_actors_profile_shows_their_name_only_once_they_open_it` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 20 | app | `tests/e2e-unified/tests/test_federated_follow_cross_nest.py::test_a_reader_follows_an_author_on_another_nest_and_their_posts_reach_the_readers_feed` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 20 | app | `tests/e2e-unified/tests/test_profile_remote_read_cross_nest.py::test_a_remote_actors_profile_shows_their_name_only_once_they_open_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

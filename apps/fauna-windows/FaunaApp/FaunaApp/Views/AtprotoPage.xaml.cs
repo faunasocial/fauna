@@ -10,6 +10,7 @@ using FaunaApp.Controls;
 using FaunaApp.Core.Models;
 using FaunaApp.Core.Services;
 using FaunaApp.Core.ViewModels;
+using FaunaApp.Helpers;
 using uniffi.fauna_atproto_settings_machine;
 
 namespace FaunaApp.Views;
@@ -224,6 +225,12 @@ public sealed partial class AtprotoPage : Page, IAsyncLoadedPage
         _applying = true;
         try
         {
+            // ── A machine that failed to build offers nothing (rule 7): one line in
+            //    place of every control. ──
+            PageUnavailableText.Visibility = Vis(_vm.Unavailable);
+            PageBody.Visibility = Vis(!_vm.Unavailable);
+            if (_vm.Unavailable) return;
+
             // ── Recovery-fork contest ceremony — leads the page. ──
             ContestCard.Visibility = Vis(_vm.ShowContestCard);
             AutomationProperties.SetHelpText(ContestCard, _vm.ContestState);
@@ -243,16 +250,28 @@ public sealed partial class AtprotoPage : Page, IAsyncLoadedPage
 
             // ── Selector. The container's `state` attr IS the level, for the e2e. ──
             AutomationProperties.SetHelpText(DepthSelector, _vm.Level);
-            // Greyed with a reason, never hidden. A rung the user is already AT stays
-            // enabled so a step-down survives the domain going non-public, and
-            // Off/Linked are never gated (§ Reveal/greying rules) — the VM decides
-            // all of that per rung; this just applies it.
+            // Greyed with a reason, never hidden. Each rung is pressable only while the
+            // machine's rung_possibility says so — nothing before the first status read,
+            // the hosted gate's reason on entering a gated rung, a rung the user is
+            // already AT kept so a step-down survives (§ Reveal/greying rules). The VM
+            // reads the answers; this just applies them.
             foreach (var rung in _vm.DepthRungs)
             {
                 if (!_depthRungButtons.TryGetValue(rung.Level, out var radio)) continue;
                 radio.IsChecked = rung.Checked;
                 radio.IsEnabled = rung.Enabled;
+                ToolTipService.SetToolTip(radio, rung.Reason);
                 AutomationProperties.SetHelpText(radio, rung.GateMarker);
+            }
+            RungReasonsHost.Children.Clear();
+            foreach (var line in _vm.RungReasonLines)
+            {
+                RungReasonsHost.Children.Add(new TextBlock
+                {
+                    Text = line,
+                    TextWrapping = TextWrapping.Wrap,
+                    Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
+                });
             }
 
             GateReasonText.Text = _vm.GateReason;
@@ -330,6 +349,10 @@ public sealed partial class AtprotoPage : Page, IAsyncLoadedPage
             DelegationEmptyText.Visibility = Vis(!_vm.ShowDelegationRow);
             DelegationRevokeBtn.Visibility = Vis(_vm.ShowDelegationRow);
             DelegationAuthorizeBtn.Content = _vm.DelegationAuthorizeText;
+            // Both shapes (grant and renew) ask the machine's authorize_possibility:
+            // blocked with the no-identity reason, painted beneath it, on an app that
+            // holds no signing identity (rule 4) — never a form that fails at submit.
+            DelegationAuthorizeBtn.ApplyPossibility(_vm.AuthorizeAnswer(), DelegationAuthorizeReasonText);
             DelegationScopeText.Text = _vm.DelegationScope;
             DelegationLastsUntilText.Text = _vm.DelegationLastsUntil;
             DelegationStatusText.Text = _vm.DelegationStatus;

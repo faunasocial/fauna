@@ -251,6 +251,30 @@ pub struct ResyncRequiredPayload {
     pub extra: BTreeMap<String, Value>,
 }
 
+/// `fauna.test.rpc_held` — **test-only**: the nest's rpc-hold hook has parked
+/// the request with this `correlation_id` on this connection, so its caller
+/// stops that one call's client-side deadline backstop
+/// (`docs/goal/architecture/e2e-latency-independent-assertions.md`
+/// § The convention, *The held-read announce*).
+///
+/// Both halves are compiled out of every production build (convention 15):
+/// the nest sends it only under its `test-hooks` feature, and the shared
+/// dispatcher consumes it only under this crate's `e2e-agent` feature. A
+/// build without that feature never names the kind beyond this constant: the
+/// push decodes as [`Unknown`] like any kind it does not know, which is why
+/// the carrier is a Push kind and never a new frame type. Deliberately no
+/// [`PushEvent`] variant — an app is never handed it.
+pub const RPC_HELD_PUSH_KIND: &str = "fauna.test.rpc_held";
+
+/// The payload of [`RPC_HELD_PUSH_KIND`]: the correlation id of the parked
+/// request, as the caller allocated it on this connection.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RpcHeldPayload {
+    pub correlation_id: u64,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
 /// `fauna.mail.received` — a per-record mail arrival for the recipient
 /// actor. The per-kind arrival push the `SegmentsChangedPayload` doc
 /// below refers to (segment-lifecycle events ≠ per-record arrivals).

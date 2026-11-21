@@ -318,6 +318,11 @@ pub struct SetPullOutcome {
     /// § Wormability walk, rule 8 — the per-operation rule). The first such
     /// verdict, for the surface's "limited by …" reading.
     pub capped: Option<fauna_core::feature_gate::FeatureVerdict>,
+    /// Bodies not taken from this peer because their manifest is a paged root
+    /// the peer did not serve with its pages ([`SpoolSpend::paged_unservable`];
+    /// `file-sync.md` § Paged manifests → *Compatibility*). Their rows land
+    /// without the body and the nest path serves it — counted, never silent.
+    pub paged_unservable: u32,
     /// The pass's pull from this peer ended in an error. The row is kept, with
     /// the counts this pass moved before the error (`p2p.md` § Cross-user
     /// shared-set transfer → *The transfer row of a pull that failed*): one
@@ -786,6 +791,15 @@ async fn pull_into(
         })
         .await?;
         outcome.relay_deferred += spent.deferred;
+        if spent.paged_unservable > 0 {
+            tracing::warn!(
+                folder = %fauna_core::log_redact::log_folder_name(&spec.folder),
+                peer = %&peer_hex[..16],
+                bodies = spent.paged_unservable,
+                "share pump: the peer served a paged root without its pages; those rows land without the body"
+            );
+        }
+        outcome.paged_unservable += spent.paged_unservable;
         // A file the plan's cap dropped is a PERMANENT miss for the ingest,
         // or it would hold the cursor below the row and every later pass
         // would re-list the page the cap refuses again (`spool_capped_path`).
@@ -1017,6 +1031,61 @@ pub struct SpoolSpend {
     /// [`SetPullOutcome::relay_deferred`]; their rows land without the body,
     /// exactly as a relayed page's do.
     pub deferred: u32,
+    /// Planned bodies whose manifest is a paged root the peer did not serve
+    /// with its pages (`file-sync.md` § Paged manifests → *Compatibility*:
+    /// a root travels with its pages, or the file does not travel). Counted
+    /// into [`SetPullOutcome::paged_unservable`]; their rows land without the
+    /// body, left to the nest path.
+    pub paged_unservable: u32,
+}
+
+/// A [`fauna_core::file_download::BlobFetcher`] that counts the manifest and
+/// page bodies passing through it, so the spool charges every one that
+/// arrived — those the walk then refuses included — and can tell a root whose
+/// pages failed (more than one manifest fetch) from a root that failed.
+struct MeteredManifests<'a> {
+    inner: &'a dyn fauna_core::file_download::BlobFetcher,
+    bytes: std::sync::atomic::AtomicU64,
+    fetches: std::sync::atomic::AtomicU32,
+}
+
+impl<'a> MeteredManifests<'a> {
+    fn new(inner: &'a dyn fauna_core::file_download::BlobFetcher) -> Self {
+        Self {
+            inner,
+            bytes: Default::default(),
+            fetches: Default::default(),
+        }
+    }
+
+    fn bytes(&self) -> u64 {
+        self.bytes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn fetches(&self) -> u32 {
+        self.fetches.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl fauna_core::file_download::BlobFetcher for MeteredManifests<'_> {
+    async fn fetch_manifest(&self, hash: &ContentHash) -> Result<Vec<u8>> {
+        self.fetches
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let bytes = self.inner.fetch_manifest(hash).await?;
+        self.bytes
+            .fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        Ok(bytes)
+    }
+
+    async fn fetch_chunks(
+        &self,
+        store_keys: &[ContentHash],
+        relative_path: &str,
+    ) -> Result<Vec<Vec<u8>>> {
+        self.inner.fetch_chunks(store_keys, relative_path).await
+    }
 }
 
 /// Pre-fetch the planned manifest + chunk bodies into `spool`, returning what
@@ -1064,42 +1133,46 @@ pub(crate) async fn spool_planned(
             spent.deferred = spent.deferred.saturating_add(1);
             continue;
         }
-        let manifest_bytes = match fetcher.fetch_manifest(&entry.manifest_hash).await {
-            Ok(b) => b,
+        // The manifest through the one keyless walk (`file-sync.md` § Paged
+        // manifests): the bytes checked against the planned address before
+        // they are decoded — so a
+        // peer cannot fill the scratch with a manifest that is not the one
+        // planned — and a paged root's pages fetched by their own addresses,
+        // each checked against what the root names. Every manifest and page
+        // body that arrived is spend, whether or not it then checks out.
+        let metered = MeteredManifests::new(fetcher);
+        let fetched =
+            fauna_core::file_download::fetch_manifest_blobs(&metered, &entry.manifest_hash).await;
+        spent.bytes = spent.bytes.saturating_add(metered.bytes());
+        let blobs = match fetched {
+            Ok(blobs) => blobs,
             Err(e) => {
+                if metered.fetches() > 1 {
+                    // The root checked out and named pages, and the peer did
+                    // not serve them whole: its pages do not travel with it,
+                    // so the file is not taken from this peer (its row lands
+                    // without the body; the nest path serves it).
+                    spent.paged_unservable = spent.paged_unservable.saturating_add(1);
+                }
                 tracing::debug!(path = %fauna_core::log_redact::log_path(&entry.context), error = %e, "spool: manifest unavailable");
                 continue;
             }
         };
-        spent.bytes = spent.bytes.saturating_add(manifest_bytes.len() as u64);
-        // Address-vs-bytes, as `file_download::fetch_manifest` does. This call
-        // site reaches the trait method directly rather than through the walk,
-        // so it does not inherit that check: without this, a nest could fill
-        // the scratch with a manifest that is not the one planned. The peer
-        // would refuse it at its own transfer boundary, so the harm is a
-        // poisoned spool and wasted transfer rather than a bad read — but it is
-        // the same root, and it is cheaper to refuse here.
-        if fauna_core::data::ContentHash::of_raw(&manifest_bytes) != entry.manifest_hash {
-            tracing::debug!(
-                path = %fauna_core::log_redact::log_path(&entry.context),
-                "spool: manifest bytes do not hash to the planned address"
-            );
-            continue;
-        }
-        let Ok(manifest) = fauna_core::encoding::canonical_decode::<fauna_core::chunk::ChunkManifest>(
-            &manifest_bytes,
-        ) else {
-            continue;
-        };
-        let store_keys = manifest.store_keys();
+        let manifest_wire_len = blobs
+            .pages
+            .iter()
+            .fold(blobs.manifest_bytes.len() as u64, |acc, (_, b)| {
+                acc.saturating_add(b.len() as u64)
+            });
+        let (manifest, store_keys) = (&blobs.manifest, &blobs.store_keys);
         let bodies = match cap {
-            None => fetcher.fetch_chunks(&store_keys, &entry.context).await,
+            None => fetcher.fetch_chunks(store_keys, &entry.context).await,
             Some(cap) => {
                 match fetch_within_cap(
                     fetcher,
-                    &store_keys,
+                    store_keys,
                     entry,
-                    manifest_bytes.len() as u64,
+                    manifest_wire_len,
                     manifest.total_size,
                     cap,
                     &mut spent,
@@ -1139,10 +1212,15 @@ pub(crate) async fn spool_planned(
         // the next pass skips the refill on, so it must mean every body
         // under it landed whole (`file-sync.md` § *A failed change must not
         // strand the device* — a torn write never rests under the full name).
+        // A paged root's pages rest beside it under their own addresses, where
+        // the ingest's walk asks for them ([`crate::peer_share_store::SpoolFetcher`]).
         for (key, body) in store_keys.iter().zip(bodies) {
             crate::atomic_write::atomic_write_file(&spool_chunk_path(spool, key), &body).await?;
         }
-        crate::atomic_write::atomic_write_file(&manifest_path, &manifest_bytes).await?;
+        for (hash, page) in &blobs.pages {
+            crate::atomic_write::atomic_write_file(&spool_manifest_path(spool, hash), page).await?;
+        }
+        crate::atomic_write::atomic_write_file(&manifest_path, &blobs.manifest_bytes).await?;
     }
     Ok(spent)
 }
@@ -1817,6 +1895,7 @@ mod spool_spend_tests {
                 stored_hashes: None,
                 sealed_hashes: None,
                 min_reader: None,
+                pages: None,
             };
             let manifest_bytes = fauna_core::encoding::canonical_encode(&manifest)
                 .expect("encode manifest")
@@ -2078,6 +2157,7 @@ mod spool_spend_tests {
                 stored_hashes: None,
                 sealed_hashes: None,
                 min_reader: None,
+                pages: None,
             };
             let manifest = fauna_core::encoding::canonical_encode(&manifest)
                 .expect("encode manifest")
@@ -2442,6 +2522,149 @@ mod advertise_tests {
                 .len(),
             2,
             "the floor re-publishes unchanged endpoints (the late joiner's path)"
+        );
+    }
+}
+
+/// The spool carries a paged root's pages (`file-sync.md` § Paged manifests →
+/// *Compatibility*, the share clause): a root travels with its pages, or the
+/// file is not taken from the peer.
+#[cfg(test)]
+mod paged_spool_tests {
+    use super::*;
+
+    /// A peer holding one plaintext file of small chunks whose manifest is a
+    /// paged root under a small rule — and, unless `serve_pages` is off, its
+    /// pages beside it (an older serving peer would not have them).
+    struct PagedPeer {
+        root_hash: ContentHash,
+        blobs: HashMap<ContentHash, Vec<u8>>,
+        pages: Vec<(ContentHash, Vec<u8>)>,
+        chunks: HashMap<ContentHash, Vec<u8>>,
+        content: Vec<u8>,
+        serve_pages: bool,
+    }
+
+    impl PagedPeer {
+        fn new(serve_pages: bool) -> Self {
+            let content: Vec<u8> = (0..24 * 64u32).map(|i| (i % 233) as u8).collect();
+            let bodies: Vec<Vec<u8>> = content.chunks(64).map(<[u8]>::to_vec).collect();
+            let view = fauna_core::chunk::ChunkManifest {
+                file_hash: ContentHash::of_raw(&content),
+                total_size: content.len() as u64,
+                chunk_hashes: bodies.iter().map(|b| ContentHash::of_raw(b)).collect(),
+                chunk_sizes: bodies.iter().map(|b| b.len() as u64).collect(),
+                stored_hashes: None,
+                sealed_hashes: None,
+                min_reader: None,
+                pages: None,
+            };
+            let rule = fauna_core::manifest_paging::PagingRule::with_thresholds(4, 2, 6, 2);
+            let (root, pages) = view.into_wire_parts_with(&rule, None).expect("wire parts");
+            assert!(pages.len() > 1, "the fixture is a paged root");
+            let root_hash = ContentHash::of_raw(&root);
+            let pages: Vec<_> = pages
+                .into_iter()
+                .map(|p| (ContentHash::of_raw(&p), p))
+                .collect();
+            let mut blobs = HashMap::from([(root_hash, root)]);
+            blobs.extend(pages.iter().cloned());
+            Self {
+                root_hash,
+                blobs,
+                pages,
+                chunks: bodies
+                    .into_iter()
+                    .map(|b| (ContentHash::of_raw(&b), b))
+                    .collect(),
+                content,
+                serve_pages,
+            }
+        }
+
+        fn plan(&self) -> Vec<PlannedFetch> {
+            vec![PlannedFetch {
+                manifest_hash: self.root_hash,
+                size: self.content.len() as u64,
+                context: "big/file".to_string(),
+            }]
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl fauna_core::file_download::BlobFetcher for PagedPeer {
+        async fn fetch_manifest(&self, hash: &ContentHash) -> Result<Vec<u8>> {
+            if *hash != self.root_hash && !self.serve_pages {
+                anyhow::bail!("not held here");
+            }
+            self.blobs
+                .get(hash)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("not held here"))
+        }
+
+        async fn fetch_chunks(
+            &self,
+            store_keys: &[ContentHash],
+            _relative_path: &str,
+        ) -> Result<Vec<Vec<u8>>> {
+            Ok(store_keys.iter().map(|k| self.chunks[k].clone()).collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn the_spool_carries_a_paged_roots_pages_and_the_ingest_reads_them_back() {
+        let peer = PagedPeer::new(true);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spent = spool_planned(&peer, &peer.plan(), dir.path(), None, &|| true)
+            .await
+            .expect("spool");
+        assert_eq!((spent.files, spent.paged_unservable), (1, 0));
+        let wire: u64 =
+            peer.blobs.values().map(|b| b.len() as u64).sum::<u64>() + peer.content.len() as u64;
+        assert_eq!(
+            spent.bytes, wire,
+            "the root, every page and every chunk are spend"
+        );
+        for (hash, page) in &peer.pages {
+            assert_eq!(
+                std::fs::read(spool_manifest_path(dir.path(), hash)).unwrap(),
+                *page,
+                "each page rests in the spool under its own address"
+            );
+        }
+        // The ingest's fetcher walks the root over the spool alone.
+        let spool = crate::peer_share_store::SpoolFetcher::new(dir.path().to_path_buf());
+        let blobs = fauna_core::file_download::fetch_manifest_blobs(&spool, &peer.root_hash)
+            .await
+            .expect("the spooled root walks");
+        let bodies = fauna_core::file_download::BlobFetcher::fetch_chunks(
+            &spool,
+            &blobs.store_keys,
+            "big/file",
+        )
+        .await
+        .expect("every chunk spooled");
+        assert_eq!(bodies.concat(), peer.content, "byte-identical");
+    }
+
+    #[tokio::test]
+    async fn a_root_served_without_its_pages_is_not_taken_and_is_counted() {
+        let peer = PagedPeer::new(false);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spent = spool_planned(&peer, &peer.plan(), dir.path(), None, &|| true)
+            .await
+            .expect("spool");
+        assert_eq!((spent.files, spent.paged_unservable), (0, 1));
+        assert_eq!(
+            spent.bytes,
+            peer.blobs[&peer.root_hash].len() as u64,
+            "the root that arrived is spend; no chunk was pulled"
+        );
+        assert!(
+            !spool_manifest_path(dir.path(), &peer.root_hash).exists(),
+            "nothing of the file rests in the spool"
         );
     }
 }

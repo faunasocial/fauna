@@ -14,8 +14,9 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
-use fauna_client_account_runtime::contact_overlays::{StagedSave, save_staged};
+use fauna_client_account_runtime::contact_overlays::{StagedSave, save_possibility, save_staged};
 use fauna_core::contact_overlay::{OverlayEditor, OverlayForm, label_suggestions};
+use fauna_core::possibility::Possibility;
 use fauna_ui_ids as ids;
 
 use crate::async_helper::spawn_with_snapshot;
@@ -31,13 +32,26 @@ struct Section {
     /// Set while [`Section::paint`] writes the fields, so its own writes are
     /// not read back as the user's edits.
     painting: Cell<bool>,
+    /// Whether [`Section::paint_save`]'s wait-for-the-store timer runs.
+    save_poll: Cell<bool>,
     nickname: gtk::Entry,
     notes: gtk::TextView,
     labels: gtk::Box,
     label_input: gtk::Entry,
     /// The completion rows under the add field (`profile-label-suggestion`).
     suggestions: gtk::Box,
+    /// `profile-private-save-button`, painted from [`save_answer`].
+    save_btn: gtk::Button,
     error_label: gtk::Label,
+}
+
+/// `profile-private-save-button`'s answer — the shared
+/// `contact_overlays::save_possibility` over this seat (linux always hosts
+/// the conversations manager) and whether its account store has assembled:
+/// blocked still loading until it has (`profile.md` § Errors & edge cases,
+/// *Unread state is not possible*).
+fn save_answer() -> Possibility {
+    save_possibility(true, crate::account_runtime::handle().is_some())
 }
 
 impl Section {
@@ -60,6 +74,7 @@ impl Section {
             buffer.set_text(&form.notes);
         }
         self.painting.set(false);
+        self.paint_save();
 
         while let Some(child) = self.labels.first_child() {
             self.labels.remove(&child);
@@ -113,6 +128,43 @@ impl Section {
         }
     }
 
+    /// Paint the Save from [`save_answer`] (reason on its tooltip). Until
+    /// the account store has assembled, re-ask on a short timer — the
+    /// assembly has no wake of its own — and stop once it is up or the
+    /// section has left its window.
+    fn paint_save(self: &Rc<Self>) {
+        let answer = save_answer();
+        let waiting = !answer.is_possible();
+        crate::possible::paint(&self.save_btn, None, answer);
+        if waiting && !self.save_poll.replace(true) {
+            let weak = Rc::downgrade(self);
+            let mut was_rooted = false;
+            gtk::glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+                let Some(section) = weak.upgrade() else {
+                    return gtk::glib::ControlFlow::Break;
+                };
+                // The page is rebuilt per open: once this one has left its
+                // window, nothing reads its Save again (`overlays::watch`'s
+                // guard).
+                if section.save_btn.root().is_some() {
+                    was_rooted = true;
+                } else if was_rooted {
+                    section.save_poll.set(false);
+                    return gtk::glib::ControlFlow::Break;
+                }
+                let answer = save_answer();
+                let done = answer.is_possible();
+                crate::possible::paint(&section.save_btn, None, answer);
+                if done {
+                    section.save_poll.set(false);
+                    gtk::glib::ControlFlow::Break
+                } else {
+                    gtk::glib::ControlFlow::Continue
+                }
+            });
+        }
+    }
+
     fn show_error(&self, message: Option<&str>) {
         crate::settings::render_error_label(&self.error_label, message);
     }
@@ -139,6 +191,12 @@ impl Section {
     /// are written (`profile.md` § The private section). A refusal keeps the
     /// staged edits on screen.
     fn save(self: &Rc<Self>, client: &Rc<FaunaClient>) {
+        // The answer the button is painted from, asked again (rule 6): until
+        // the store has assembled there is nowhere to write — the staged
+        // edits stay on screen and the reason goes on `error-message`.
+        if crate::form_gate::refuse(&save_answer(), &self.error_label) {
+            return;
+        }
         let changes = match self.editor.borrow().changes() {
             Ok(Some(changes)) => changes,
             // Nothing staged, or staged back to where it started.
@@ -152,10 +210,8 @@ impl Section {
                 return;
             }
         };
-        // The account store assembles off the login path; until it has, there
-        // is nowhere to write — the staged edits stay on screen.
-        // The account store assembles off the login path; `save_staged` answers
-        // `common.still_loading` until it has — the staged edits stay on screen.
+        // `save_staged` refuses with the same answer, should the store have
+        // gone between the ask above and here.
         let store = crate::account_runtime::handle();
         let manager = crate::conversations::manager();
         let actor = self.actor_id.clone();
@@ -264,11 +320,13 @@ pub fn build(
         actor_id: actor_id.to_string(),
         editor: RefCell::new(OverlayEditor::default()),
         painting: Cell::new(false),
+        save_poll: Cell::new(false),
         nickname,
         notes,
         labels,
         label_input,
         suggestions,
+        save_btn: save_btn.clone(),
         error_label,
     });
 
@@ -403,6 +461,46 @@ mod tests {
 
             click(&root, ids::PROFILE_LABEL_REMOVE_BUTTON);
             assert_eq!(texts(&root, ids::PROFILE_LABEL_CHIP), ["Family"]);
+        });
+    }
+
+    /// No account store has assembled in a unit test: the Save is painted
+    /// blocked still loading (reason on its tooltip), and a press refuses
+    /// with that reason on `error-message`, keeping the staged edits (rule 6).
+    #[test]
+    fn the_save_waits_for_the_account_store_and_refuses() {
+        crate::testid::run_on_gtk_thread(|| {
+            assert!(crate::account_runtime::handle().is_none());
+            let (tx, _rx) = crate::client::ui_channel();
+            let machine = fauna_launch_machine::LaunchMachine::new(
+                std::sync::Arc::new(fauna_launch_machine::NullObserver),
+                std::sync::Arc::new(fauna_launch_machine::InMemoryPersistence::new()),
+            );
+            let client = Rc::new(FaunaClient::new(
+                "http://127.0.0.1:1".to_string(),
+                "11".repeat(32),
+                tx,
+                machine,
+            ));
+            let error_label = gtk::Label::builder().visible(false).build();
+            let (section, _repaint) = build(&client, &"ab".repeat(32), error_label.clone());
+            let root: gtk::Widget = section.upcast();
+            let save = find::find_in(&root, ids::PROFILE_PRIVATE_SAVE_BUTTON)
+                .and_then(|w| w.downcast::<gtk::Button>().ok())
+                .expect("profile-private-save-button is a button");
+            let loading = fauna_core::localized::LocalizedText::key("common.still_loading")
+                .resolve(crate::i18n::strings::lookup);
+            assert!(save.is_visible() && !save.is_sensitive());
+            assert_eq!(save.tooltip_text().as_deref(), Some(loading.as_str()));
+
+            let nickname = find::find_in(&root, ids::PROFILE_NICKNAME_FIELD)
+                .and_then(|w| w.downcast::<gtk::Entry>().ok())
+                .expect("profile-nickname-field is an entry");
+            nickname.set_text("Bee");
+            save.emit_clicked();
+            assert!(error_label.is_visible());
+            assert_eq!(error_label.text().as_str(), loading);
+            assert_eq!(nickname.text(), "Bee", "the staged edit stays");
         });
     }
 

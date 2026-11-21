@@ -288,7 +288,7 @@ def test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_ba
     """Outcomes 18, 19 and 50–55 of ``docs/features/import-your-social-archive.md``
     on one journey — the seats are shared state, and each outcome is a step of
     the one before (see the module docstring for the arrangements)."""
-    a_app = real_faunamls_app
+    a_app = second_real_faunamls_app.owner_app
     b_app, bob = second_real_faunamls_app
     node_url = nest_instance["url"]
     a_hex, b_hex = test_user["actor_id_hex"], bob["actor_id_hex"]

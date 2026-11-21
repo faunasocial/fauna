@@ -182,6 +182,8 @@ struct Ctx {
     less_docs: Cell<u32>,
     included_examples: Cell<u32>,
     marked_examples: Cell<u32>,
+    /// A publish is on its way — the submit answer's in-flight half.
+    busy: Cell<bool>,
 }
 
 /// Build the sheet's static widget tree — every static ui.yaml ID present, no
@@ -376,7 +378,23 @@ pub fn wire(
         less_docs: Cell::new(0),
         included_examples: Cell::new(0),
         marked_examples: Cell::new(0),
+        busy: Cell::new(false),
     });
+
+    {
+        let ctx = Rc::clone(&ctx);
+        ctx.w
+            .name_input
+            .clone()
+            .connect_changed(move |_| refresh_submit_sensitivity(&ctx));
+    }
+    {
+        let ctx = Rc::clone(&ctx);
+        ctx.w
+            .name_input
+            .clone()
+            .connect_activate(move |_| submit(&ctx));
+    }
 
     {
         let ctx = Rc::clone(&ctx);
@@ -454,7 +472,7 @@ impl PublishSheet {
         // double-fetch.
         ctx.w.kind_select.select_kind(PublishKind::List.wire());
         update_body_for_kind(ctx, PublishKind::List);
-        ctx.w.submit.set_sensitive(false);
+        refresh_submit_sensitivity(ctx);
         ctx.w.root.set_visible(true);
         ctx.w.name_input.grab_focus();
 
@@ -516,7 +534,7 @@ fn set_kind(ctx: &Rc<Ctx>, kind: PublishKind) {
     ctx.w.exemplar_empty.set_visible(false);
     ctx.w.ngram_empty.set_visible(false);
     update_body_for_kind(ctx, kind);
-    ctx.w.submit.set_sensitive(false);
+    refresh_submit_sensitivity(ctx);
 
     let Some(manager) = crate::feed::host::manager() else {
         crate::settings::render_error_label(
@@ -770,14 +788,30 @@ fn render_ngrams(ctx: &Rc<Ctx>, res: Result<TrainedModelReview, String>) {
     refresh_submit_sensitivity(ctx);
 }
 
-/// Publishing nothing is not a thing the artifact means, so the button says so
-/// by going insensitive rather than by no-op'ing a click — a click that does
-/// nothing and explains nothing is indistinguishable from a broken sheet (the
-/// `restore-confirm-button` precedent, which starts insensitive for the same
-/// reason). Covers both "the corpus scored/scrubbed nothing" and "the user
-/// unchecked everything" — for whichever kind is currently open.
+/// `personalization-trained-factor-publish-submit-button`'s answer, painted on
+/// the button and asked again by the press (`docs/goal/ui/settings.md`
+/// § Errors & edge cases, *Personal form submits paint from their draft*): the
+/// shared `fauna_client_personalization::drafts::publish_submit_possibility` —
+/// a public name within the bound, at least one kept item for whichever kind
+/// is open ("the corpus scored nothing" and "the user unchecked everything"
+/// alike), and no publish in flight.
+fn submit_answer(ctx: &Ctx) -> fauna_core::possibility::Possibility {
+    fauna_client_personalization::drafts::publish_submit_possibility(
+        &ctx.w.name_input.text(),
+        any_kept(ctx),
+        ctx.busy.get(),
+    )
+}
+
+/// Paint the submit from [`submit_answer`]: disabled with its reason while the
+/// draft cannot succeed, never a click that does nothing.
 fn refresh_submit_sensitivity(ctx: &Rc<Ctx>) {
-    let any_kept = match ctx.kind.get() {
+    crate::form_gate::paint_submit(&ctx.w.submit, &submit_answer(ctx), None);
+}
+
+/// Whether any review item of the open kind is still ticked.
+fn any_kept(ctx: &Ctx) -> bool {
+    match ctx.kind.get() {
         PublishKind::List => ctx
             .rows
             .borrow()
@@ -788,21 +822,18 @@ fn refresh_submit_sensitivity(ctx: &Rc<Ctx>) {
             .borrow()
             .iter()
             .any(|(_, include)| include.is_active()),
-    };
-    ctx.w.submit.set_sensitive(any_kept);
+    }
 }
 
 /// Publish what survived the prune, through whichever kind's lifecycle is
 /// open.
 fn submit(ctx: &Rc<Ctx>) {
-    // A blank name is refused here rather than at the wire — the same guard the
-    // sibling create/rename flow uses (`trained_topics::submit`), so a user who
-    // left the box empty gets nothing to dismiss.
-    let name = ctx.w.name_input.text().trim().to_string();
-    if name.is_empty() {
-        ctx.w.name_input.grab_focus();
+    // The press (and the name input's Enter) asks the painted answer again and
+    // refuses with its reason on the page `error-message`.
+    if crate::form_gate::refuse(&submit_answer(ctx), &ctx.error_label) {
         return;
     }
+    let name = ctx.w.name_input.text().trim().to_string();
     let Some(factor_id) = ctx.target.borrow().clone() else {
         return;
     };
@@ -838,7 +869,8 @@ fn submit(ctx: &Rc<Ctx>) {
                 // kept); kept so the invariant holds at the call too.
                 return;
             }
-            ctx.w.submit.set_sensitive(false);
+            ctx.busy.set(true);
+            refresh_submit_sensitivity(ctx);
             spawn_with_snapshot(
                 &ctx.rt,
                 move || async move {
@@ -863,7 +895,8 @@ fn submit(ctx: &Rc<Ctx>) {
             // lifecycle's documented rule; `render_ngrams`'s comment).
             let more_docs = ctx.more_docs.get();
             let less_docs = ctx.less_docs.get();
-            ctx.w.submit.set_sensitive(false);
+            ctx.busy.set(true);
+            refresh_submit_sensitivity(ctx);
             spawn_with_snapshot(
                 &ctx.rt,
                 move || async move {
@@ -883,7 +916,8 @@ fn submit(ctx: &Rc<Ctx>) {
 /// they can fix the name and retry without reviewing everything again. Shared
 /// by both kinds — the caller already localized the typed error into `Err`.
 fn apply(ctx: &Rc<Ctx>, res: Result<(), String>) {
-    ctx.w.submit.set_sensitive(true);
+    ctx.busy.set(false);
+    refresh_submit_sensitivity(ctx);
     match res {
         Ok(()) => {
             crate::settings::render_error_label(&ctx.error_label, None);

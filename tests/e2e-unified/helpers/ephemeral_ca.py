@@ -73,6 +73,12 @@ class EphemeralCA:
             .not_valid_before(_NOT_BEFORE)
             .not_valid_after(_NOT_AFTER)
             .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+            # Key identifiers: a strict verifier (Python's default context,
+            # VERIFY_X509_STRICT) refuses a chain without them.
+            .add_extension(
+                x509.SubjectKeyIdentifier.from_public_key(self._key.public_key()),
+                critical=False,
+            )
             .add_extension(
                 x509.KeyUsage(
                     digital_signature=True,
@@ -102,18 +108,20 @@ class EphemeralCA:
             f.write(self.cert_pem)
         return path
 
-    def issue(self, hostname: str) -> LeafCert:
+    def issue(self, hostname: str, *more_names: str) -> LeafCert:
         """Mint a leaf cert for `hostname`, signed by this CA.
 
-        The SAN carries `hostname` (a DNS name, or an IP if it parses as one) so
-        strict TLS verifiers (rustls, modern OpenSSL) accept it — a bare CN is no
-        longer honored.
+        The SAN carries `hostname` and every one of `more_names` (each a DNS
+        name, or an IP if it parses as one) so strict TLS verifiers (rustls,
+        modern OpenSSL) accept it — a bare CN is no longer honored.
         """
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        try:
-            san: x509.GeneralName = x509.IPAddress(ipaddress.ip_address(hostname))
-        except ValueError:
-            san = x509.DNSName(hostname)
+        sans: list[x509.GeneralName] = []
+        for each in (hostname, *more_names):
+            try:
+                sans.append(x509.IPAddress(ipaddress.ip_address(each)))
+            except ValueError:
+                sans.append(x509.DNSName(each))
         cert = (
             x509.CertificateBuilder()
             .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, hostname)]))
@@ -122,8 +130,15 @@ class EphemeralCA:
             .serial_number(x509.random_serial_number())
             .not_valid_before(_NOT_BEFORE)
             .not_valid_after(_NOT_AFTER)
-            .add_extension(x509.SubjectAlternativeName([san]), critical=False)
+            .add_extension(x509.SubjectAlternativeName(sans), critical=False)
             .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(
+                x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False,
+            )
+            .add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_public_key(self._key.public_key()),
+                critical=False,
+            )
             .sign(self._key, hashes.SHA256())
         )
         return LeafCert(

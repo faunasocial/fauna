@@ -143,14 +143,11 @@ public sealed partial class SearchResultsPage : Page
         if (_viewModel is null) return;
         var selected = TypeFilterCombo.SelectedItem as ComboBoxItem;
         var token = selected?.Tag as string ?? "all";
-        // Re-fire only if a search already ran (the last-FIRED query, from the
-        // snapshot — mirrors the pre-adoption gate), using the LIVE query-box
-        // text (never the stale fired query) as search.md's RunQuery contract
-        // requires.
-        if (!string.IsNullOrWhiteSpace(_viewModel.Query))
-        {
-            await _viewModel.Manager.RunQuery(SearchBox.Text, token);
-        }
+        // Re-fire with the LIVE query-box text (never the stale fired query),
+        // as search.md's RunQuery contract requires; over a blank box the
+        // shared manager holds the token for the next search (or re-fires the
+        // last query) rather than dropping it (search.md § User actions).
+        await _viewModel.Manager.RunQuery(SearchBox.Text, token);
     }
 
     private async void LoadMore_Click(object sender, RoutedEventArgs e)

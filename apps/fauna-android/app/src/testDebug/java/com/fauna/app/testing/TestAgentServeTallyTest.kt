@@ -11,7 +11,7 @@ import org.robolectric.annotation.Config
 
 /**
  * The serve hold and the serve tally arm (`share-serve-tally` in
- * `tests/e2e-unified/surfaces.toml`): [TestAgent.serveTallyToJson] publishes
+ * `tests/e2e-unified/surfaces.toml`): [KidsExcisedAgent.serveTallyToJson] publishes
  * the shape `actions/backups.py::share_serve_tally` reads — the twin of tui's
  * and linux's `share_serve_tally_json` and apple's `serveTallyState` — and the
  * `offline_share_hold_serves` arm's door turns the shared recorder's hold on
@@ -38,7 +38,7 @@ class TestAgentServeTallyTest {
             parked = 1uL,
             held = true,
         )
-        val json = TestAgent.serveTallyToJson(tally)
+        val json = KidsExcisedAgent.serveTallyToJson(tally)
         assertEquals(2L, json.getJSONObject("manifests").getLong("set/a.txt"))
         assertEquals(5L, json.getJSONObject("chunks").getLong("set/a.txt"))
         assertEquals(1, json.getInt("parked"))
@@ -51,12 +51,12 @@ class TestAgentServeTallyTest {
         com.fauna.ffi.offlineShareHoldServes(true)
         assertTrue(
             "the hold reads on through the tally door",
-            TestAgent.serveTallyToJson(com.fauna.ffi.shareServeTally()).getBoolean("held"),
+            KidsExcisedAgent.serveTallyToJson(com.fauna.ffi.shareServeTally()).getBoolean("held"),
         )
         com.fauna.ffi.offlineShareHoldServes(false)
         assertFalse(
             "and off again",
-            TestAgent.serveTallyToJson(com.fauna.ffi.shareServeTally()).getBoolean("held"),
+            KidsExcisedAgent.serveTallyToJson(com.fauna.ffi.shareServeTally()).getBoolean("held"),
         )
     }
 }

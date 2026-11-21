@@ -135,10 +135,13 @@ class ConnectedAppsActions:
         )
 
     def wait_for_request_from(
-        self, client_id: str, timeout: float = RPC_ROUNDTRIP_S
+        self, client_id: str, timeout: float = RPC_ROUNDTRIP_S, renavigate: bool = True
     ) -> int | None:
+        """Wait for a card from `client_id`. `renavigate=False` waits on the page
+        as it stands — for a card a route opened, where a revisit would open the
+        handoff a second time."""
         return self._poll(
-            lambda: self.request_index_for_client(client_id), timeout, renavigate=True
+            lambda: self.request_index_for_client(client_id), timeout, renavigate=renavigate
         )
 
     def approve_request(self, index: int) -> None:

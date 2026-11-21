@@ -88,11 +88,18 @@ pub(super) fn privacy_elements(state: &SettingsState, filter_marks: &[i64]) -> V
         )
         .labelled(spam::PHISHING_THRESHOLD),
     );
-    els.push(Element::gesture_button(
-        ids::SAVE_SPAM_PREFS,
-        spam::SAVE,
-        true,
-        Gesture::Settings(Action::SaveSpamPrefs),
+    // Offered only while a threshold differs from what the nest confirmed —
+    // a save of the prefilled values would echo back with nothing on the page
+    // moving (`settings.md`, the spam-moderation row; `ui/README.md` § Offer
+    // only what is possible, rules 4 and 7).
+    els.push(super::mail::gated_button(
+        Element::gesture_button(
+            ids::SAVE_SPAM_PREFS,
+            spam::SAVE,
+            true,
+            Gesture::Settings(Action::SaveSpamPrefs),
+        ),
+        p.save_spam_possibility(),
     ));
     // ── Email filters (ui.yaml component `email-filter-panel`) ──
     els.push(Element::chrome(t::privacy_page::EMAIL_FILTERS));

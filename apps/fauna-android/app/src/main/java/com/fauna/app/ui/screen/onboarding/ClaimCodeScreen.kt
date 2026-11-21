@@ -3,7 +3,9 @@ package com.fauna.app.ui.screen.onboarding
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -12,6 +14,12 @@ import androidx.lifecycle.ViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
 import com.fauna.app.core.OnboardingHost
+import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.formRefusal
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.localized
 import com.fauna.ffi.onboarding.ClaimCodeState
 import com.fauna.ffi.onboarding.OnboardingStep
 import com.fauna.ffi.onboarding.WizardOutcome
@@ -19,6 +27,9 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
 
 /**
  * Snapshot-driven view of OnboardingMachine.claim_code_snapshot() per
@@ -46,7 +57,13 @@ fun ClaimCodeScreen(
     val snap = remember(tick) { vm.host.machine.claimCodeSnapshot() }
     val coroutineScope = rememberCoroutineScope()
 
+    val context = LocalContext.current
     var codeInput by remember { mutableStateOf("") }
+    // `claim-code-submit-button`'s answer (`ui/README.md` § Offer only what is
+    // possible, rule 4's form case): a code typed and no claim on its way.
+    val submitAnswer = remember(tick, codeInput) {
+        askForm { vm.host.machine.claimCodeSubmitPossibility(codeInput) }
+    }
 
     // Pre-fill from the machine when the input is empty (mirrors Linux
     // claim_code.rs): the factory-reset re-onboard path positions the wizard here
@@ -93,6 +110,16 @@ fun ClaimCodeScreen(
             )
         }
 
+        remember(tick) { vm.host.machine.errorMessage() }?.ifEmpty { null }?.let {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                it,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.fillMaxWidth().testTag(Ids.ERROR_MESSAGE),
+            )
+        }
+
         Spacer(Modifier.weight(1f))
 
         TermsNotice()
@@ -109,20 +136,30 @@ fun ClaimCodeScreen(
                 modifier = Modifier.testTag(Ids.CLAIM_CODE_BACK_BUTTON),
             ) { Text(stringResource(R.string.common_back)) }
 
-            Button(
-                onClick = {
-                    coroutineScope.launch {
-                        val step = vm.submit(codeInput)
-                        if (step == OnboardingStep.DONE) {
-                            vm.host.handleWizardExit(step)?.let(onWizardExit)
+            Column(horizontalAlignment = Alignment.End) {
+                Button(
+                    onClick = {
+                        // The press asks the answer it was painted from again
+                        // (rule 6); a blocked draft's line goes on `error-message`.
+                        val refusal = formRefusal(context, submitAnswer)
+                        if (refusal != null) {
+                            refusal.reason?.let(vm.host.machine::setErrorMessage)
                         } else {
-                            navController.navigate(routeForStep(step))
+                            coroutineScope.launch {
+                                val step = vm.submit(codeInput)
+                                if (step == OnboardingStep.DONE) {
+                                    vm.host.handleWizardExit(step)?.let(onWizardExit)
+                                } else {
+                                    navController.navigate(routeForStep(step))
+                                }
+                            }
                         }
-                    }
-                },
-                enabled = snap.submitEnabled && codeInput.isNotBlank(),
-                modifier = Modifier.testTag(Ids.CLAIM_CODE_SUBMIT_BUTTON),
-            ) { Text(stringResource(R.string.onboarding_claim_code_submit_button)) }
+                    },
+                    enabled = submitAnswer.isPossible,
+                    modifier = Modifier.testTag(Ids.CLAIM_CODE_SUBMIT_BUTTON),
+                ) { Text(stringResource(R.string.onboarding_claim_code_submit_button)) }
+                DisabledControlReasonText(localized(submitAnswer.blockedReason))
+            }
         }
     }
 }

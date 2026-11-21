@@ -92,7 +92,7 @@ The tables below are the curated, named providers wired directly into the wizard
 | OVH | Application key + application secret + consumer key | 10+ | ~€7/mo (€5.71 before VAT) | Three credentials; the picker lists each project × region as one entry; offers priced from OVH's public catalogue on monthly billing and shown with tax, as Hetzner's gross price is ([`../provisioning/registry.md`](../provisioning/registry.md) § Server offers follow the location → *OVH*) |
 | Linode | Single personal access token | 11 | ~$5/mo | |
 
-Prices are static estimates from the provider catalog's curated offers (`i18n/providers.yaml` — [`../provisioning/registry.md`](../provisioning/registry.md)); they drift with real provider pricing, and the wizard presents them as estimates. There is no live pricing endpoint (the central registry that once served one is decommissioned).
+The starting prices in this table are approximate — each provider's published price for its cheapest curated offer (`i18n/providers.yaml`), and they drift with real provider pricing. The wizard itself shows no estimate: it prices each curated offer live from the provider's own API at the chosen location ([`../provisioning/registry.md`](../provisioning/registry.md) § Server offers follow the location), and the price is agreed before the build. There is no central pricing endpoint (the central registry that once served one is decommissioned).
 
 > **⚠ Outbound mail ports (25 / 465 / 587) must be reachable from the box for external delivery.**
 > The nest delivers mail **direct-to-MX** — the MTA dials each recipient domain's MX on port 25;

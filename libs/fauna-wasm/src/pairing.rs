@@ -146,6 +146,43 @@ pub fn mint_option_label(o: JsValue) -> Result<JsValue, JsValue> {
     to_js(&fauna_client_pair::mint_option_label(&o))
 }
 
+/// `nests-add-submit-button`: `fauna_client_pair::link_input_possibility`
+/// (`docs/goal/ui/nests.md` § Errors & edge cases) — blocked with the field's
+/// reason on a blank draft. The `Possibility` JSON the SPA's
+/// `paintPossibility` reads.
+#[wasm_bindgen(js_name = linkInputPossibility)]
+pub fn link_input_possibility(raw: &str) -> Result<JsValue, JsValue> {
+    to_js(&fauna_client_pair::link_input_possibility(raw))
+}
+
+/// `fauna_client_pair::mint_holder` — the holder a mint of `o` targets: its
+/// only candidate, else the one `picked` among several (`null` until a
+/// still-listed one is picked). `o` is a `LinkedNestRow.mint_options` entry.
+#[wasm_bindgen(js_name = mintHolder)]
+pub fn mint_holder(o: JsValue, picked: Option<String>) -> Result<Option<String>, JsValue> {
+    let o: fauna_client_pair::TrustMintOption = from_js(o)?;
+    Ok(fauna_client_pair::mint_holder(
+        &o,
+        picked.filter(|p| !p.is_empty()),
+    ))
+}
+
+/// `nest-trust-mint-confirm-button`: `fauna_client_pair::mint_draft_possibility`
+/// over the picked option (`null` before a use is picked) and the holder
+/// select's pick (`null`/`""` before one).
+#[wasm_bindgen(js_name = mintDraftPossibility)]
+pub fn mint_draft_possibility(o: JsValue, picked: Option<String>) -> Result<JsValue, JsValue> {
+    let o: Option<fauna_client_pair::TrustMintOption> = if o.is_null() || o.is_undefined() {
+        None
+    } else {
+        Some(from_js(o)?)
+    };
+    to_js(&fauna_client_pair::mint_draft_possibility(
+        o,
+        picked.filter(|p| !p.is_empty()),
+    ))
+}
+
 /// `fauna_client_pair::mint_option_note` — the note the mint flow shows
 /// before the confirm for this option (the materialization option's honesty
 /// copy), or `null` when it carries none.
@@ -378,7 +415,15 @@ impl WasmLinkedNestsMachine {
                     Some(backup_connect),
                     crate::account_runtime::period_key_store(),
                 )
-                .with_folder_names(folder_names),
+                .with_folder_names(folder_names)
+                // The pairing-mark door: `fauna.state.pairing-mark` over the
+                // same handle, so a link or an unlink in this tab repaints a
+                // sibling's open Nests page.
+                .with_pairing_marks(std::sync::Arc::new(
+                    fauna_account_seams::pairing_marks::PlanePairingMarks::new(
+                        crate::account_runtime::handle,
+                    ),
+                )),
             ),
         })
     }

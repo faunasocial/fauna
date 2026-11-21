@@ -32,9 +32,16 @@ struct MacRestoreView: View {
         return false
     }
 
-    private var canRestore: Bool {
-        !destinationText.trimmingCharacters(in: .whitespaces).isEmpty
-            && !isRestoring && client?.syncHost != nil
+    /// `snapshot-restore-button`'s one answer (`ui/backups.md` § Errors & edge
+    /// cases → *What the page offers*): the shared page half (a typed
+    /// destination, no restore running), then the carve-out's offline half —
+    /// the walk reads its bytes over the bulk-binary carve-out, which has no
+    /// wire kind — then the in-process engine host this walk runs in, which
+    /// is not up until the session has finished starting (*still loading*).
+    private var restoreAnswer: Possibility {
+        snapshotRestorePossibility(running: isRestoring, destination: destinationText)
+            .and(carveOutAnswer(client))
+            .and(client?.syncHost != nil ? .possible : readPossibility(read: .pending))
     }
 
     var body: some View {
@@ -55,12 +62,13 @@ struct MacRestoreView: View {
                     Task { await startRestore() }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(!canRestore)
                 .accessibilityIdentifier(Ids.snapshotRestoreButton)
-                .automationActivate(Ids.snapshotRestoreButton, isEnabled: { canRestore }) {
+                .automationActivate(Ids.snapshotRestoreButton) {
                     Task { await startRestore() }
                 }
+                .faunaPossible(restoreAnswer)
             }
+            FaunaPossibilityReason(restoreAnswer)
 
             switch restoreState {
             case .idle:
@@ -113,6 +121,12 @@ struct MacRestoreView: View {
     }
 
     private func startRestore() async {
+        // The press asks the answer the button painted from; a refusal reads
+        // on this section's own result line, never silently.
+        if let refusal = restoreAnswer.refusal {
+            restoreState = .finished(line: refusal, path: nil)
+            return
+        }
         guard let client else { return }
         // The shared resolver (`ui/backups.md` § Where logic lives → *Whole-snapshot
         // restore*): an absolute path, or `~/` naming the home directory; `nil`

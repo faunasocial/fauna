@@ -96,6 +96,11 @@ public sealed partial class NestProvisioningView : UserControl
     public static Visibility BoolToVisibility(bool value)
         => value ? Visibility.Visible : Visibility.Collapsed;
 
+    /// <summary>A DNS-plan row's AutomationId, <c>provisioning-dns-plan-row[&lt;name&gt;|&lt;type&gt;]</c>,
+    /// from the key the shared snapshot gives it.</summary>
+    public static string DnsPlanRowId(string key)
+        => $"{FaunaApp.UiIds.Ids.ProvisioningDnsPlanRow}[{key}]";
+
     /// <summary>Hide the Continue-blocked reason when there's nothing to explain
     /// (rule-5 render lift — the reason text is "" iff Continue is enabled).</summary>
     public static Visibility TextToVisibility(string value)

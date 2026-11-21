@@ -181,6 +181,7 @@ public struct MailExportView: View {
                     backButton
                     nextButton
                 }
+                FaunaPossibilityReason(vm.nextAnswer)
             }
         }
     }
@@ -198,14 +199,18 @@ public struct MailExportView: View {
             }
             HStack {
                 backButton
-                Button(L.mailExport.startButton) { Task { await vm.dispatch(.start) } }
+                Button(L.mailExport.startButton) { Task { await vm.pressStart() } }
                     .accessibilityIdentifier(Ids.mailExportStartButton)
                     .automationActivate(Ids.mailExportStartButton) {
-                        Task { await vm.dispatch(.start) }
+                        Task { await vm.pressStart() }
                     }
                     // The durable commit — opens the export session row.
                     .faunaGate("fauna.bridges.start_export_session")
+                    // Offered only while the scope can start (mail-export.md § Wizard
+                    // steps); the reason rides the control and reads beside it.
+                    .faunaPossible(vm.startAnswer)
             }
+            FaunaPossibilityReason(vm.startAnswer)
         }
     }
 
@@ -215,10 +220,13 @@ public struct MailExportView: View {
     /// Only the active step's copy is ever in the view tree, so the two paint sites
     /// never put two `wizard-next-button` slots in the registry at once.
     private var nextButton: some View {
-        Button(L.mailExport.next) { Task { await vm.dispatch(.next) } }
+        Button(L.mailExport.next) { Task { await vm.pressNext() } }
             .accessibilityIdentifier(Ids.wizardNextButton)
             // Same dispatch the Button action runs. Env-gated no-op in production.
-            .automationActivate(Ids.wizardNextButton) { Task { await vm.dispatch(.next) } }
+            .automationActivate(Ids.wizardNextButton) { Task { await vm.pressNext() } }
+            // Blocked on Scope while no mailbox is selected or a date is malformed
+            // or inverted (the shared answer over the typed dates).
+            .faunaPossible(vm.nextAnswer)
     }
 
     /// The shared wizard Back, painted on Scope (→ Format) and Confirm (→ Scope).
@@ -327,11 +335,19 @@ public struct MailExportView: View {
     private var doneSection: some View {
         groupedSection(title: L.mailExport.doneTitle) {
             automationText(Ids.mailExportDoneSummary, doneSummary)
+            // The archive's bytes ride the bulk-binary carve-out, issuing no
+            // wire kind of its own, so the offline half is the carve-out answer
+            // (`mail-export.md` § Download flow; tui's
+            // `mail_export_download_possibility`) — painted here, asked again
+            // by the press.
+            let carveOut = carveOutAnswer(client)
             Button(L.mailExport.downloadButton) { Task { await download() } }
                 .accessibilityIdentifier(Ids.mailExportDownloadButton)
                 .automationActivate(Ids.mailExportDownloadButton) {
                     Task { await download() }
                 }
+                .faunaPossible(carveOut)
+            FaunaPossibilityReason(carveOut)
             automationText(Ids.mailExportDownloadUrl, vm.snapshot?.downloadUrl ?? "")
                 .font(.caption.monospaced())
                 .textSelection(.enabled)
@@ -352,6 +368,7 @@ public struct MailExportView: View {
     /// destination, as the account data export does (`AccountSettingsView`).
     /// Under e2e the file stays in `FAUNA_E2E_DOWNLOAD_DIR` with no sheet.
     private func download() async {
+        if refusePress(carveOutAnswer(client), errorMessage: &vm.errorMessage) { return }
         await vm.dispatch(.download)
         #if os(iOS)
         guard SnapshotFileSaver.e2eDownloadDir == nil, vm.errorMessage == nil,

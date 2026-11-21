@@ -861,9 +861,9 @@ impl<R: RpcRequester> SnapshotsClient<R> {
 /// use) — always disabled in that state. Shared so every app computes the
 /// identical boolean instead of re-deriving it (priority #2) — five apps
 /// (web, windows, android, apple, linux) each hand-rolled this exact
-/// four-way `&&` before this fn existed. Do NOT fold `restore-confirm-button`'s
-/// sibling predicate in here — `backups.md` § Where logic lives keeps that one
-/// per-app glue deliberately.
+/// four-way `&&` before this fn existed. `restore-confirm-button`'s sibling
+/// answer is not here: it is `fauna_backups_machine::possibility::restore_possibility`
+/// (`backups.md` § Errors & edge cases → *What the page offers*).
 pub fn immediate_delete_button_enabled(
     deleting: bool,
     confirm_id: &str,

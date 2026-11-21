@@ -81,8 +81,11 @@ from helpers.recovery_restore import (
     wait_for_restore_landing,
 )
 from helpers.succession import register_recovery_kit, succeed_identity
+from helpers import budgets
+from helpers.app_surface import require_surface
 from helpers.waiting import wait_until
 from i18n.strings import S
+from helpers.use_case_walk import assert_use_case_walked
 
 pytestmark = pytest.mark.tier_3
 
@@ -119,6 +122,7 @@ def _assert_direct_address_account(account: str) -> None:
     )
 
 
+@pytest.mark.use_case("restore-on-a-new-device")
 @pytest.mark.feature("recovery-kit")
 def test_the_phrase_alone_restores_the_account_after_losing_every_device(
     ungranted_app, nest_instance
@@ -219,39 +223,91 @@ def test_the_phrase_alone_restores_the_account_after_losing_every_device(
         f"(error surface: {app.error_text()!r})"
     )
 
+    # ── Phase 5: the person goes on with the account they got back ─────────
+    # Continue is the use case's last step: the restore is not finished for a
+    # person until the handle page lets them through.
+    app.onboarding.submit_handle()
+    wait_until(
+        lambda: not app.is_visible("handle-input"),
+        45.0,
+        diagnose=lambda: (
+            "Continue on the restored account never left handle_entry; "
+            f"handle-message-area reads {app.driver.get_text('handle-message-area')!r}, "
+            f"error surface {app.error_text()!r}"
+        ),
+    )
+    assert_use_case_walked(ungranted_app.driver, "restore-on-a-new-device")
+
+
+def _restore_blocked_with(app, reason: str, *, what: str) -> None:
+    """The restore submit is shown, not live, with ``reason`` painted beside it,
+    and the user stays on ``recovery_entry`` to supply what is missing.
+
+    The submit is painted from the shared draft predicate
+    (``fauna_onboarding_machine::recovery_entry_possibility``;
+    ``docs/goal/ui/README.md`` § Offer only what is possible, rule 4's form
+    case), so the refusal reaches the user before any press: no person can press
+    the disabled control, and the test agent refuses a press on one
+    (convention 11). The press half — the restore refusing with the same line on
+    ``error-message`` — is the predicate's backstop, pinned by its machine tests.
+    The poll is a deadline over the repaint after the last keystroke; the
+    asserts after it name every part that failed (convention 6).
+    """
+    d = app.driver
+    submit = "recovery-entry-submit-button"
+
+    def blocked() -> bool:
+        return (
+            not d.is_absent(submit)
+            and not d.is_enabled(submit)
+            and d.blocked_reason(submit) == reason
+        )
+
+    try:
+        wait_until(blocked, budgets.UI_SETTLE_S)
+    except AssertionError:
+        pass  # the asserts below say which part failed
+    diag = (
+        f"{d.diagnose(submit, attrs=('enabled', 'reason', 'title'))}, "
+        f"{d.diagnose('error-message')}"
+    )
+    assert not d.is_absent(submit), (
+        f"{what}: the submit must stay visible while the user can unblock it: {diag}"
+    )
+    assert not d.is_enabled(submit), (
+        f"{what}: the submit is live on a draft the restore refuses: {diag}"
+    )
+    painted = d.blocked_reason(submit)
+    assert painted == reason, (
+        f"{what}: the reason beside the submit should read {reason!r}, "
+        f"painted {painted!r}: {diag}"
+    )
+    assert app.is_visible("recovery-entry-phrase-field"), (
+        f"{what}: the user stays on the screen to supply what is missing: {diag}"
+    )
+
 
 @pytest.mark.feature("recovery-kit")
 def test_a_phrase_that_names_no_account_asks_for_one_instead_of_failing(app):
     """A bare 64-hex code identifies no account, so the screen asks for a handle.
 
     Worth a journey rather than only a machine test: the refusal has to *reach
-    the user*. A dropped gesture or a silently-disabled submit reads downstream
-    as a product bug, and the machine test cannot see either.
+    the user*. A dropped gesture or a reason computed but never painted reads
+    downstream as a product bug, and the machine test cannot see either.
     """
+    require_surface(app.driver, "blocked-reason-read")
     app.onboarding.navigate_to_status()
     require_restore_button(app)
     app.onboarding.open_recovery_entry()
 
-    app.onboarding.restore_from_recovery_kit(_UNREGISTERED_ROOT)
+    app.driver.fill("recovery-entry-phrase-field", _UNREGISTERED_ROOT)
 
-    wait_until(
-        lambda: app.has_error(),
-        20.0,
-        diagnose=lambda: (
-            "a phrase naming no account must refuse on error-message rather "
-            "than sit silent or navigate away; page still shows "
-            f"phrase-field={app.is_visible('recovery-entry-phrase-field')}, "
-            f"handle-input={app.is_visible('handle-input')}"
-        ),
-    )
-    assert app.is_visible("recovery-entry-phrase-field"), (
-        "the user stays on the screen to supply what is missing"
-    )
-    text = app.error_text() or ""
-    assert "handle" in text.lower(), (
+    reason = S.onboarding.recovery_entry.account_needed
+    assert "handle" in reason.lower(), (
         "the refusal must name what to do next — enter the account's handle; "
-        f"got {text!r}"
+        f"the shared line reads {reason!r}"
     )
+    _restore_blocked_with(app, reason, what="a phrase naming no account")
 
 
 @pytest.mark.feature("recovery-kit")
@@ -263,29 +319,21 @@ def test_an_identity_secret_is_never_taken_for_a_recovery_phrase(app):
     (`identity-succession.md` § The RecoveryKey → *Kit payload*). The journey
     pins that the refusal is what the user sees.
     """
+    require_surface(app.driver, "blocked-reason-read")
     app.onboarding.navigate_to_status()
     require_restore_button(app)
     app.onboarding.open_recovery_entry()
 
-    app.onboarding.restore_from_recovery_kit(
-        f"fauna://identity?secret={_UNREGISTERED_ROOT}",
-        account="alice@example.test",
+    app.driver.fill(
+        "recovery-entry-phrase-field", f"fauna://identity?secret={_UNREGISTERED_ROOT}"
     )
+    app.driver.fill("recovery-entry-account-field", "alice@example.test")
 
-    wait_until(
-        lambda: app.has_error(),
-        20.0,
-        diagnose=lambda: (
-            "an identity payload must be refused on error-message; page shows "
-            f"phrase-field={app.is_visible('recovery-entry-phrase-field')}, "
-            f"handle-input={app.is_visible('handle-input')}"
-        ),
+    reason = S.onboarding.recovery_entry.invalid_kit
+    assert "recovery" in reason.lower(), (
+        f"the refusal must say what was expected instead; the shared line reads {reason!r}"
     )
-    assert app.is_visible("recovery-entry-phrase-field")
-    text = (app.error_text() or "").lower()
-    assert "recovery" in text, (
-        f"the refusal must say what was expected instead; got {text!r}"
-    )
+    _restore_blocked_with(app, reason, what="an identity payload")
 
 
 # ── After a replace, the new phrase is the one that restores ────────────────

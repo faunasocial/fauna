@@ -30,9 +30,14 @@ namespace FaunaApp.Services;
 ///
 /// <para>The policy (whether to register, which messages are shutdown requests)
 /// is the pure, unit-tested <see cref="RestartManagerGate"/>; this class is only the
-/// platform mechanics. <b>Disabled under the E2E bridge</b> (<c>FAUNA_E2E_BRIDGE</c>
-/// set) — the harness spawns/kills instances directly and must not be OS-relaunched.
-/// Mirrors <see cref="SingleInstanceManager"/>.</para>
+/// platform mechanics. <b>Under the E2E bridge</b> (<c>FAUNA_E2E_BRIDGE</c> set) only
+/// the restart registration is off — the harness spawns/kills instances directly and
+/// must not have Windows relaunch them, as <see cref="SingleInstanceManager"/> is off
+/// for the same reason. The lifecycle window runs in every build: without it a
+/// deployment over a running e2e package cannot close the app, and Windows ends it at
+/// its timeout and files a hang (type <c>Quiesce</c>) against the package — measured
+/// 2026-11-17 on the Debug app under the agent-after-update witness
+/// (installers/windows.md § Direct download, 2).</para>
 /// </summary>
 internal static class RestartManagerService
 {
@@ -106,22 +111,22 @@ internal static class RestartManagerService
     private static extern IntPtr GetModuleHandleW(IntPtr lpModuleName);
 
     /// <summary>
-    /// Register for OS restart and start listening for session-end. Call once at
-    /// startup after the main window exists (so the graceful-quit teardown via
-    /// <see cref="TrayIconService"/> has a window to close). No-op under E2E.
+    /// Register for OS restart (not under E2E) and start listening for session-end
+    /// (in every build). Call once at startup after the main window exists (so the
+    /// graceful-quit teardown via <see cref="TrayIconService"/> has a window to close).
     /// Best-effort: any failure is swallowed — cooperative shutdown degrades to the
     /// installer's force-kill net, which must never block launch.
     /// </summary>
     public static void Initialize()
     {
         if (_initialized) return;
-        if (IsE2E || !RestartManagerGate.ShouldRegisterRestart(IsE2E)) return;
 
         try
         {
             // Relaunch with the original command line (pwzCommandline = null) after
             // an RM-driven shutdown — a clean user launch has no args to preserve.
-            RegisterApplicationRestart(null, 0);
+            if (RestartManagerGate.ShouldRegisterRestart(IsE2E))
+                RegisterApplicationRestart(null, 0);
             CreateLifecycleWindow();
             _initialized = true;
         }

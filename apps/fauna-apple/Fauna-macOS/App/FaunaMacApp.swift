@@ -268,6 +268,10 @@ public struct FaunaMacApp: App {
                 onAccountIndexStartOver: { Task { @MainActor in revealAccountIndexStartOver() } },
                 onAccountIndexConfirmStartOver: { Task { @MainActor in confirmAccountIndexStartOver() } }
             )
+                // Read-only text is selectable on every page: one decision at the
+                // root (`FaunaKit/Core/ReadOnlyText.swift`; ui/README.md § Text the
+                // person reads can be copied).
+                .faunaReadOnlyText()
                 .environment(appState)
                 // The shared FaunaKit `ThreadDetailView` reads
                 // `@Environment(ContentPolicyStore.self)` to gate a flagged
@@ -332,7 +336,8 @@ public struct FaunaMacApp: App {
                     #if DEBUG
                     TestAgentBootstrap.bindInProcessAgent(
                         stateProvider: { [self] in self.serializeState() },
-                        commandHandler: { [self] command in await self.handleTestCommand(command) }
+                        commandHandler: { [self] command in await self.handleTestCommand(command) },
+                        rootSurfaceName: { [appState] in ContentView.rootSurfaceName(appState) }
                     )
                     #endif
                     // An `--autostart` login launch holds this window out of
@@ -515,6 +520,7 @@ public struct FaunaMacApp: App {
 
         Window("Welcome to Fauna", id: "onboarding") {
             OnboardingContainerView(vm: onboardingVM)
+                .faunaReadOnlyText()
                 .environment(appState)
                 .modelContainer(liveModelContainer)
                 .frame(width: 500, height: 400)
@@ -543,7 +549,21 @@ public struct FaunaMacApp: App {
     /// `security.md` forbids). Do not re-derive either one here; grow the
     /// machine instead.
     @MainActor
-    private func runLaunch() {
+    private func runLaunch(resuming claim: UInt64? = nil) {
+        // Claimed FIRST — before the sign-out gate below, whose first call of every
+        // process defers this launch across a detached finish and re-enters through
+        // `relaunch` with the same claim — so a session patch landing in that window,
+        // or while the binding resolves, retires this launch
+        // (`LaunchMachineBox.claim(resuming:)`, `beginLaunch`).
+        // A re-entry superseded while the gate's finish ran drops before touching
+        // anything — above all before `launchGate = .launching`, which would hide
+        // the shell the patch just resolved to `.ready`.
+        guard let launch = launchMachineBox.claim(resuming: claim) else {
+            logMessage(
+                level: .info, target: "fauna.app",
+                message: "[launch] superseded while the sign-out gate's finish ran — dropping it")
+            return
+        }
         let keychain = KeychainStore()
 
         // Bring credential rows in line with the iCloud-backup preference (default:
@@ -560,16 +580,13 @@ public struct FaunaMacApp: App {
         // its record still owes the wipe fails closed — no launch machine, the
         // wizard's `identity_choice` painting the refusal line, until Remove
         // Again clears it and re-enters here.
-        guard onboardingVM.launchMayProceed(relaunch: { runLaunch() }) else {
+        guard onboardingVM.launchMayProceed(relaunch: { runLaunch(resuming: launch) }) else {
             if onboardingVM.launchFailedClosed {
                 appState.isOnboarded = false
                 appState.launchGate = .ready
             }
             return
         }
-        // Claimed before the first `await` below, so a session patch landing while
-        // the binding resolves retires this launch (`LaunchMachineBox.beginLaunch`).
-        let launch = launchMachineBox.beginLaunch()
 
         Task { @MainActor in
             // Primary or bound? (`account-scoping.md` § Concurrent instances.)
@@ -1594,6 +1611,10 @@ public struct FaunaMacApp: App {
                 }
             }
             locationsModel.onBindingsChanged = fpReconcile
+            // A group set a ceremony admits mid-session re-converges too.
+            #if !FAUNA_EXCISE_P2P_SHARE
+            devicesVM.onPresenceSetsChanged = fpReconcile
+            #endif
             Task { await fpReconcile() }
         }
 
@@ -1744,6 +1765,7 @@ public struct FaunaMacApp: App {
             "pending": photoBackupEngine.pendingCount,
             "passes_started": photoBackupEngine.passesStarted,
             "passes_completed": photoBackupEngine.passesCompleted,
+            "requests_coalesced": photoBackupEngine.requestsCoalesced,
             "completed_total": photoBackupEngine.completedCount,
             "last_backup_at": photoBackupEngine.lastBackupDate?.timeIntervalSince1970 as Any,
             "enabled": AppDefaults.store.bool(forKey: PhotoBackupControlsView.enabledKey),
@@ -2231,6 +2253,16 @@ public struct FaunaMacApp: App {
                 FeedInjectPostsTestCommand.apply(command, feedVM: feedVM, client: appState.liveClient, session: appState.session)
             case "feed_inject_error":
                 FeedInjectErrorTestCommand.apply(command, feedVM: feedVM, client: appState.liveClient, session: appState.session)
+            case "sidebar_set_visible":
+                // Collapse (`visible: false`) or restore the main window's
+                // sidebar column — `MainWindowView` owns `columnVisibility` as
+                // view state and answers this notice (its DEBUG `.onReceive`).
+                // Convention 11: a malformed payload is LOUD.
+                guard let visible = command["visible"] as? Bool else {
+                    testAgentFailure("sidebar_set_visible needs a boolean `visible`")
+                    break
+                }
+                NotificationCenter.default.post(name: .faunaE2ESidebarVisibility, object: visible)
             case "auto_renew_wake":
                 // The certificate auto-renew tick's poke
                 // (`fauna_e2e_agent::AUTO_RENEW_WAKE`): end the shared FaunaKit
@@ -2525,6 +2557,15 @@ public struct FaunaMacApp: App {
                     logMessage(
                         level: .info, target: "fauna.app",
                         message: "[e2e] account_pump_now: no client yet (pre-auth)")
+                }
+            case FoldersCustodyReadHoldTestCommand.holdAction,
+                 FoldersCustodyReadHoldTestCommand.releaseAction:
+                // Park / release the Folders page's mail-custody reads so
+                // `folder-webdav-toggle` reads "still loading" (`folders.md`
+                // § Errors & edge cases). Shared FaunaKit handler (macOS + iOS,
+                // one implementation). Convention 11: a refusal is LOUD.
+                if let reason = FoldersCustodyReadHoldTestCommand.apply(action) {
+                    testAgentFailure(reason)
                 }
             case "custody_owner_resend_now":
                 // Devices outcome 15's owner send-again poke — shared FaunaKit
@@ -2947,6 +2988,15 @@ public struct FaunaMacApp: App {
                     // and every subscriber-side assertion times out
                     // (`test_subscriptions.py::test_follow_auto_grants_in_encrypted_mode`).
                     SubscriptionsAuthorCadence.shared.start(api: faunaClient.api)
+                    // Same reasoning for the TLS-cert auto-renew cadence
+                    // (tls-certificates.md § C.3): only the production launch
+                    // arms it, so an e2e-logged-in admin had no loop and the
+                    // `auto_renew_wake` seam was refused "no authenticated
+                    // session" (`test_admin_dns_cert_auto_renew_tick.py`).
+                    // Latched, and its first tick waits the full interval, so
+                    // no other walk is disturbed. Twin of iOS's and of
+                    // windows's start at its e2e login `session` seam.
+                    DnsAutoRenewCadence.shared.start(api: faunaClient.api)
                 } else {
                     Task {
                         await faunaClient.start()
@@ -2972,6 +3022,13 @@ public struct FaunaMacApp: App {
 
         if view == "welcome" {
             appState.isOnboarded = false
+        } else if view == "search" {
+            // Search is not a page: the e2e nav reveals the search bar (the
+            // sidebar field + its toolbar items, gated on `showSearchBar`) and
+            // leaves the current page as-is, as the real `search-toggle-button`
+            // does — the iOS `"search"` case's twin.
+            appState.isOnboarded = true
+            appState.showSearchBar = true
         } else if let item = SidebarItem(rawValue: view) {
             appState.isOnboarded = true
             appState.selectedSidebar = item
@@ -2993,6 +3050,9 @@ public struct FaunaMacApp: App {
             // only another actor's entry carries one (SELF normalized to nil above).
             appState.profileHome = appState.profileActorId == nil
                 ? nil : first["home_nest_url"] as? String
+            logMessage(
+                level: .info, target: "fauna.app",
+                message: "[profile] state navigation to \(view): actor=\(appState.profileActorId.map { String($0.prefix(12)) } ?? "none") home=\(appState.profileHome ?? "this nest")")
             // Admin is a sub-paged shell: the cross-app state protocol carries
             // the sub-page in the second stack entry's `id` (admin.md
             // § Navigation model; mirrors linux `nav.stack[1].id`). Absent ⇒
@@ -3009,20 +3069,19 @@ public struct FaunaMacApp: App {
                 let subId = stack.count > 1 ? (stack[1]["id"] as? String) : nil
                 appState.selectedSettingsPage = SettingsPage(navId: subId) ?? .status
             }
-        } else if view == "devices" || view == "folders" {
-            // Compat shim (2026-06-28 sync/folder UI unification): the device
-            // roster + folder control plane moved out of the top-level sidebar
-            // into the Settings shell (devices.md / folders.md). A bare
-            // `{"view":"devices"|"folders"}` nav — the pre-unification
-            // cross-app shape still used by the shared e2e action layer until
-            // every app migrates — lands on the matching Settings sub-page, so
-            // apple stays drivable during the rollout. (The canonical post-migration
-            // form `{"view":"settings","id":"devices"|"folders"}` is handled by the
-            // `.settings` branch above.)
+        } else if let sub = SettingsPage(navId: view) {
+            // A bare `{"view":<page>}` naming a page macOS keeps under the
+            // Settings rail — `nostr` (a canonical `navigation.pages` page whose
+            // tab is a declared nav exception here), `devices` and `folders`
+            // (moved into Settings 2026-06-28) — lands on that rail sub-page, so
+            // every canonical page is entered by its own name as on every other
+            // app. It was an unknown view before and left the previous page up.
+            // The two-entry form `{"view":"settings","id":<page>}` is handled
+            // by the `.settings` branch above.
             appState.isOnboarded = true
             appState.selectedSidebar = .settings
             appState.pageNavRequest += 1
-            appState.selectedSettingsPage = SettingsPage(navId: view) ?? .status
+            appState.selectedSettingsPage = sub
         } else {
             logMessage(level: .debug, target: "fauna.testagent", message: "[TestAgent] Unknown nav view: \(view)")
         }
@@ -3464,6 +3523,13 @@ public struct FaunaMacApp: App {
         // teardown, whose sign-out caller has already put its residue on the wizard.
         onboardingVM.machine.reset()
         await tearDownSessionForSwitch()
+        // The teardown leaves the gate `.ready` with no session, which mounts the
+        // wizard's first step — right for a sign-out, a flash of the wrong surface
+        // for a switch, whose launch below follows at once. Hold the launch
+        // progress view from here instead (`onboarding.md` § Wizard exit handling
+        // → *The wizard becomes the app in place*: the same holds for an
+        // append-mode run's switch); `runLaunch()` routes on from it.
+        appState.launchGate = .launching
         Task { @MainActor in
             // FP teardown must COMPLETE before the incoming session starts
             // (on-demand-files-apple.md § Apple File Provider binding, multi-account: the
@@ -3653,7 +3719,7 @@ public struct FaunaMacApp: App {
     /// new identity instead of booting a first one.
     @MainActor
     private func beginAddAccount() {
-        onboardingVM.machine.reset()
+        onboardingVM.beginAddAccount()
         appState.isAddingAccount = true
     }
 
@@ -3663,9 +3729,21 @@ public struct FaunaMacApp: App {
     private func completeAppendedAccount() async {
         await FaunaKit.completeAppendedAccount(
             wizard: onboardingVM.machine,
+            // The finished append wizard holds on `launch_progress` from here
+            // (`onboarding.md` § Wizard exit handling → *The finished wizard holds*):
+            // the outgoing account's shell never paints between the wizard and the
+            // new account's launch, which `switchAccount` keeps on `.launching`.
+            holdLaunch: { appState.launchGate = .launching },
+            // An append that never reaches the switch hands the live session back.
+            releaseLaunch: { appState.launchGate = .ready },
             dismissWizard: { appState.isAddingAccount = false },
             switchAccount: { actorId, confirmed in
-                try? await self.switchAccount(to: actorId, confirmed: confirmed)
+                do {
+                    try await self.switchAccount(to: actorId, confirmed: confirmed)
+                } catch {
+                    // Refused before any teardown: the live session is untouched.
+                    appState.launchGate = .ready
+                }
             },
             reportRefused: AccountSwitcherVM.postAddRefused
         )
@@ -3765,6 +3843,10 @@ public struct FaunaMacApp: App {
         appState.session.handle = nil
         appState.session.domain = nil
         appState.isOnboarded = false
+        // An "Add account" wizard open at the reset belongs to the erased
+        // session: left up, it covered whatever page the next account entered
+        // (the actuation sweep's bridges page read its identity choice).
+        appState.isAddingAccount = false
         self.client = nil
         appState.liveClient = nil
         // Every account was just erased, so this window serves none.
@@ -3951,3 +4033,11 @@ public struct FaunaMacApp: App {
         appState.isOnboarded = false
     }
 }
+
+#if DEBUG
+extension Notification.Name {
+    /// The e2e `sidebar_set_visible` command's notice to `MainWindowView`
+    /// (object: `Bool`, the sidebar column visible or collapsed).
+    static let faunaE2ESidebarVisibility = Notification.Name("faunaE2ESidebarVisibility")
+}
+#endif

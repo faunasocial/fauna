@@ -1004,6 +1004,7 @@ async fn seed_folder_file(
         stored_hashes: Some(vec![k1, k2]),
         sealed_hashes: None,
         min_reader: None,
+        pages: None,
     };
     let manifest_bytes = fauna_core::encoding::canonical_encode(&manifest).unwrap();
     let manifest_hash = ContentHash::of_raw(&manifest_bytes);
@@ -1453,6 +1454,318 @@ async fn a_withheld_digest_never_mirrors_off_box_and_mirrors_once_the_flag_lifts
         live_paths(&custody).contains(&hex::encode(cat_path)),
         "the custody row is back: {custody:?}"
     );
+}
+
+/// A paged file as [`seed_paged_folder_file`] wrote it at the source.
+struct PagedFolderFile {
+    root: ContentHash,
+    pages: Vec<ContentHash>,
+    chunks: Vec<ContentHash>,
+}
+
+/// Seed a folder file whose manifest is a PAGED root (`file-sync.md` § Paged
+/// manifests) at the source: a dozen opaque chunk bodies, cut by the small
+/// test rule (more than four chunks is paged, pages of two or three entries)
+/// into several pages — chunks, pages and root each framed exactly as the
+/// chunk route, the page door and the manifest door store them — and a live
+/// head row naming the root.
+async fn seed_paged_folder_file(
+    state: &Arc<AppState>,
+    folder_id: i64,
+    rel_path: &str,
+    body_tag: u8,
+) -> PagedFolderFile {
+    let store = state
+        .backup_service
+        .as_ref()
+        .expect("blob store configured")
+        .local_blob_store();
+    let put = |key: ContentHash, body: Vec<u8>| {
+        let store = Arc::clone(&store);
+        async move {
+            let framed = fauna_nest::backup::encode_blob(&body, None, false).unwrap();
+            store.put(&key, &framed).await.unwrap();
+        }
+    };
+
+    let bodies: Vec<Vec<u8>> = (0..12u8)
+        .map(|i| vec![body_tag, i, 0x5a, i.wrapping_mul(37)])
+        .collect();
+    let chunks: Vec<ContentHash> = bodies.iter().map(|b| ContentHash::of_raw(b)).collect();
+    for (key, body) in chunks.iter().zip(&bodies) {
+        put(*key, body.clone()).await;
+    }
+    let manifest = fauna_core::chunk::ChunkManifest {
+        file_hash: ContentHash::of_raw(&bodies.concat()),
+        total_size: bodies.iter().map(|b| b.len() as u64).sum(),
+        chunk_hashes: chunks.clone(),
+        chunk_sizes: bodies.iter().map(|b| b.len() as u64).collect(),
+        stored_hashes: None,
+        sealed_hashes: None,
+        min_reader: None,
+        pages: None,
+    };
+    let total_size = manifest.total_size;
+    let rule = fauna_core::manifest_paging::PagingRule::with_thresholds(4, 2, 3, 1);
+    let (root_bytes, page_bytes) = manifest.into_wire_parts_with(&rule, None).unwrap();
+    assert!(page_bytes.len() >= 3, "the fixture spans several pages");
+    let mut pages = Vec::new();
+    for bytes in page_bytes {
+        let key = ContentHash::of_raw(&bytes);
+        put(key, bytes).await;
+        pages.push(key);
+    }
+    let root = ContentHash::of_raw(&root_bytes);
+    put(root, root_bytes).await;
+
+    let path_hash = fauna_core::sync::path_hash(rel_path);
+    state
+        .db
+        .record_sync_change_metered(
+            &OWNER,
+            &OWNER,
+            None,
+            &path_hash,
+            Some(&root.digest()),
+            total_size as i64,
+            "create",
+            folder_id,
+            &[0x99; 32],
+            None,
+            None,
+            None,
+            Some(b"sealed-name-label"),
+            None,
+            None,
+            i64::MAX,
+        )
+        .await
+        .expect("record the folder head row");
+
+    PagedFolderFile {
+        root,
+        pages,
+        chunks,
+    }
+}
+
+/// Create the ordinary folder `Photos` at the source and attach it to the
+/// enrolled destination; the folder id and the mirror set's name.
+async fn attached_photos_folder(source: &Arc<AppState>) -> (i64, String) {
+    let folder_id = source
+        .db
+        .create_folder_with_options("Photos", &OWNER, fauna_nest::db::FolderOptions::default())
+        .await
+        .expect("create the ordinary folder");
+    let attach: fauna_protocol::backup::AttachFolderReply = client_call(
+        source,
+        OWNER,
+        "fauna.backup.destination.attach_folder",
+        &fauna_protocol::backup::AttachFolderRequest {
+            destination_id: DEST_ID.to_string(),
+            folder_id,
+            extra: Default::default(),
+        },
+    )
+    .await
+    .expect("owner attaches the folder");
+    assert!(attach.attached);
+    (folder_id, attach.folder_set)
+}
+
+/// **A paged file mirrors with its pages to a destination advertising
+/// `paged-manifests`** (`file-sync.md` § Paged manifests → *Compatibility*:
+/// wherever a manifest travels its pages travel with the root). The pass
+/// copies the chunks, then every page, then the root, then records custody —
+/// and the destination's custody charge, which walks the root's pages, is
+/// charged for every byte it now holds under the root.
+#[tokio::test]
+async fn a_paged_file_mirrors_with_its_pages_to_a_destination_advertising_the_token() {
+    let (_s_url, source, _s_blobs) = start_nest().await;
+    let (d_url, dest, dest_blobs) = start_nest().await;
+    register_user(&source, OWNER, "alice").await;
+    register_user(&dest, OWNER, "alice").await;
+    enroll(&source, &dest, &d_url).await;
+
+    let (folder_id, folder_set) = attached_photos_folder(&source).await;
+    let file = seed_paged_folder_file(&source, folder_id, "videos/long.mkv", 0x61).await;
+
+    let coordinator = NestBackupCoordinator::open_for_owner(Arc::clone(&source), OWNER)
+        .await
+        .unwrap()
+        .expect("owner is enrolled");
+    let dest_row = coordinator.destinations()[0].clone();
+    let report = coordinator
+        .run_folder_once(&dest_row, folder_id)
+        .await
+        .expect("the folder pass runs");
+    assert_eq!(
+        (report.uploaded_paths, report.paged_unsupported_paths),
+        (1, 0),
+        "the paged path mirrors: {report:?}"
+    );
+
+    let mut held: Vec<ContentHash> = vec![file.root];
+    held.extend(&file.pages);
+    held.extend(&file.chunks);
+    for key in &held {
+        assert!(
+            dest_blobs.exists(key).await.unwrap(),
+            "the root, every page and every chunk land at the destination: {}",
+            hex::encode(key.digest())
+        );
+    }
+
+    let custody = dest
+        .db
+        .list_backup_custody_in_set(&OWNER, &folder_set)
+        .await
+        .unwrap();
+    assert_eq!(custody.len(), 1, "one custody row for the paged path");
+    assert_eq!(custody[0].manifest_hash, file.root.digest().to_vec());
+    let mut digests: Vec<[u8; 32]> = held.iter().map(|k| k.digest()).collect();
+    digests.sort_unstable();
+    digests.dedup();
+    let sizes = dest.db.get_blob_sizes(&digests).await.unwrap();
+    assert_eq!(sizes.len(), digests.len(), "every held blob is metered");
+    assert_eq!(
+        custody[0].size_bytes,
+        sizes.values().sum::<i64>(),
+        "the custody row is charged for the root, every page and every chunk"
+    );
+
+    // An unchanged head re-sends nothing.
+    let report = coordinator
+        .run_folder_once(&dest_row, folder_id)
+        .await
+        .expect("second pass");
+    assert_eq!(report.uploaded_paths, 0);
+}
+
+/// **Against a destination without `paged-manifests` a paged path is skipped
+/// and reported, and nothing of it is sent** — never a chunkless root, never
+/// its pages or chunks — while the folder's single-manifest files mirror as
+/// always. The destination stands in for an older nest by leaving the token
+/// out of its `fauna.nest.info` (the `test-hooks` advertise seam).
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+async fn a_paged_file_is_not_sent_to_a_destination_without_the_token() {
+    let (_s_url, source, _s_blobs) = start_nest().await;
+    let (d_url, dest, dest_blobs) = start_nest().await;
+    register_user(&source, OWNER, "alice").await;
+    register_user(&dest, OWNER, "alice").await;
+    enroll(&source, &dest, &d_url).await;
+    dest.capabilities_withheld
+        .lock()
+        .unwrap()
+        .insert(fauna_protocol::discovery::capability::PAGED_MANIFESTS.to_string());
+
+    let (folder_id, folder_set) = attached_photos_folder(&source).await;
+    let file = seed_paged_folder_file(&source, folder_id, "videos/long.mkv", 0x62).await;
+    let (_, small_manifest, small_keys) =
+        seed_folder_file(&source, folder_id, "photos/cat.jpg", 0x41).await;
+
+    let coordinator = NestBackupCoordinator::open_for_owner(Arc::clone(&source), OWNER)
+        .await
+        .unwrap()
+        .expect("owner is enrolled");
+    let dest_row = coordinator.destinations()[0].clone();
+    let report = coordinator
+        .run_folder_once(&dest_row, folder_id)
+        .await
+        .expect("the folder pass runs");
+    assert_eq!(
+        (report.uploaded_paths, report.paged_unsupported_paths),
+        (1, 1),
+        "the single-manifest file mirrors; the paged one is skipped and counted: {report:?}"
+    );
+    let mut paged: Vec<ContentHash> = vec![file.root];
+    paged.extend(&file.pages);
+    paged.extend(&file.chunks);
+    for key in &paged {
+        assert!(
+            !dest_blobs.exists(key).await.unwrap(),
+            "nothing of the paged file is sent: {}",
+            hex::encode(key.digest())
+        );
+    }
+    for key in small_keys.iter().chain(std::iter::once(&small_manifest)) {
+        assert!(dest_blobs.exists(key).await.unwrap());
+    }
+    let custody = dest
+        .db
+        .list_backup_custody_in_set(&OWNER, &folder_set)
+        .await
+        .unwrap();
+    assert!(
+        custody
+            .iter()
+            .all(|row| row.manifest_hash != file.root.digest().to_vec()),
+        "no custody row names the paged root"
+    );
+
+    // Skipped again, and counted again, on every pass while the token is absent.
+    let report = coordinator
+        .run_folder_once(&dest_row, folder_id)
+        .await
+        .expect("second pass");
+    assert_eq!(
+        (report.uploaded_paths, report.paged_unsupported_paths),
+        (0, 1)
+    );
+}
+
+/// **A withheld digest named only by a page keeps a paged path off the
+/// destination** (`moderation.md` § Legal takedown, path 3): the withhold
+/// check walks the root's pages, so a withheld page — or a withheld chunk
+/// that only a page names — binds the path exactly as a withheld chunk of a
+/// single manifest does.
+#[tokio::test]
+async fn a_withheld_digest_named_only_by_a_page_keeps_the_paged_path_off_the_destination() {
+    let (_s_url, source, _s_blobs) = start_nest().await;
+    let (d_url, dest, dest_blobs) = start_nest().await;
+    register_user(&source, OWNER, "alice").await;
+    register_user(&dest, OWNER, "alice").await;
+    enroll(&source, &dest, &d_url).await;
+
+    let (folder_id, _folder_set) = attached_photos_folder(&source).await;
+    let file = seed_paged_folder_file(&source, folder_id, "videos/long.mkv", 0x63).await;
+
+    let coordinator = NestBackupCoordinator::open_for_owner(Arc::clone(&source), OWNER)
+        .await
+        .unwrap()
+        .expect("owner is enrolled");
+    let dest_row = coordinator.destinations()[0].clone();
+
+    let last_chunk = *file.chunks.last().unwrap();
+    for withheld in [file.pages[1], last_chunk] {
+        source
+            .db
+            .replace_blob_legal_withhold(&[withheld.digest()])
+            .await
+            .unwrap();
+        let report = coordinator
+            .run_folder_once(&dest_row, folder_id)
+            .await
+            .expect("the pass runs under the withhold");
+        assert_eq!(
+            (report.uploaded_paths, report.withheld_paths),
+            (0, 1),
+            "withholding {} keeps the paged path off: {report:?}",
+            hex::encode(withheld.digest())
+        );
+        assert!(!dest_blobs.exists(&file.root).await.unwrap());
+        assert!(!dest_blobs.exists(&withheld).await.unwrap());
+    }
+
+    // The flag lifts → the path mirrors whole on the next pass.
+    source.db.replace_blob_legal_withhold(&[]).await.unwrap();
+    let report = coordinator
+        .run_folder_once(&dest_row, folder_id)
+        .await
+        .expect("the pass runs once the flag lifts");
+    assert_eq!((report.uploaded_paths, report.withheld_paths), (1, 0));
+    assert!(dest_blobs.exists(&file.root).await.unwrap());
 }
 
 /// **A standing withhold that names none of a folder's mirrored paths costs
@@ -2592,6 +2905,103 @@ async fn a_crash_between_the_journal_adopt_and_the_commit_resumes_on_retry() {
         .await
         .unwrap_err_or_panic("a live account refuses");
     assert_eq!(err.code, "fauna.backup.target_not_empty");
+}
+
+/// The wire code a repeat of a finished flip answers (`backup-destinations.md`
+/// § Third destination kind → *A lived-in segment set is completed by record in
+/// the same gesture*, rule (2)).
+const ALREADY_MATERIALIZED: &str = "fauna.backup.already_materialized";
+
+/// **A repeat of a finished flip answers `already_materialized`, on the
+/// nest's receipt** — `backup-destinations.md` § Third destination kind → *A
+/// lived-in segment set is completed by record in the same gesture*, rule (2).
+///
+/// The owner presses the re-seed gesture twice: the second run delivers the
+/// same copy again ([`first_flip`] puts the landing set back) and the verb
+/// meets a live account. The commit wrote the receipt — the corpus's ledger
+/// generation and the mirror's manifest anchor — so the answer is its own
+/// code, never `target_not_empty`, and the account is left exactly as the
+/// first flip left it — save the re-delivered landing set, which the copy the
+/// receipt covers makes derived twice over: the verb reclaims it, row and
+/// custody, as it does after a whole landing (`reserved-folders.md` § __mail
+/// Sync → *The landing set*; `client-device-custodian.md` § *Empty-target
+/// rule*, the wire face).
+#[tokio::test]
+async fn a_repeat_of_a_finished_flip_answers_already_materialized() {
+    let (_source, dest, _d_url) = delivered_filed().await;
+    let landing = land(&dest, "__mail").await;
+    first_flip(&dest, "__mail").await;
+
+    let receipt = dest
+        .db
+        .materialize_receipt_get(&OWNER, &landing)
+        .await
+        .unwrap()
+        .expect("the commit wrote the receipt");
+    assert!(receipt.ledger_generation > 0, "{receipt:?}");
+    let inbox = serve_mailbox(&dest, &OWNER, "INBOX").await;
+    let content = segment_area_contents(&dest);
+    assert!(
+        dest.db
+            .get_folder_for_actor(&landing, &OWNER)
+            .await
+            .unwrap()
+            .is_some(),
+        "the second run's delivery stands before the repeat"
+    );
+
+    let err = materialize(&dest, "__mail")
+        .await
+        .unwrap_err_or_panic("a finished flip is not done twice");
+    assert_eq!(err.code, ALREADY_MATERIALIZED, "{err:?}");
+    assert_eq!(serve_mailbox(&dest, &OWNER, "INBOX").await, inbox);
+    assert_eq!(segment_area_contents(&dest), content);
+    assert!(
+        dest.db
+            .get_folder_for_actor(&landing, &OWNER)
+            .await
+            .unwrap()
+            .is_none(),
+        "the covered repeat's landing set is reclaimed"
+    );
+    assert!(
+        dest.db
+            .list_backup_custody_in_set(&OWNER, &landing)
+            .await
+            .unwrap()
+            .is_empty(),
+        "and its custody with it"
+    );
+}
+
+/// **The receipt survives a restart.** The same repeat, with the nest process
+/// gone and back over the same `nest.db` and data directory in between:
+/// nothing in memory carries the answer.
+#[tokio::test]
+async fn the_materialize_receipt_survives_a_nest_restart() {
+    let (_tmp, dir) = scratch_tempdir();
+    let secret = [0xB7u8; 32];
+    let (_s_url, source, _s_blobs) = start_nest().await;
+    let db = Arc::new(CacheDb::open(dir.join("nest.db")).unwrap());
+    let (d_url, dest, _d_blobs) = start_nest_on(dir.clone(), db, secret).await;
+    register_user(&source, OWNER, "alice").await;
+    register_user(&dest, OWNER, "alice").await;
+    file_mail(&source, &OWNER, FILED).await;
+    enroll(&source, &dest, &d_url).await;
+    NestBackupWorker::new(Arc::clone(&source), std::time::Duration::MAX)
+        .run_once()
+        .await
+        .expect("the hosting sweep runs");
+    grant_key_to(&dest).await;
+    first_flip(&dest, "__mail").await;
+    drop(dest);
+
+    let db = Arc::new(CacheDb::open(dir.join("nest.db")).unwrap());
+    let (_d_url, dest, _d_blobs) = start_nest_on(dir.clone(), db, secret).await;
+    let err = materialize(&dest, "__mail")
+        .await
+        .unwrap_err_or_panic("a finished flip is not done twice");
+    assert_eq!(err.code, ALREADY_MATERIALIZED, "{err:?}");
 }
 
 /// **An interrupted flip completes over an arrival that landed since** —
@@ -5832,6 +6242,39 @@ async fn materializing_onto_a_lived_in_folder_refuses_and_deletes_nothing() {
         1,
         "and the custody it refused to re-home is still there"
     );
+}
+
+/// **A repeat of a finished folder flip answers `already_materialized`, even
+/// once the owner has lived in the restored folder** — `backup-destinations.md`
+/// § Third destination kind → *A lived-in segment set is completed by record in
+/// the same gesture*, rule (2). The page that left nothing remaining wrote the
+/// receipt (the copy's anchor); the owner then filed a new file there, so the
+/// folder holds a row this ceremony did not write, and a repeat of the same
+/// copy is still answered by the receipt — never `target_not_empty`, which is
+/// left meaning a folder the ceremony never made live.
+#[tokio::test]
+async fn a_repeat_of_a_finished_folder_flip_answers_already_materialized() {
+    let (dest, folder_set, _path_hash, _manifest_hash) = deliver_a_covered_folder().await;
+    let target = prepare_target(&dest, "Photos").await;
+    let done = materialize_folder_whole(&dest, &folder_set, "Photos")
+        .await
+        .expect("the flip");
+    assert_eq!(done.remaining, Some(0));
+    assert!(
+        dest.db
+            .materialize_receipt_get(&OWNER, &folder_set)
+            .await
+            .unwrap()
+            .is_some(),
+        "the page that left nothing remaining wrote the receipt"
+    );
+    seed_folder_file(&dest, target, "photos/dog.jpg", 0x51).await;
+
+    let err = materialize_folder_whole(&dest, &folder_set, "Photos")
+        .await
+        .expect_err("a finished flip is not done twice");
+    assert_eq!(err.code, "fauna.backup.already_materialized", "{err:?}");
+    assert_eq!(live_rows(&dest, target).await.len(), 2, "nothing changed");
 }
 
 /// **A custody row with no sealed name refuses by its own code.** The

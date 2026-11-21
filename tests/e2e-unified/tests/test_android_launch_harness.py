@@ -216,6 +216,72 @@ def test_relaunch_does_not_reseed(tmp_path, launches):
     )
 
 
+def test_relaunch_as_launched_does_not_reseed(tmp_path, launches):
+    # The factory-reset journeys reopen with `relaunch_as_launched()` (the
+    # trust the first launch read, never a fresh read): on android that reopen
+    # must withhold the identity seed exactly as `relaunch()` does, or the
+    # journey reads back the harness's copy instead of the app's own store.
+    harness = _harness(tmp_path)
+    harness.launch(secret_hex=SECRET, node_url=NODE_URL, trust=None)
+    harness.relaunch_as_launched()
+    kinds = [kind for kind, _ in launches]
+    assert kinds == ["launch", "teardown", "launch"]
+    first, second = _launch_configs(launches)
+    assert first["seed_credentials"]
+    assert "seed_credentials" not in second, (
+        "relaunch_as_launched re-wrote the launch's seed over whatever the app "
+        f"stored since: {second['seed_credentials']!r}"
+    )
+
+
+def test_relaunch_as_launched_keeps_the_first_trust_read(tmp_path, launches):
+    trusted = []
+    harness = _harness(tmp_path, trusted=trusted)
+    harness.launch(secret_hex=SECRET, node_url=NODE_URL, trust={"port": 13001})
+    harness.relaunch_as_launched()
+    assert len(trusted) == 1, "relaunch_as_launched must not read the nest's identity again"
+    for config in _launch_configs(launches):
+        assert config["environment"]["FAUNA_E2E_TRUST_NEST_IDENTITY"] == "id-for-13001"
+
+
+def test_the_harness_takes_app_launch_configs_android_keys(tmp_path, launches):
+    # `helpers.app_launch.app_launch_config("android", …)` hands back the run
+    # facts beside `app_path` (the bridge APK, device, adb server), and every
+    # direct-launch module spreads it into `make_launch_harness(client, **cfg)`
+    # — so the builder must take those keys, and the launch must carry the
+    # caller's values (an `android-kids` caller names the kids bridge APK).
+    harness = make_launch_harness(
+        "android", tmp_path=tmp_path, app_path="/tmp/app-debug.apk",
+        test_apk="/tmp/kids-test.apk", device_serial="emulator-5590",
+        adb_server="127.0.0.1:5037", seed_trust=lambda env, nest: None,
+    )
+    harness.launch(secret_hex=SECRET, node_url=NODE_URL, trust=None)
+    (config,) = _launch_configs(launches)
+    assert config["test_apk"] == "/tmp/kids-test.apk"
+    assert config["device_serial"] == "emulator-5590"
+    assert config["adb_server"] == "127.0.0.1:5037"
+
+
+def test_the_harness_store_reads_the_device_file_once_launched(tmp_path, launches, monkeypatch):
+    # The factory-reset smoke (case G) reads `harness.store.stored_accounts()`
+    # after the reset: on android that is the live on-device file, read over
+    # the launched driver's bridge — never the pending seed the harness sent.
+    monkeypatch.setattr(
+        AndroidBridgeDriver, "credential_map", lambda self: {"fauna/index": "{}"},
+    )
+    harness = _harness(tmp_path)
+    harness.launch(secret_hex=SECRET, node_url=NODE_URL, trust=None)
+    assert harness.store.stored_accounts() == {"fauna/index"}
+
+
+def test_the_android_launch_keys_are_refused_off_android(tmp_path):
+    with pytest.raises(ValueError, match="android"):
+        make_launch_harness(
+            "tui", tmp_path=tmp_path, app_path="/tmp/fauna-tui",
+            test_apk="/tmp/x.apk", seed_trust=lambda env, nest: None,
+        )
+
+
 def test_relaunch_reseeds_trust_from_the_nest_each_time(tmp_path, launches):
     trusted = []
     harness = _harness(tmp_path, trusted=trusted)
@@ -285,7 +351,7 @@ def _kotlin_key_list(source, name):
 
 def test_the_android_app_launch_env_sets_the_dns_seams():
     source = _CONFTEST.read_text(encoding="utf-8")
-    start = source.index('elif app_name == "android":')
+    start = source.index('elif KIDS_PARENT.get(app_name, app_name) == "android":')
     block = source[start:source.index('config["environment"] = env', start)]
     for name in _DNS_SEAMS:
         assert re.search(rf'"{name}":\s*"', block), (
@@ -395,6 +461,24 @@ def test_the_real_conversations_env_rides_both_doors(path):
     assert not missing, (
         f"{path.name} drops {sorted(missing)}: the real-conversations launch env "
         "never reaches the android app's process environment"
+    )
+
+
+@pytest.mark.parametrize("path", [_BRIDGE_KT, _MAIN_ACTIVITY_KT], ids=lambda p: p.name)
+def test_the_phone_seat_receive_knobs_ride_both_doors(path):
+    """The second-real-engine seat's android arm (`_phone_as_second_real_seat`)
+    relaunches the phone as bob with his ticker muted and, for the drain-alone
+    shape, his push arm suppressed. Both are read via std::env when his
+    conversations session starts, so a name either door drops leaves bob on the
+    session cadence with his push arm live, and the witness cannot fail."""
+    import conftest  # noqa: PLC0415
+
+    keys = _kotlin_key_list(path.read_text(encoding="utf-8"), "DNS_E2E_ENV_KEYS")
+    knobs = {conftest._PHONE_SEAT_TICKER_KNOB[0], conftest._PHONE_SEAT_PUSH_KNOB[0]}
+    missing = knobs - keys
+    assert not missing, (
+        f"{path.name} drops {sorted(missing)}: bob's receive knobs never reach "
+        "the android phone's process environment"
     )
 
 

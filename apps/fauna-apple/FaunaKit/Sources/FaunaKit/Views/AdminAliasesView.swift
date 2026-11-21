@@ -20,18 +20,21 @@ import SwiftUI
 ///
 /// `admin-nav-back` is provided by the admin shell rail (macOS), not this page.
 public struct AdminAliasesView: View {
-    @Environment(FaunaClient.self) private var client: FaunaClient?
     @State private var vm = ForwardersVM()
     /// Reload trigger — macOS passes the shell's `navGeneration`; iOS leaves it 0
     /// (the NavigationLink re-mounts the view, re-running the load).
     var reloadToken: Int = 0
+    /// Opens `admin-dns` — the step that unblocks the forwarder form when the
+    /// nest hosts no local domain. Wired by each target's admin shell.
+    private let onOpenDomains: (() -> Void)?
 
     @State private var addDomain = ""
     @State private var addPattern = ""
     @State private var addTarget = ""
 
-    public init(reloadToken: Int = 0) {
+    public init(reloadToken: Int = 0, onOpenDomains: (() -> Void)? = nil) {
         self.reloadToken = reloadToken
+        self.onOpenDomains = onOpenDomains
     }
 
     public var body: some View {
@@ -60,9 +63,7 @@ public struct AdminAliasesView: View {
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .task(id: reloadToken) {
-            guard let client else { return }
-            await vm.configure(api: client.api)
+        .adminReadOnEntryAndReconnect(vm, reloadToken: reloadToken) {
             if addDomain.isEmpty || !vm.localDomains.contains(addDomain) {
                 addDomain = vm.localDomains.first ?? ""
             }
@@ -116,39 +117,62 @@ public struct AdminAliasesView: View {
                 options: { vm.localDomains },
                 isEnabled: { !vm.isBusy }
             ) { addDomain = $0 }
+            // The picker and fields follow the form's answer: the read
+            // (admin.md § Errors & edge cases, *Controls wait for their read*),
+            // then a hosted domain to put the forwarder on (§ 4, *A forwarder
+            // needs a hosted domain*).
+            .faunaPossible(vm.formAnswer)
 
             TextField(L.admin.aliasesPage.forwarderLocalPartPlaceholder, text: $addPattern)
                 .autocorrectionDisabled()
                 .accessibilityIdentifier(Ids.adminAliasesForwarderAddPatternInput)
                 .automationField(Ids.adminAliasesForwarderAddPatternInput,
                                  text: $addPattern, isEnabled: { !vm.isBusy })
+                .faunaPossible(vm.formAnswer)
 
             TextField(L.admin.aliasesPage.forwarderTargetPlaceholder, text: $addTarget)
                 .autocorrectionDisabled()
                 .accessibilityIdentifier(Ids.adminAliasesForwarderAddTargetInput)
                 .automationField(Ids.adminAliasesForwarderAddTargetInput,
                                  text: $addTarget, isEnabled: { !vm.isBusy })
+                .faunaPossible(vm.formAnswer)
 
+            // The submit paints its own answer over the picked domain and the
+            // draft; the press asks it again (`ForwardersVM.create`).
+            let createAnswer = vm.createAnswer(localDomain: addDomain, pattern: addPattern,
+                                               forwardTarget: addTarget)
             Button(L.admin.aliasesPage.createForwarder) {
                 submit()
             }
-            .disabled(vm.isBusy || addDomain.isEmpty
-                      || addPattern.trimmed.isEmpty || addTarget.trimmed.isEmpty)
             .accessibilityIdentifier(Ids.adminAliasesForwarderAddSubmitButton)
-            .automationActivate(
-                Ids.adminAliasesForwarderAddSubmitButton,
-                isEnabled: {
-                    !(vm.isBusy || addDomain.isEmpty
-                      || addPattern.trimmed.isEmpty || addTarget.trimmed.isEmpty)
-                }
-            ) { submit() }
+            .automationActivate(Ids.adminAliasesForwarderAddSubmitButton) { submit() }
             .faunaGate("fauna.bridges.create_forwarder")
+            .faunaPossible(createAnswer)
+            FaunaPossibilityReason(createAnswer)
+
+            // The one step that unblocks the form — the DNS page, where a
+            // domain is added — offered only for want of a hosted domain, and
+            // live whatever the form's answer (it is outside the form's paint).
+            if vm.offersDomainsStep, let onOpenDomains {
+                Button(L.admin.aliasesPage.openDomains) { onOpenDomains() }
+                    .accessibilityIdentifier(Ids.adminAliasesForwarderAddDomainsStep)
+                    .automationActivate(Ids.adminAliasesForwarderAddDomainsStep) { onOpenDomains() }
+            }
         }
     }
 
     @ViewBuilder
     private var forwarderList: some View {
-        if vm.forwarders.isEmpty {
+        if vm.listRead != .resolved {
+            // Loading (or failed) is not empty: say which, under the list's
+            // own id, until the read resolves.
+            let reason = readPossibility(read: vm.listRead).reasonText ?? ""
+            Text(reason)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier(Ids.adminAliasesForwarderList)
+                .automationValue(Ids.adminAliasesForwarderList, text: { reason })
+        } else if vm.forwarders.isEmpty {
             Text(L.admin.aliasesPage.noForwarders)
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -204,15 +228,19 @@ public struct AdminAliasesView: View {
     // MARK: - Actions
 
     private func submit() {
+        // A blank draft is the create answer's to refuse, out loud
+        // (`ForwardersVM.create`), never a silent return here.
         let pattern = addPattern.trimmed
         let target = addTarget.trimmed
-        guard !addDomain.isEmpty, !pattern.isEmpty, !target.isEmpty else { return }
         let domain = addDomain
+        // A refused press keeps the typed draft in the form.
+        let refused = vm.createAnswer(localDomain: domain, pattern: pattern,
+                                      forwardTarget: target).refusal != nil
         Task {
             await vm.create(localDomain: domain, pattern: pattern, forwardTarget: target)
             // Clear the local-part + target on success (matches linux/windows);
             // keep the domain selection for adding several to the same domain.
-            if vm.actionError == nil {
+            if !refused && vm.actionError == nil {
                 addPattern = ""
                 addTarget = ""
             }

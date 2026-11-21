@@ -326,6 +326,13 @@ pub(super) fn root_page(
     // but no way for a human to reach it, so it was drivable only from the e2e
     // nav patch — a page nobody can open is not a configuration surface (the
     // product invariant that the apps are the ONLY configuration surface).
+    // Every mail sub-page row below is gated on the one shared answer
+    // (`ui/mail-settings.md` § Errors & edge cases, the mail-usable gate):
+    // absent where this box can never serve mail, disabled with the reason
+    // while mail is off or still being read — the Mail & Calendar row above,
+    // left live, is the one step that unblocks them (`ui/README.md` § Offer
+    // only what is possible, rules 2, 3 and 5).
+    let mail_usable = state.mail_usable();
     els.push(
         Element::gesture_button(
             rail_id("mail-aliases"),
@@ -333,6 +340,7 @@ pub(super) fn root_page(
             true,
             Gesture::Settings(Action::OpenMailAliases),
         )
+        .possible(mail_usable.clone())
         .nav(),
     );
     els.push(
@@ -342,6 +350,7 @@ pub(super) fn root_page(
             true,
             Gesture::Settings(Action::OpenMailSpam),
         )
+        .possible(mail_usable.clone())
         .nav(),
     );
     // Export mailbox, then Import mailbox, then Lists + List members, continue
@@ -360,6 +369,7 @@ pub(super) fn root_page(
             true,
             Gesture::Settings(Action::OpenMailExport),
         )
+        .possible(mail_usable.clone())
         .nav(),
     );
     els.push(
@@ -369,6 +379,7 @@ pub(super) fn root_page(
             true,
             Gesture::Settings(Action::OpenMailImport),
         )
+        .possible(mail_usable.clone())
         .nav(),
     );
     // Import from other services follows Import mailbox in the canonical rail
@@ -393,6 +404,7 @@ pub(super) fn root_page(
             true,
             Gesture::Settings(Action::OpenMailLists),
         )
+        .possible(mail_usable.clone())
         .nav(),
     );
     els.push(
@@ -402,6 +414,7 @@ pub(super) fn root_page(
             true,
             Gesture::Settings(Action::OpenMailListMembers),
         )
+        .possible(mail_usable.clone())
         .nav(),
     );
     els.push(

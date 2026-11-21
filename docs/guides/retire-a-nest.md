@@ -31,7 +31,7 @@
 
 1. **Pick your cloud provider and enter your token**, then choose **Verify
    credentials**. For a provider you sign in to (rather than paste a token),
-   type the provider's address and choose **Sign in at the provider…**.
+   type the provider's address and choose **Sign in at the provider…**; once you have approved the sign-in there, come back and choose **Verify credentials**.
 2. **Pick the server.** The list shows only the servers Fauna created in that account — a server someone else made there is never shown. The exception is OVH: OVH has no way to mark a server as Fauna's, so every server your OVH credentials can reach is listed, a server you built there by hand included, each with the note **Not marked as created by Fauna — check the name carefully before deleting it**. Each row shows the
    server's name, its address, and the domain it served, when the app could
    confirm it (the domain's address has to match the server's; the app never
@@ -41,9 +41,8 @@
    will be removed first, and which you'll have to remove yourself.
 4. **Type the server's name exactly**, then choose **Delete the server and clean
    up DNS**. The button stays greyed out until the name matches.
-5. **Watch the two steps.** First the DNS records that belong to the server are removed: its address records only where they still hold this server's address, so any record you have pointed elsewhere is left alone; the mail and calendar records that lead to its mail server; and, where the app remembers publishing them, its mail-signing key and identity records — another service's entry at the same name is kept. Then the server is deleted.
-6. **Done** shows what's left for you to remove by hand, with a button to copy
-   the list.
+5. **Watch the two steps.** First the DNS records that belong to the server are removed: its address records only where they still hold this server's address, so any record you have pointed elsewhere is left alone; the mail and calendar records that lead to its mail server, and its mail server's certificate pin (a TLSA record); and, where the app remembers publishing them, its mail-signing key and identity records — another service's entry at the same name is kept. Then the server is deleted.
+6. **Done** shows what's left for you to remove by hand, with a button to copy the list. A record marked "Remove now" still points at the deleted server, so remove it first; one marked "Stale, remove when convenient" only shares its name with records that aren't Fauna's.
 
 ## If something goes wrong
 
@@ -79,6 +78,5 @@ nothing.
 
 ## After retiring
 
-- Retiring the server you were signed into ends that nest: the app goes back to
-  its start screen.
-- The copy of the server's own key that your Fauna app keeps for you is **not** thrown away. If you later want the same nest back on a new server, choose **Recover a lost box** — on the screen where you choose **Create New Identity**, or on the "Couldn't reach your nest" screen — and then bring your data back from a backup (*[Backup with Fauna](cloud-backup.md)*).
+- Retiring the server you were signed into ends that nest: the app shows the "Couldn't reach your nest" screen, because the server no longer answers. Nothing stored on this device is erased, and your identity stays on it.
+- The copy of the server's own key that your Fauna app keeps for you is **not** thrown away. If you later want the same nest back on a new server, choose **Recover a lost box** — on the screen where you choose **Create New Identity**, or on the "Couldn't reach your nest" screen, where it appears once the app finds a server key it keeps for you — and then bring your data back from a backup (*[Backup with Fauna](cloud-backup.md)*).

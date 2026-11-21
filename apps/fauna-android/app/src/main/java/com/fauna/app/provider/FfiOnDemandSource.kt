@@ -37,7 +37,9 @@ import uniffi.fauna_folders_machine.SetPark
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.first
@@ -165,6 +167,10 @@ class FfiOnDemandSource @Inject constructor(
      * emits, so a read that re-planned would feed its own trigger.
      */
     fun desiredScopedIds(): List<String> = desired.keys.toList()
+
+    /** [watchPlacedHosts] over this source's own re-plan ticks and held plan. */
+    fun watchPlacedHosts(scope: CoroutineScope, onHostFailure: (String, Throwable) -> Unit): Job =
+        watchPlacedHosts(scope, reconciled, ::desiredScopedIds, onHostFailure)
 
     override suspend fun host(scopedId: String): OnDemandSetHost? {
         hosts[scopedId]?.let { return it }
@@ -439,7 +445,7 @@ class FfiOnDemandSource @Inject constructor(
         held.values.forEach { runCatching { it.close() } }
         if (gone != null) {
             gone.nest?.let { nest -> runCatching { runBlocking { nest.disconnect() } }; nest.close() }
-            File(context.cacheDir, "on-demand/${gone.actorHex}").deleteRecursively()
+            File(context.cacheDir, "$CACHE_TREE/${gone.actorHex}").deleteRecursively()
         }
         teardownListeners.forEach { runCatching { it() } }
     }
@@ -457,6 +463,8 @@ class FfiOnDemandSource @Inject constructor(
         override suspend fun renameDocument(fromRel: String, toRel: String) =
             ffi.renameDocument(fromRel, toRel).toAck()
         override suspend fun refresh() = ffi.refresh()
+        override suspend fun hydratedRels() = ffi.hydratedRels()
+        override suspend fun lookupBody(rel: String) = ffi.lookupBody(rel)
         override suspend fun sweepKeptRoot() =
             ffi.sweepKeptRoot().let { OnDemandSweep(it.recorded, it.pending, it.evicted) }
         override suspend fun restoreRetainedVersion(conflictId: Long) = ffi.restoreRetainedVersion(conflictId)
@@ -470,6 +478,14 @@ class FfiOnDemandSource @Inject constructor(
 
     companion object {
         private const val TAG = "FfiOnDemandSource"
+
+        /**
+         * The directory under the app's cache dir that holds every account's
+         * cache roots (`<cacheDir>/on-demand/<actor-id-hex>/…`; the shared
+         * Rust `OwnedTree::for_set` derives each set's below it). Named here
+         * for the one app-side delete of a whole account's tree at teardown.
+         */
+        const val CACHE_TREE = "on-demand"
 
         /**
          * Android's **app default** (`devices.md` § Device names, class (2)):

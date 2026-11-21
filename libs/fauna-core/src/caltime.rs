@@ -359,6 +359,29 @@ pub fn pan_step(mode: CalendarViewMode) -> PanStep {
     }
 }
 
+/// The i18n key [`pan_possibility`] blocks the pan pair on in agenda view.
+pub const PAN_NONE_IN_AGENDA_KEY: &str = "events.pan_none_in_agenda";
+
+/// Whether `events-prev-month` / `events-next-month` can do anything in
+/// `mode` — the pan pair's one predicate (`docs/goal/ui/README.md` § Offer only
+/// what is possible, rules 2 and 6; `docs/goal/ui/events.md` § User actions).
+///
+/// Possible wherever [`pan_step`] moves; *blocked* in agenda, with the reason
+/// naming the step that unblocks it (switching to Month, Week or Day). Blocked,
+/// never absent: the person can make it possible from the same toolbar, and
+/// ui.yaml's `calendar-view-controls` keeps the pair on every view. Every app
+/// paints the pair from this answer, and the pan action asks it again and
+/// refuses with the same reason, so the offer and the act cannot disagree.
+pub fn pan_possibility(mode: CalendarViewMode) -> crate::possibility::Possibility {
+    use crate::possibility::Possibility;
+    match pan_step(mode) {
+        PanStep::None => {
+            Possibility::blocked(crate::localized::LocalizedText::key(PAN_NONE_IN_AGENDA_KEY))
+        }
+        PanStep::Days(_) | PanStep::Months(_) => Possibility::Possible,
+    }
+}
+
 /// Apply one pan click to `anchor` — [`pan_step`] walked with this module's own
 /// date math, for the Rust and wasm consumers.
 ///
@@ -871,6 +894,34 @@ mod tests {
         assert_eq!(pan_step(CalendarViewMode::Day), PanStep::Days(1));
         // Agenda is date-unfiltered on every app, so there is no range to pan.
         assert_eq!(pan_step(CalendarViewMode::Agenda), PanStep::None);
+    }
+
+    #[test]
+    fn pan_possibility_blocks_the_pair_in_agenda_with_its_reason() {
+        use crate::localized::LocalizedText;
+        use crate::possibility::Possibility;
+        // `docs/goal/ui/README.md` § Offer only what is possible, rule 2: the
+        // person unblocks the pair by switching view, so it is disabled with
+        // its reason, never withdrawn.
+        assert_eq!(
+            pan_possibility(CalendarViewMode::Agenda),
+            Possibility::blocked(LocalizedText::key(PAN_NONE_IN_AGENDA_KEY))
+        );
+        for mode in [
+            CalendarViewMode::Month,
+            CalendarViewMode::Week,
+            CalendarViewMode::Day,
+        ] {
+            assert_eq!(pan_possibility(mode), Possibility::Possible, "{mode:?}");
+        }
+        // One answer, two readers: possible exactly where a pan moves.
+        for mode in CalendarViewMode::ALL {
+            assert_eq!(
+                pan_possibility(mode).is_possible(),
+                pan_step(mode) != PanStep::None,
+                "{mode:?}"
+            );
+        }
     }
 
     #[test]

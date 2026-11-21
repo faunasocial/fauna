@@ -23,6 +23,8 @@ import com.fauna.app.ui.viewmodel.RestoreHistoryVM
 import com.fauna.ffi.FfiRestoreDivergenceRow
 import com.fauna.ffi.FfiRestoreHistoryRow
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.AlertDialog
+import com.fauna.app.ui.controls.TextButton
 
 /**
  * The read-only restore surface on the Backups page (`docs/goal/ui/backups.md`

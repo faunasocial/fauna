@@ -74,9 +74,10 @@ pub(super) fn settings_elements(state: &AdminState) -> Vec<Element> {
             )
             .within(TIER_ITEM, i),
         );
-        // admin.md § 3 — *Removing a tier* (ID user-approved 2026-10-19): on
-        // every row, `free` included — which tier is removable is the nest's
-        // call, and its refusal reads on `error-message`. No confirm dialog.
+        // admin.md § 3 — *Removing a tier* (ID user-approved 2026-10-19): the
+        // shared answer leaves it off `free`, which the nest always refuses; a
+        // tier still in use is the nest's refusal, read on `error-message`.
+        // No confirm dialog.
         els.push(
             Element::gesture_button(
                 ids::ADMIN_SETTINGS_TIER_DELETE_BUTTON,
@@ -84,6 +85,7 @@ pub(super) fn settings_elements(state: &AdminState) -> Vec<Element> {
                 true,
                 Gesture::Admin(Action::DeleteTier { row: i }),
             )
+            .possible(fauna_client_admin::tier_delete_possibility(&tier.name))
             .within(TIER_ITEM, i),
         );
     }
@@ -148,14 +150,7 @@ pub(super) fn settings_elements(state: &AdminState) -> Vec<Element> {
         .own_membership_tier_names
         .as_deref()
         .unwrap_or_default();
-    let designations = state.membership_tiers.as_deref().unwrap_or_default();
     for (i, draft) in state.membership_drafts.iter().enumerate() {
-        // Clear is desensitized when this row carries no PERSISTED designation
-        // yet (read off the row's own tier name, not the possibly-locally-edited
-        // draft) — nothing to clear (linux's `clear.set_sensitive` shape).
-        let has_existing = own_tier_names
-            .get(i)
-            .is_some_and(|name| designations.iter().any(|m| &m.tier_name == name));
         els.push(Element::label(MEMBERSHIP_ITEM, draft.tier_name.clone()));
         els.push(
             Element::select(
@@ -197,7 +192,10 @@ pub(super) fn settings_elements(state: &AdminState) -> Vec<Element> {
             Element::gesture_button(
                 ids::ADMIN_SETTINGS_MEMBERSHIP_CLEAR_BUTTON,
                 t::settings_page::MEMBERSHIP_CLEAR,
-                has_existing,
+                // Painted from `membership_clear_possibility` (the read gates
+                // fold it on): blocked, with its reason, while the row holds
+                // no persisted designation.
+                true,
                 Gesture::Admin(Action::ClearMembership { row: i }),
             )
             .within(MEMBERSHIP_ITEM, i),
@@ -627,6 +625,34 @@ mod tests {
         assert_eq!(drafts[1].tier_name, "paid");
         assert_eq!(drafts[1].admin_tier, "personal");
         assert_eq!(drafts[1].lapse_tier, "community");
+    }
+
+    /// Clear on a row with no persisted designation is blocked by the shared
+    /// `membership_clear_possibility`, with its reason; a designated row's is
+    /// possible.
+    #[test]
+    fn membership_clear_is_blocked_with_nothing_set() {
+        let mut app = crate::app::tests::test_app();
+        app.admin.sub = super::super::AdminPage::Settings;
+        super::super::apply_outcome(
+            &mut app,
+            super::super::Outcome::TiersLoaded {
+                tiers: vec![],
+                own_membership_tier_names: vec!["free".to_string(), "paid".to_string()],
+                membership_tiers: vec![membership_tier("paid", "personal", "community")],
+            },
+        );
+        let clears: Vec<_> = super::super::elements(&app)
+            .into_iter()
+            .filter(|e| e.id == ids::ADMIN_SETTINGS_MEMBERSHIP_CLEAR_BUTTON)
+            .map(|e| e.possibility.expect("clear answered"))
+            .collect();
+        assert_eq!(clears.len(), 2);
+        assert_eq!(
+            clears[0].reason().map(|r| r.key.as_str()),
+            Some("admin.settings_page.membership_clear_nothing_set")
+        );
+        assert!(clears[1].is_possible());
     }
 
     /// The page paints the membership section anchor, then one

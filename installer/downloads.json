@@ -16,8 +16,8 @@
           { "label": "Apple Silicon", "file": "Fauna-{version}.dmg", "workflow": "release-macos.yml" }
         ],
         "linux": [
-          { "label": "x64", "file": "fauna-linux-x86_64-linux", "workflow": "release.yml" },
-          { "label": "arm64", "file": "fauna-linux-aarch64-linux", "workflow": "release.yml" }
+          { "label": "x64 (.tar.gz)", "file": "fauna-desktop-x86_64-linux.tar.gz", "workflow": "release.yml" },
+          { "label": "arm64 (.tar.gz)", "file": "fauna-desktop-aarch64-linux.tar.gz", "workflow": "release.yml" }
         ],
         "windows": [
           { "label": "x64", "file": "Fauna-Setup-x64.msi", "workflow": "release.yml" },

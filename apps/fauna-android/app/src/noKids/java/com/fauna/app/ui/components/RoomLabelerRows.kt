@@ -5,9 +5,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -22,6 +20,8 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.fauna.app.R
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.isShown
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.viewmodel.LabelerCatalogVM
 import com.fauna.ffi.ngramDirectionLabel
@@ -32,7 +32,10 @@ import uniffi.fauna_conversations.roomMayNameLabelerKind
 import uniffi.fauna_conversations.roomSettingsLabelerStaged
 import uniffi.fauna_conversations.roomSettingsLabelerToggleLive
 import uniffi.fauna_conversations.roomSettingsToggleLabeler
+import uniffi.fauna_core.Possibility
 import uniffi.fauna_labeler_catalog_machine.LabelerCatalogSnapshot
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.TextButton
 
 // The community room's labeler set inside the room policy editor
 // (`ui/conversations.md` § Element IDs → *The room's labeler set*) — **the
@@ -62,7 +65,7 @@ import uniffi.fauna_labeler_catalog_machine.LabelerCatalogSnapshot
 @Composable
 fun RoomLabelerRows(
     draft: RoomSettingsDraft,
-    canSetPolicy: Boolean,
+    setPolicy: Possibility,
     onDraftChange: (RoomSettingsDraft) -> Unit,
 ) {
     if (draft.labelers == null) return
@@ -76,7 +79,7 @@ fun RoomLabelerRows(
     RoomLabelerRowsContent(
         snapshot = snapshot,
         draft = draft,
-        canSetPolicy = canSetPolicy,
+        setPolicy = setPolicy,
         onDraftChange = onDraftChange,
         onInspect = vm::inspect,
         onCloseInspect = vm::closeInspect,
@@ -92,7 +95,7 @@ fun RoomLabelerRows(
 fun RoomLabelerRowsContent(
     snapshot: LabelerCatalogSnapshot?,
     draft: RoomSettingsDraft,
-    canSetPolicy: Boolean,
+    setPolicy: Possibility,
     onDraftChange: (RoomSettingsDraft) -> Unit,
     onInspect: (Int) -> Unit,
     onCloseInspect: () -> Unit,
@@ -116,7 +119,11 @@ fun RoomLabelerRowsContent(
         )
         rows.forEach { (index, entry) ->
             val staged = roomSettingsLabelerStaged(draft, entry.labelerId)
-            val live = canSetPolicy && roomSettingsLabelerToggleLive(draft, entry.labelerId)
+            // The one role term is the shared `SetPolicy` answer: a viewer it
+            // is absent for reads the row as a line, with no toggle
+            // (`ui/conversations.md` § Errors & edge cases → *Controls this
+            // person can never use*).
+            val live = setPolicy.isPossible && roomSettingsLabelerToggleLive(draft, entry.labelerId)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -131,9 +138,20 @@ fun RoomLabelerRowsContent(
                         R.string.conversations_unified_room_labeler_off
                     },
                 )
-                TextButton(
+                val text = "${entry.artifactKind} · ${entry.labelerId.take(16)}… · $mark"
+                if (!setPolicy.isShown) {
+                    Text(
+                        text,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag(Ids.ROOM_LABELER_LINE)
+                            .semantics { stateDescription = if (staged) "true" else "false" },
+                    )
+                } else TextButton(
                     onClick = {
-                        onDraftChange(roomSettingsToggleLabeler(draft, entry.labelerId))
+                        if (setPolicy.isPossible) {
+                            onDraftChange(roomSettingsToggleLabeler(draft, entry.labelerId))
+                        }
                     },
                     enabled = live,
                     modifier = Modifier
@@ -141,7 +159,7 @@ fun RoomLabelerRowsContent(
                         .testTag(Ids.ROOM_LABELER_TOGGLE)
                         .semantics { stateDescription = if (staged) "true" else "false" },
                 ) {
-                    Text("${entry.artifactKind} · ${entry.labelerId.take(16)}… · $mark")
+                    Text(text)
                 }
                 OutlinedButton(
                     onClick = { onInspect(index) },

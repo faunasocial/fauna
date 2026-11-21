@@ -56,6 +56,7 @@ class ConversationsListContentTest {
 
     private fun render(
         threads: List<ThreadSummary> = emptyList(),
+        loaded: Boolean = true,
         onOpenThread: (String) -> Unit = {},
         onNewConversation: () -> Unit = {},
         onSort: () -> Unit = {},
@@ -69,6 +70,7 @@ class ConversationsListContentTest {
         composeTestRule.setContent {
             ConversationsListContent(
                 threads = threads,
+                loaded = loaded,
                 invitations = invitations,
                 onAcceptInvitation = onAcceptInvitation,
                 onDeclineInvitation = onDeclineInvitation,
@@ -106,6 +108,18 @@ class ConversationsListContentTest {
         composeTestRule.onNodeWithTag("room-invitation-decline-button").performClick()
         assertEquals(7L, accepted)
         assertEquals(7L, declined)
+    }
+
+    @Test
+    fun emptyLinePaintsOnlyOnceTheListHasLoaded() {
+        render(loaded = false)
+        composeTestRule.onNodeWithText("No conversations yet.").assertDoesNotExist()
+    }
+
+    @Test
+    fun emptyLinePaintsWhenLoadedAndEmpty() {
+        render(loaded = true)
+        composeTestRule.onNodeWithText("No conversations yet.").assertExists()
     }
 
     @Test

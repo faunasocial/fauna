@@ -460,12 +460,14 @@ public class AdminNestViewModelTests
     }
 
     [Fact]
-    public async Task WebAppOrigin_UnmarkedAndDisabledUntilReadLands()
+    public async Task WebAppOrigin_AbsentAndUnmarkedUntilReadLands()
     {
         var vm = NewVm(new MockNestRpcClient());
 
         Assert.False(vm.WebAppOriginLoaded);
-        Assert.False(vm.WebAppOriginCanSet);
+        Assert.False(vm.WebAppOriginSection().Shown);
+        Assert.False(vm.WebAppOriginBundledRadio().IsPossible);
+        Assert.False(vm.WebAppOriginCentralRadio().Shown);
         Assert.False(vm.WebAppOriginBundledSelected);
         Assert.False(vm.WebAppOriginCentralSelected);
         Assert.False(vm.WebAppOriginCanSave);
@@ -473,7 +475,8 @@ public class AdminNestViewModelTests
         await vm.LoadCommand.ExecuteAsync(null);
 
         Assert.True(vm.WebAppOriginLoaded);
-        Assert.True(vm.WebAppOriginCanSet);
+        Assert.True(vm.WebAppOriginSection().Shown);
+        Assert.True(vm.WebAppOriginBundledRadio().IsPossible);
         Assert.True(vm.WebAppOriginBundledSelected);
         Assert.False(vm.WebAppOriginCentralSelected);
     }
@@ -488,7 +491,8 @@ public class AdminNestViewModelTests
 
         vm.SelectWebAppOrigin(uniffi.fauna_ffi.FfiWebAppOrigin.Central);
 
-        Assert.False(vm.WebAppOriginCanSet);
+        Assert.False(vm.WebAppOriginBundledRadio().IsPossible);
+        Assert.False(vm.WebAppOriginCentralRadio().IsPossible);
         Assert.False(vm.WebAppOriginCanSave);
         Assert.True(vm.WebAppOriginBundledSelected);
         await vm.SaveWebAppOriginAsync();
@@ -542,7 +546,7 @@ public class AdminNestViewModelTests
         await vm.LoadCommand.ExecuteAsync(null);
 
         Assert.False(vm.WebAppOriginLoaded);
-        Assert.False(vm.WebAppOriginCanSet);
+        Assert.False(vm.WebAppOriginSection().Shown);
         Assert.Null(vm.Error);
     }
 
@@ -1008,5 +1012,163 @@ public class AdminNestViewModelTests
         Assert.False(string.IsNullOrEmpty(vm.OauthStatus));
         Assert.Null(vm.Error);
         Assert.False(vm.OauthInFlight);
+    }
+}
+
+/// <summary>
+/// The admin Nest page's Web app section while the central origin is not live
+/// (<c>docs/goal/behavior/web-content-hosting.md</c> § Same-origin security model →
+/// <i>While the central origin is not live, the choice is not offered</i>, rule 5):
+/// the section paints from the view's <c>section_possibility</c>, the central radio
+/// from its <c>central_possibility</c>, and each radio and the save ask the shared
+/// <c>admin_web_app_origin_set_possibility</c> with their draft, over the REAL native
+/// <c>fauna_ffi</c> dll. The three states tui pins
+/// (<c>apps/fauna-tui/src/admin/nest.rs</c>), as FaunaKit's
+/// <c>RoleAndStateGatePossibilityTests</c> copy them. In the strings collection
+/// because a refusal's reason is compared resolved.
+/// </summary>
+[Collection("StringsGlobal")]
+public class AdminNestWebAppOriginPossibilityTests
+{
+    private static AdminNestViewModel NewVm(MockNestRpcClient rpc)
+    {
+        rpc.NextServiceFlags = new uniffi.fauna_ffi.FfiAdminServiceFlags(false, false);
+        rpc.NextSetupStatus = MockNestRpcClient.MakeSetupStatus();
+        return new AdminNestViewModel(rpc);
+    }
+
+    private static uniffi.fauna_core.LocalizedText Key(string key) =>
+        new(key, new System.Collections.Generic.Dictionary<string, string>());
+
+    /// A view as the shared fold answers it: <paramref name="selected"/> is the radio
+    /// it marks (none for a stored central the central radio cannot show).
+    private static uniffi.fauna_ffi.FfiAdminWebAppOriginView OriginView(
+        uniffi.fauna_ffi.FfiWebAppOrigin? selected,
+        string statusKey,
+        uniffi.fauna_core.Possibility section,
+        uniffi.fauna_core.Possibility central) => new(
+            selected,
+            Key(statusKey),
+            Key("admin.nest_page.web_app_origin_scope"),
+            true,
+            Key("admin.nest_page.web_app_origin_central"),
+            section,
+            central);
+
+    /// Today's builds: bundled stored and the central origin not live — the section
+    /// would hold one radio and a save that changes nothing, so none of it is shown.
+    [Fact]
+    public async Task BundledWhileCentralIsNotLive_PaintsNoSection()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextWebAppOriginView = OriginView(
+                uniffi.fauna_ffi.FfiWebAppOrigin.Bundled,
+                "admin.nest_page.web_app_origin_status_bundled",
+                new uniffi.fauna_core.Possibility.Absent(),
+                new uniffi.fauna_core.Possibility.Absent()),
+        };
+        var vm = NewVm(rpc);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.True(vm.WebAppOriginLoaded);
+        Assert.False(vm.WebAppOriginSection().Shown);
+        Assert.False(vm.WebAppOriginCentralRadio().Shown);
+    }
+
+    /// A stored central (set before the ruling) while not live: the status, the
+    /// bundled radio and the save stay so the admin can leave it; the central radio
+    /// is absent, no radio is marked, a central press is refused by the same answer,
+    /// and saving bundled is offered.
+    [Fact]
+    public async Task StoredCentralWhileNotLive_OffersOnlyTheWayBack()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextWebAppOriginView = OriginView(
+                null,
+                "admin.nest_page.web_app_origin_status_central_not_live",
+                new uniffi.fauna_core.Possibility.Possible(),
+                new uniffi.fauna_core.Possibility.Absent()),
+        };
+        var vm = NewVm(rpc);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.True(vm.WebAppOriginSection().Shown);
+        Assert.True(vm.WebAppOriginBundledRadio().IsPossible);
+        Assert.False(vm.WebAppOriginCentralRadio().Shown);
+        Assert.False(vm.WebAppOriginBundledSelected);
+        Assert.False(vm.WebAppOriginCentralSelected);
+        Assert.False(vm.WebAppOriginCanSave); // nothing marked: nothing to commit
+
+        vm.SelectWebAppOrigin(uniffi.fauna_ffi.FfiWebAppOrigin.Central);
+        Assert.False(vm.WebAppOriginCentralSelected);
+
+        vm.SelectWebAppOrigin(uniffi.fauna_ffi.FfiWebAppOrigin.Bundled);
+        Assert.True(vm.WebAppOriginBundledSelected);
+        Assert.True(vm.WebAppOriginSave().IsPossible);
+        Assert.True(vm.WebAppOriginCanSave);
+
+        await vm.SaveWebAppOriginAsync();
+        Assert.Equal(new[] { uniffi.fauna_ffi.FfiWebAppOrigin.Bundled }, rpc.WebAppOriginSetCalls);
+        Assert.Null(vm.Error);
+    }
+
+    /// A central draft while not live (a view that still marks central): the save
+    /// asks the draft predicate first and refuses with the nest's own reason, sending
+    /// nothing — what the page offers and what the save accepts cannot disagree.
+    [Fact]
+    public async Task ACentralDraftWhileNotLive_IsRefusedWithTheNestsReasonBeforeTheWire()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextWebAppOriginView = OriginView(
+                uniffi.fauna_ffi.FfiWebAppOrigin.Central,
+                "admin.nest_page.web_app_origin_status_central_not_live",
+                new uniffi.fauna_core.Possibility.Possible(),
+                new uniffi.fauna_core.Possibility.Absent()),
+        };
+        var vm = NewVm(rpc);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        var refusal = vm.WebAppOriginSave();
+        Assert.False(refusal.IsPossible);
+        Assert.Equal(
+            FaunaApp.Core.Services.Strings.Resolve(Key("error.admin.web_app_origin.central_not_live")),
+            refusal.Reason);
+        Assert.False(vm.WebAppOriginCanSave);
+
+        await vm.SaveWebAppOriginAsync();
+
+        Assert.Empty(rpc.WebAppOriginSetCalls);
+        Assert.Equal(refusal.Reason, vm.Error);
+    }
+
+    /// A nest whose central origin is live paints the whole section, both radios
+    /// included, and a central pick is taken and offered for saving.
+    [Fact]
+    public async Task ALiveCentralOrigin_PaintsTheWholeSection()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextWebAppOriginView = OriginView(
+                uniffi.fauna_ffi.FfiWebAppOrigin.Bundled,
+                "admin.nest_page.web_app_origin_status_bundled",
+                new uniffi.fauna_core.Possibility.Possible(),
+                new uniffi.fauna_core.Possibility.Possible()),
+        };
+        var vm = NewVm(rpc);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.True(vm.WebAppOriginSection().Shown);
+        Assert.True(vm.WebAppOriginBundledRadio().IsPossible);
+        Assert.True(vm.WebAppOriginCentralRadio().IsPossible);
+        Assert.True(vm.WebAppOriginCanSave);
+
+        vm.SelectWebAppOrigin(uniffi.fauna_ffi.FfiWebAppOrigin.Central);
+
+        Assert.True(vm.WebAppOriginCentralSelected);
+        Assert.True(vm.WebAppOriginSave().IsPossible);
+        Assert.True(vm.WebAppOriginCanSave);
     }
 }

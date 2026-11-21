@@ -3,8 +3,9 @@
 //! typed destination (`snapshot-restore-destination-input`, filled by an
 //! untagged *Choose…* folder picker — the `folder-location-path-input` +
 //! browse-button precedent, so the e2e test types into the entry), the button
-//! (`snapshot-restore-button`, insensitive with no destination and while a
-//! restore runs), then the progress line while it runs or the outcome line
+//! (`snapshot-restore-button`, painted from the shared answer — a destination
+//! typed, no restore running, and a nest for the carve-out bytes — and asked
+//! again at the press), then the progress line while it runs or the outcome line
 //! after. Both lines exist only for their phase, so a wait on
 //! `snapshot-restore-result` waits for a finished run.
 
@@ -15,6 +16,8 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::gio;
 
+use fauna_core::possibility::Possibility;
+
 use crate::client::FaunaClient;
 use crate::i18n::strings::backups as bs;
 
@@ -24,13 +27,15 @@ pub struct SnapshotRestorePanel {
     button: gtk::Button,
     progress: gtk::Label,
     result: gtk::Label,
+    /// The page's `error-message`, where a refused press says why.
+    error_label: gtk::Label,
     /// The snapshot the panel is for; a different (or no) open snapshot resets it.
     snapshot_id: Cell<Option<i64>>,
     running: Cell<bool>,
 }
 
 impl SnapshotRestorePanel {
-    pub fn build(client: &Rc<FaunaClient>) -> Rc<Self> {
+    pub fn build(client: &Rc<FaunaClient>, error_label: &gtk::Label) -> Rc<Self> {
         let dest = adw::EntryRow::builder()
             .title(bs::SNAPSHOT_RESTORE_DESTINATION_PLACEHOLDER)
             .build();
@@ -44,7 +49,6 @@ impl SnapshotRestorePanel {
 
         let button = gtk::Button::with_label(bs::SNAPSHOT_RESTORE_BUTTON);
         button.set_halign(gtk::Align::Start);
-        button.set_sensitive(false);
         crate::testid::set_test_id(&button, ids::SNAPSHOT_RESTORE_BUTTON);
 
         let line = |id: &str| {
@@ -78,9 +82,11 @@ impl SnapshotRestorePanel {
             button: button.clone(),
             progress,
             result,
+            error_label: error_label.clone(),
             snapshot_id: Cell::new(None),
             running: Cell::new(false),
         });
+        panel.sync_button();
 
         {
             let panel = Rc::clone(&panel);
@@ -115,19 +121,30 @@ impl SnapshotRestorePanel {
         panel
     }
 
+    /// `snapshot-restore-button`'s answer: the shared
+    /// [`fauna_backups_machine::possibility::snapshot_restore_possibility`]
+    /// folded with the carve-out's offline half — what the paint shows and
+    /// what the press asks again.
+    fn answer(&self) -> Possibility {
+        fauna_backups_machine::possibility::snapshot_restore_possibility(
+            self.running.get(),
+            &self.dest.text(),
+        )
+        .and(crate::offline_gate::carve_out_possibility())
+    }
+
     fn sync_button(&self) {
-        self.button
-            .set_sensitive(!self.running.get() && !self.dest.text().trim().is_empty());
+        crate::possible::paint(&self.button, None, self.answer());
     }
 
     fn start(self: &Rc<Self>, client: &Rc<FaunaClient>) {
         let Some(snapshot_id) = self.snapshot_id.get() else {
             return;
         };
-        let typed = self.dest.text().trim().to_string();
-        if self.running.get() || typed.is_empty() {
+        if !super::allowed(&self.error_label, &self.answer()) {
             return;
         }
+        let typed = self.dest.text().trim().to_string();
         let home = std::env::var_os("HOME");
         let Some(destination) =
             fauna_sync_engine::engine_lifecycle::resolve_restore_destination(&typed, home)
@@ -177,7 +194,9 @@ impl SnapshotRestorePanel {
             self.progress.set_visible(false);
             self.result.set_visible(false);
             self.running.set(false);
-            self.sync_button();
         }
+        // Every repaint, not only on a new snapshot: the carve-out half reads
+        // the connection word, whose change re-drives this pass.
+        self.sync_button();
     }
 }

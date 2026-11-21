@@ -54,6 +54,26 @@ public class PrivacySettingsVM {
     public var spamPrefsLoading = false
     public var spamPrefsSaved = false
     public var spamPrefsError: String?
+    /// The preferences the nest last confirmed — the read that prefilled the
+    /// sliders, or the echo of the last save — in the wire's per-mille. What
+    /// `save-spam-prefs` compares the drafts against (`nil` until a read lands).
+    public private(set) var savedSpamPrefs: FfiSpamPreferences?
+    /// Where the spam-preferences read stands (`ui/README.md` § Offer only what
+    /// is possible, rule 5): `failed` after a first read that threw, until one
+    /// succeeds; a failure after a resolved read keeps the Save answer live.
+    public private(set) var spamPrefsRead = PageRead()
+
+    /// `save-spam-prefs`' answer — the shared `save_preferences_possibility`
+    /// over the read state, the confirmed preferences and the two slider
+    /// drafts (`common.nothing_to_save` while nothing changed);
+    /// ``saveSpamPreferences(rebinding:)`` asks it again.
+    public var saveSpamPrefsAnswer: Possibility {
+        spamSavePreferencesPossibility(
+            read: spamPrefsRead.state,
+            saved: savedSpamPrefs,
+            spamDraft: String(format: "%.3f", spamThreshold),
+            phishingDraft: String(format: "%.3f", phishingThreshold))
+    }
 
     private var api: APIClient?
     private var actorId: String?
@@ -102,7 +122,11 @@ public class PrivacySettingsVM {
             let prefs = try await api.getSpamPreferences()
             spamThreshold = prefs.spamThreshold
             phishingThreshold = prefs.phishingThreshold
-        } catch {}
+            confirmSpamPrefs(prefs)
+            spamPrefsRead.resolved()
+        } catch {
+            spamPrefsRead.failed()
+        }
     }
 
     public func updateInboxMode(_ mode: String) async {
@@ -258,6 +282,7 @@ public class PrivacySettingsVM {
     /// and conversations render against them at once
     /// (``ContentPolicyStore/setOwnThresholds(spamPermille:phishingPermille:scope:)``).
     public func saveSpamPreferences(rebinding contentPolicy: ContentPolicyStore? = nil) async {
+        if refusePress(saveSpamPrefsAnswer, errorMessage: &spamPrefsError) { return }
         guard let api else { return }
         spamPrefsLoading = true
         spamPrefsError = nil
@@ -270,6 +295,7 @@ public class PrivacySettingsVM {
             )
             let scope = contentPolicy?.scope
             try await api.updateSpamPreferences(prefs)
+            confirmSpamPrefs(prefs)
             if let contentPolicy, let scope {
                 contentPolicy.setOwnThresholds(
                     spamPermille: SpamOptions.perMille(prefs.spamThreshold),
@@ -280,5 +306,21 @@ public class PrivacySettingsVM {
         } catch {
             spamPrefsError = DisplayError.http(error)
         }
+    }
+
+    /// Remember `prefs` as what the nest confirmed, in the wire's per-mille.
+    private func confirmSpamPrefs(_ prefs: SpamPreferences) {
+        savedSpamPrefs = FfiSpamPreferences(
+            spamThreshold: SpamOptions.perMille(prefs.spamThreshold),
+            phishingThreshold: SpamOptions.perMille(prefs.phishingThreshold))
+    }
+
+    /// Seed a resolved spam-preferences read without a nest. Never called by
+    /// production — mirrors `NotificationsVM.seedForTest`.
+    func seedSpamPrefsForTest(_ prefs: SpamPreferences) {
+        spamThreshold = prefs.spamThreshold
+        phishingThreshold = prefs.phishingThreshold
+        confirmSpamPrefs(prefs)
+        spamPrefsRead.resolved()
     }
 }

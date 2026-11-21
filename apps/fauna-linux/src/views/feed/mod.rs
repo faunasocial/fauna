@@ -198,6 +198,9 @@ pub fn build_feed_view(client: &Rc<FaunaClient>) -> (adw::NavigationSplitView, F
         let client_loop = Rc::clone(client);
         let rt_loop = rt.clone();
         let feeds_list = feeds_list.clone();
+        let trending_list = trending_list.clone();
+        let local_list = local_list.clone();
+        let suppress = Rc::clone(&suppress);
         let bridge_list = bridge_list.clone();
         let subscribe_btn = subscribe_btn.clone();
         let feeds_cache: Rc<RefCell<Vec<FeedSummaryView>>> = Rc::new(RefCell::new(Vec::new()));
@@ -215,6 +218,13 @@ pub fn build_feed_view(client: &Rc<FaunaClient>) -> (adw::NavigationSplitView, F
                 &rt_loop,
                 &feeds_cache,
                 &bridge_cache,
+            );
+            paint_selector_choice(
+                &manager_loop.snapshot(),
+                &trending_list,
+                &local_list,
+                &feeds_list,
+                &suppress,
             );
         });
         // Initial render so the empty state shows before the first mutation.
@@ -320,6 +330,55 @@ fn refresh(
         *bridge_cache.borrow_mut() = snap.bridge_feeds.clone();
     }
     post_list::render_posts(post_handles, &snap, manager, client, rt);
+}
+
+/// Paint the selector's current choice from the snapshot — the entry in force
+/// is selected and every other list cleared, launch included, by the one rule
+/// every app paints from (`FeedSnapshot::selector_choice`; `ui/feed.md`
+/// § Element IDs, `feed-local-item`: "selected while the selection is Local").
+/// Before this, nothing was selected until a row was pressed, so the entry in
+/// force was unnamed at launch (the one-of-N rule, `ui/README.md`), and a
+/// press moved only its own list's highlight. Runs under `suppress`, so the
+/// lists' own selection handlers read it as programmatic and dispatch nothing.
+fn paint_selector_choice(
+    snap: &fauna_feed::FeedSnapshot,
+    trending_list: &gtk::ListBox,
+    local_list: &gtk::ListBox,
+    feeds_list: &gtk::ListBox,
+    suppress: &Cell<bool>,
+) {
+    use fauna_feed::FeedSelectorChoice as Choice;
+    let choice = snap.selector_choice();
+    let feed_row = match choice {
+        Choice::Feed(id) => snap
+            .feeds
+            .iter()
+            .position(|f| f.feed_id == id)
+            .and_then(|i| i32::try_from(i).ok())
+            .and_then(|i| feeds_list.row_at_index(i)),
+        _ => None,
+    };
+    let only = |list: &gtk::ListBox, row: Option<gtk::ListBoxRow>| match row {
+        Some(row) if !row.is_selected() => list.select_row(Some(&row)),
+        Some(_) => {}
+        None if list.selected_row().is_some() => list.unselect_all(),
+        None => {}
+    };
+    suppress.set(true);
+    only(
+        trending_list,
+        (choice == Choice::Trending)
+            .then(|| trending_list.row_at_index(0))
+            .flatten(),
+    );
+    only(
+        local_list,
+        (choice == Choice::Local)
+            .then(|| local_list.row_at_index(0))
+            .flatten(),
+    );
+    only(feeds_list, feed_row);
+    suppress.set(false);
 }
 
 /// First `gtk::Label` in a widget subtree (depth-first), so a test can read

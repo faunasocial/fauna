@@ -242,7 +242,8 @@ def _export_to_done(app, format_label: str, *, leave_out: tuple[str, ...] = ()) 
             continue
         assert name in offered and export.mailbox_selected(name), (
             f"the imported mailbox {name!r} must be offered and selected "
-            f"(§ Wizard steps step 2: custom mailboxes pre-selected); offered: {offered}"
+            f"(§ Wizard steps step 2: custom mailboxes pre-selected); offered: {offered}; "
+            f"selected now: {[n for n in export.mailbox_names() if export.mailbox_selected(n)]}"
         )
     # A repeat pass may find the user's last deselection kept: deselect only
     # what is still selected, so the scope is the same either way.

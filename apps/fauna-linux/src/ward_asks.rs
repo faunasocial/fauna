@@ -38,12 +38,26 @@ struct Asks {
     /// Filled only on the nest's TYPED refusal, so it is supervised-only by
     /// construction.
     refused_feed: BTreeSet<(String, String, String)>,
-    /// Whether every knock waiting on this account waits on its guardian —
-    /// the shared `fauna_client_family::knocks_await_guardian` over the
-    /// caller's own status policy, folded at the same read (tui's
-    /// `FamilyState::own_policy`, read at its knock loop). What the knock
-    /// rows' `knock-guardian-pending` paints from.
-    knocks_await_guardian: bool,
+    /// Whether a `fauna.family.status` read of this run has succeeded — what
+    /// separates "no policy: unsupervised" from "nothing known yet" for the
+    /// Contacts page's knock and accept predicates (`ui/README.md` § Offer
+    /// only what is possible, rule 5; tui's `FamilyState::status_read`).
+    status_read: bool,
+    /// The caller's own active policy off that read, held only while the read
+    /// named a guardian (tui's `FamilyState::own_policy`). What the shared
+    /// `fauna_client_family::{knocks_await_guardian, knock_possibility,
+    /// accept_possibility, guardian_decides_contact}` answer from.
+    own_policy: Option<ReachPolicy>,
+}
+
+impl Asks {
+    fn own_supervision(&self) -> fauna_client_family::OwnSupervision<'_> {
+        if self.status_read {
+            fauna_client_family::OwnSupervision::Read(self.own_policy.as_ref())
+        } else {
+            fauna_client_family::OwnSupervision::Unread
+        }
+    }
 }
 
 thread_local! {
@@ -61,14 +75,15 @@ pub fn set_from_status(
 ) {
     ASKS.with(|a| {
         let mut a = a.borrow_mut();
+        a.status_read = true;
         if supervised {
             a.contact = contact;
             a.feed = feed;
-            a.knocks_await_guardian = fauna_client_family::knocks_await_guardian(own_policy);
+            a.own_policy = own_policy.cloned();
         } else {
             a.contact.clear();
             a.feed.clear();
-            a.knocks_await_guardian = false;
+            a.own_policy = None;
         }
     });
 }
@@ -77,7 +92,31 @@ pub fn set_from_status(
 /// § App surface — the knock row is one of the blocked surfaces a pending
 /// approval renders on).
 pub fn knocks_await_guardian() -> bool {
-    ASKS.with(|a| a.borrow().knocks_await_guardian)
+    ASKS.with(|a| fauna_client_family::knocks_await_guardian(a.borrow().own_policy.as_ref()))
+}
+
+/// The knock's answer for a resolved peer — what `contacts-add-button` paints
+/// from on the Find User result and what the knock asks before it sends
+/// (`contacts.md` § Errors & edge cases). `peer_status` is the caller's roster
+/// edge to the peer, `None` with none. The shared
+/// `fauna_client_family::knock_possibility`.
+pub fn knock_possibility(peer_status: Option<&str>) -> fauna_core::possibility::Possibility {
+    ASKS.with(|a| fauna_client_family::knock_possibility(a.borrow().own_supervision(), peer_status))
+}
+
+/// The accept's answer — what each `contacts-accept-button[i]` paints from and
+/// what the accept asks first. The shared `fauna_client_family::accept_possibility`.
+pub fn accept_possibility() -> fauna_core::possibility::Possibility {
+    ASKS.with(|a| fauna_client_family::accept_possibility(a.borrow().own_supervision()))
+}
+
+/// Whether the guardian decides contact with this peer — when
+/// `contact-request-guardian-button` is the result's one step, offered before
+/// anything was refused. The shared `fauna_client_family::guardian_decides_contact`.
+pub fn guardian_decides(peer_status: Option<&str>) -> bool {
+    ASKS.with(|a| {
+        fauna_client_family::guardian_decides_contact(a.borrow().own_supervision(), peer_status)
+    })
 }
 
 /// A landed contact ask's re-read. Empty = the re-read failed: keep what we
@@ -228,5 +267,39 @@ mod tests {
         set_from_status(true, Some(&approval_on), Vec::new(), Vec::new());
         clear_for_identity_change();
         assert!(!knocks_await_guardian());
+    }
+
+    /// The entry gate (`contacts.md` § Errors & edge cases): unread → the
+    /// knock and accept wait as loading; approval on → the knock to a
+    /// stranger and every accept are blocked and the ask is the one step; an
+    /// accepted peer still passes.
+    #[test]
+    fn the_entry_gate_follows_the_status_read() {
+        use fauna_core::possibility::Possibility;
+        clear_for_identity_change();
+        assert!(!knock_possibility(None).is_possible());
+        assert!(!accept_possibility().is_possible());
+        assert!(!guardian_decides(None), "no ask on a guess");
+
+        let approval_on = ReachPolicy {
+            contact_approval: true,
+            ..ReachPolicy::default()
+        };
+        set_from_status(true, Some(&approval_on), Vec::new(), Vec::new());
+        assert_eq!(
+            knock_possibility(None),
+            Possibility::blocked(fauna_core::localized::LocalizedText::key(
+                "contacts.guardian_approval_required"
+            ))
+        );
+        assert!(!accept_possibility().is_possible());
+        assert!(guardian_decides(None));
+        assert_eq!(knock_possibility(Some("accepted")), Possibility::Possible);
+        assert!(!guardian_decides(Some("accepted")));
+
+        set_from_status(false, Some(&approval_on), Vec::new(), Vec::new());
+        assert_eq!(knock_possibility(None), Possibility::Possible);
+        assert_eq!(accept_possibility(), Possibility::Possible);
+        clear_for_identity_change();
     }
 }

@@ -88,10 +88,13 @@ public struct AdminNestView: View {
                             // ignores `.accessibilityValue` on a Toggle, so the
                             // registry carries it).
                             .automationActivate(Ids.adminServicePairingToggle,
-                                                isEnabled: { !vm.isBusy },
                                                 value: { vm.pairingEnabled ? "on" : "off" }) {
                                 Task { await vm.setPairing(!vm.pairingEnabled) }
                             }
+                            // Waits for the reflective read (admin.md § Errors &
+                            // edge cases, *Controls wait for their read*) — never
+                            // flipped from the guessed `false` it starts at.
+                            .faunaPossible(vm.pairingPossibility)
                             // The pairing policy is one `services.update` row.
                             .faunaGate("fauna.admin.services.update")
                             Spacer()
@@ -175,10 +178,7 @@ public struct AdminNestView: View {
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .task(id: reloadToken) {
-            guard let client else { return }
-            await vm.configure(api: client.api)
-        }
+        .adminReadOnEntryAndReconnect(vm, reloadToken: reloadToken)
         // Re-seed the edit buffer from the hydrated value (initial + after a save's
         // re-hydrate); a live user/driver edit changes the buffer, not vm.servingPort,
         // so this never clobbers an in-progress edit.
@@ -209,8 +209,10 @@ public struct AdminNestView: View {
                         .frame(maxWidth: 160)
                         .accessibilityIdentifier(Ids.adminNestServingPortInput)
                         .automationField(Ids.adminNestServingPortInput, text: $servingPortText,
-                                         isEnabled: { vm.servingPortEditable })
+                                         isEnabled: { vm.servingPortEditable && vm.servingPortPossibility.isPossible })
+                        .faunaPossible(vm.servingPortPossibility)
                 }
+                FaunaPossibilityReason(vm.servingPortPossibility)
                 Text(L.admin.nestPage.servingPortDesc)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -224,6 +226,8 @@ public struct AdminNestView: View {
                         .foregroundStyle(.secondary)
                 }
                 HStack {
+                    // The draft's own reason (the read's stands under the field).
+                    FaunaPossibilityReason(adminServingPortPossibility(raw: servingPortText))
                     Spacer()
                     Button(L.admin.nestPage.servingPortSave) { saveServingPort() }
                         .disabled(!vm.servingPortEditable)
@@ -232,6 +236,9 @@ public struct AdminNestView: View {
                                             isEnabled: { vm.servingPortEditable }) {
                             saveServingPort()
                         }
+                        // The read gate, then the typed port (admin.md § Errors &
+                        // edge cases); `saveServingPort` asks the same answer.
+                        .faunaPossible(vm.servingPortSaveAnswer(servingPortText))
                         // Editing the buffer is local; committing the port is
                         // `fauna.admin.set_serving_port`, so only Save gates.
                         .faunaGate("fauna.admin.set_serving_port")
@@ -246,14 +253,14 @@ public struct AdminNestView: View {
     /// unparseable value surfaces `serving_port_invalid` on `error-message` and is
     /// NOT dispatched (mirrors the admin-calendar CalDAV-port validation).
     private func saveServingPort() {
-        // Shared `fauna_core::format::parse_port` (UniFFI `parsePort`): trims,
-        // parses u16, requires 1..=65535 (rejects 0) — one validator for every
-        // app (value-formatting.md § Port validation), replacing the inline
-        // `UInt16(...) + port >= 1` check.
-        guard let port = parsePort(input: servingPortText) else {
-            vm.errorMessage = L.admin.nestPage.servingPortInvalid
+        // The press asks the answer the Save is painted from: a port outside
+        // `[1, 65535]` is refused on `error-message` with the shared reason.
+        if refusePress(vm.servingPortSaveAnswer(servingPortText), errorMessage: &vm.errorMessage) {
             return
         }
+        // Shared `fauna_core::format::parse_port` (UniFFI `parsePort`) — the
+        // parser the answer above asks, so this never fails once it passed.
+        guard let port = parsePort(input: servingPortText) else { return }
         Task { await vm.setServingPort(port) }
     }
 
@@ -275,18 +282,20 @@ public struct AdminNestView: View {
                              desc: L.onboarding.natMode.publicDesc)
                 natModeRadio(mode: .private, label: L.onboarding.natMode.privateLabel,
                              desc: L.onboarding.natMode.privateDesc)
+                FaunaPossibilityReason(vm.natSaveAnswer)
                 HStack {
                     automationText(Ids.adminNestNatModeStatus, vm.natStatusText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
                     Button(L.admin.nestPage.natModeSave) { saveNatMode() }
-                        .disabled(!vm.natSaveEnabled)
                         .accessibilityIdentifier(Ids.adminNestNatModeSaveButton)
-                        .automationActivate(Ids.adminNestNatModeSaveButton,
-                                            isEnabled: { vm.natSaveEnabled }) {
+                        .automationActivate(Ids.adminNestNatModeSaveButton) {
                             saveNatMode()
                         }
+                        // The shared `save_possibility`: blocked until (and
+                        // after a failed) `fauna.setup.status`, and mid-submit.
+                        .faunaPossible(vm.natSaveAnswer)
                         // Selecting a radio is local; the signed commit is
                         // `fauna.setup.nat_mode` (`AdminNatModeMachine::submit`).
                         .faunaGate("fauna.setup.nat_mode")
@@ -314,11 +323,11 @@ public struct AdminNestView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(vm.natInFlight)
         .accessibilityIdentifier(id)
-        .automationActivate(id, isEnabled: { !vm.natInFlight }) {
+        .automationActivate(id) {
             vm.selectNatMode(mode)
         }
+        .faunaPossible(vm.natSelectAnswer)
     }
 
     /// Save action, shared by the Button and its `automationActivate` sibling
@@ -330,11 +339,12 @@ public struct AdminNestView: View {
     /// Web-app origin (`admin-nest-web-app-origin-*`, admin.md § N Nest →
     /// *Web-app origin*; web-content-hosting.md § Same-origin security model) —
     /// what this nest's own address answers when someone opens the app there.
-    /// Paint only: every sentence, the central radio's label and the `canSet`
-    /// verdict are the shared `FfiAdminWebAppOriginView` fold (tui's
-    /// `admin/nest.rs`, the reference leg). Radios stay unmarked and disabled
-    /// until the read lands and whenever `canSet` is false — pre-marking
-    /// bundled would state a choice the nest may not hold. A radio pick is
+    /// Paint only: every sentence, the central radio's label, the `canSet`
+    /// verdict and whether the section and its central radio exist are the
+    /// shared `FfiAdminWebAppOriginView` fold (tui's `admin/nest.rs`, the
+    /// reference leg; web-content-hosting.md § *While the central origin is
+    /// not live, the choice is not offered*, rule 5) — nothing is re-derived
+    /// here. The section is not painted until the read lands. A radio pick is
     /// local; the save commits it. Hand-painted radios, as `natModeRadio`.
     private var webAppOriginSection: some View {
         let view = vm.webAppOriginView
@@ -349,6 +359,7 @@ public struct AdminNestView: View {
                                   label: L.admin.nestPage.webAppOriginBundled)
                 webAppOriginRadio(mode: .central, id: Ids.adminNestWebAppOriginCentralRadio,
                                   label: view.map { renderLocalizedText($0.centralLabel) } ?? loading)
+                    .faunaPossible(vm.webAppOriginCentralPossibility)
                 HStack {
                     automationText(Ids.adminNestWebAppOriginStatus,
                                    view.map { renderLocalizedText($0.status) } ?? loading)
@@ -365,6 +376,7 @@ public struct AdminNestView: View {
                         // Picking a radio is local; the commit is
                         // `fauna.admin.web_app_origin.set`.
                         .faunaGate("fauna.admin.web_app_origin.set")
+                        .faunaPossible(vm.webAppOriginSetPossibility)
                 }
                 if let view {
                     Text(renderLocalizedText(view.scope))
@@ -378,6 +390,7 @@ public struct AdminNestView: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(Ids.adminNestWebAppOriginSection)
         .automationValue(Ids.adminNestWebAppOriginSection, text: { L.admin.nestPage.webAppOriginLabel })
+        .faunaPossible(vm.webAppOriginSectionPossibility)
     }
 
     /// One web-app-origin radio (`admin-nest-web-app-origin-{bundled,central}-radio`).
@@ -392,13 +405,14 @@ public struct AdminNestView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(!vm.webAppOriginEditable)
+        .disabled(vm.webAppOriginWorking)
         .accessibilityIdentifier(id)
         .automationActivate(id,
-                            isEnabled: { vm.webAppOriginEditable },
+                            isEnabled: { !vm.webAppOriginWorking },
                             value: { vm.webAppOriginDraft == mode ? "on" : "off" }) {
             vm.selectWebAppOrigin(mode)
         }
+        .faunaPossible(vm.webAppOriginSelectPossibility(mode))
     }
 
     /// Save action, shared by the Button and its `automationActivate` sibling.
@@ -445,6 +459,7 @@ public struct AdminNestView: View {
                         // Picking a radio is local; the commit is
                         // `fauna.admin.update_channel.set`.
                         .faunaGate("fauna.admin.update_channel.set")
+                        .faunaPossible(vm.updateChannelSetPossibility)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -486,6 +501,7 @@ public struct AdminNestView: View {
                             value: { vm.updateChannelDraft == option.channel ? "on" : "off" }) {
             vm.selectUpdateChannel(option.channel)
         }
+        .faunaPossible(vm.updateChannelSetPossibility)
     }
 
     /// Save action, shared by the Button and its `automationActivate` sibling.
@@ -595,6 +611,9 @@ public struct AdminNestView: View {
                         // Editing the buffer is local; declaring is
                         // `fauna.admin.region.set`.
                         .faunaGate("fauna.admin.region.set")
+                        // Live only for a code `parse_region_code` accepts
+                        // (admin.md § Errors & edge cases); `saveRegion` asks again.
+                        .faunaPossible(vm.regionSaveAnswer(regionInput))
                     // Shown only while a region is declared. Withdrawing also
                     // retires the previous region's feature-policy document
                     // nest-side.
@@ -611,6 +630,7 @@ public struct AdminNestView: View {
                         .faunaGate("fauna.admin.region.set")
                     }
                 }
+                FaunaPossibilityReason(vm.regionSaveAnswer(regionInput))
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -650,12 +670,11 @@ public struct AdminNestView: View {
     /// string (mirrors web's `saveRegion`), so this always renders its own
     /// local `region_invalid` message.
     private func saveRegion() {
-        do {
-            let code = try FaunaFFISwift.adminParseRegionCode(raw: regionInput)
-            Task { await vm.setRegion(code) }
-        } catch {
-            vm.errorMessage = L.admin.nestPage.regionInvalid
-        }
+        // The press asks the answer the Save is painted from (admin.md § Errors
+        // & edge cases): a malformed code is refused with the shared reason.
+        if refusePress(vm.regionSaveAnswer(regionInput), errorMessage: &vm.errorMessage) { return }
+        guard let code = try? FaunaFFISwift.adminParseRegionCode(raw: regionInput) else { return }
+        Task { await vm.setRegion(code) }
     }
 
     /// Deployment-identity rotation (`admin-nest-seed-rotate-*`, admin.md § N

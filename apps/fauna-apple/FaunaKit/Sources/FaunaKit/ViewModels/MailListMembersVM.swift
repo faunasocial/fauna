@@ -24,7 +24,7 @@ import SwiftUI
 /// settings page can peek at, unlike tui). `hydrate()`/`dispatch(_:)` come from
 /// `MachineBackedVM`'s shared default.
 @MainActor @Observable
-public final class MailListMembersVM: MachineBackedVM {
+public final class MailListMembersVM: MachineBackedVM, MailUnbuiltRefusing {
     /// Latest snapshot; `nil` until `configure`.
     public internal(set) var snapshot: MailListMembersSnapshot?
     /// Page-level error surface (`error-message`).

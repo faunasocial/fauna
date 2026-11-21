@@ -19,6 +19,9 @@ import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.viewmodel.ProfileEditVM
 import com.fauna.ffi.FfiProfileLink
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
 
 /**
  * The profile **edit form** (SELF view) per `profile.md` § Where logic lives →

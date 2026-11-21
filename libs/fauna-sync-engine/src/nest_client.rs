@@ -592,6 +592,24 @@ impl SyncClient {
         Ok(())
     }
 
+    /// Upload one page of a paged manifest (its canonical `ManifestPage`
+    /// bytes) — after the chunks it names and before its root
+    /// (`file-sync.md` § Paged manifests → *Transport and order*). Only a nest
+    /// advertising `paged-manifests` has this door.
+    pub async fn upload_manifest_page(&self, page_bytes: &[u8]) -> Result<()> {
+        let url = format!(
+            "{}{}",
+            self.auth.nest_url(),
+            fauna_nest_http::paths::chunk_store::MANIFEST_PAGES_UPLOAD
+        );
+        let req = self.auth.http().post(&url).body(page_bytes.to_vec());
+        self.send(req, "POST /api/v1/manifest-pages")
+            .await?
+            .error_for_status()
+            .context("upload_manifest_page: unexpected status")?;
+        Ok(())
+    }
+
     /// Download a manifest by its content hash.
     pub async fn download_manifest(&self, hash: &ContentHash) -> Result<Vec<u8>> {
         let hash_hex = hex::encode(hash.digest());

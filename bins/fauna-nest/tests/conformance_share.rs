@@ -552,6 +552,7 @@ fn manifest_fixture(e2ee: bool) -> fauna_core::chunk::ChunkManifest {
             .then(|| vec![fauna_core::data::ContentHash::of_raw(b"sealed ciphertext")]),
         sealed_hashes: None,
         min_reader: None,
+        pages: None,
     }
 }
 
@@ -700,6 +701,7 @@ async fn private_nest() -> PrivateNest {
         stored_hashes: None,
         sealed_hashes: None,
         min_reader: None,
+        pages: None,
     };
     assert!(chunks.len() >= 2, "the fixture must span several chunks");
     let store = svc.local_blob_store();
@@ -1023,11 +1025,19 @@ async fn a_missing_viewer_entry_never_falls_back_to_the_app_shell() {
     assert!(String::from_utf8_lossy(&body).contains(APP_SHELL_MARKER));
 }
 
-/// In central web-app-origin mode the viewer navigation takes the same `302`
-/// the `/app/` rule gives: the path carried over, no fragment in the target —
-/// so the browser keeps the link key across the hop and sends it nowhere.
+/// A stored central web-app origin on a nest whose central origin is not
+/// live serves the viewer navigation bundled, exactly as `/app/` does — no
+/// redirect to an origin that serves nothing (`web-content-hosting.md`
+/// § While the central origin is not live, the choice is not offered,
+/// rule 3). The viewer and `/app/` share one serving decision
+/// (`web_app_origin::entry_router` over `live_probe`), so the `302` itself
+/// stays pinned at tier_1 in `spa_web_app_origin.rs` with the fact passed as
+/// `true`; this navigation's redirect assertion returns with the commit that
+/// flips `CENTRAL_APP_ORIGIN_LIVE`.
 #[tokio::test]
-async fn in_central_mode_the_viewer_navigation_redirects_like_app() {
+async fn in_central_mode_the_viewer_navigation_serves_bundled_while_the_central_origin_is_not_live()
+{
+    const { assert!(!fauna_protocol::web_app_origin::CENTRAL_APP_ORIGIN_LIVE) };
     let nest = private_nest().await;
     let token = nest.private_token();
     nest.register(&token, Some(nest.sealed_envelope.clone()))
@@ -1036,12 +1046,11 @@ async fn in_central_mode_the_viewer_navigation_redirects_like_app() {
     nest.state.web_app_origin.store(Arc::new(
         fauna_protocol::web_app_origin::WebAppOrigin::Central,
     ));
-    let (status, headers, _) = nest.get(&format!("/share/{token}"), true).await;
-    assert_eq!(status, axum::http::StatusCode::FOUND);
-    let location = headers["location"].to_str().unwrap();
-    assert!(location.contains(&format!("/share/{token}")), "{location}");
-    assert!(location.contains("nest=nest.example"), "{location}");
-    assert!(!location.contains('#'));
+    let (status, headers, body) = nest.get(&format!("/share/{token}"), true).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert!(headers.get("location").is_none());
+    assert!(String::from_utf8_lossy(&body).contains(VIEWER_MARKER));
+    assert!(!String::from_utf8_lossy(&body).contains(APP_SHELL_MARKER));
     assert_eq!(headers["referrer-policy"], "no-referrer");
     // The data arms are not navigations: they answer the same bytes in either
     // mode.

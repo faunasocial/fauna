@@ -106,7 +106,9 @@ fauna-client-core = { path = "../fauna-client-core", default-features = false, f
 # The shared `RpcRequester` doubles, rather than a per-crate copy. Dev-only,
 # so test scaffolding cannot reach a release artifact by construction.
 fauna-client-testkit = { path = "../fauna-client-testkit" }
-tokio = { workspace = true }
+# `test-util` for `start_paused`: the launch attempt bound's tests
+# (`tests/launch_attempt_bound.rs`) run 30 s timers on a paused clock.
+tokio = { workspace = true, features = ["test-util"] }
 # `hint_authority_url`'s own unit test needs
 # `fauna_core::web::AUTHORITY_TERMINATOR_CASES`, which is `#[cfg(any(test,
 # feature = "test-helpers"))]` on fauna-core's own side — `cfg(test)` is

@@ -147,10 +147,12 @@ class FakeFollower:
     ):
         self.port = port
         self.username = username
-        # The loopback address this server binds and names itself by. Another
-        # `127.0.0.0/8` address (`127.0.0.2`) is ANOTHER SERVER to the nest's
-        # same-origin gate, which compares hosts and ignores ports
-        # (`inbox_routes::same_origin`).
+        # The loopback host this server binds and names itself by. The name
+        # `localhost` is ANOTHER SERVER to the nest's same-origin gate, which
+        # compares host strings and ignores ports (`inbox_routes::same_origin`),
+        # and the nest dials it at `127.0.0.1` (`resolve::loopback_dial_addr`).
+        # Never `127.0.0.2`: macOS loopback carries `127.0.0.1` alone, so that
+        # bind fails there with EADDRNOTAVAIL.
         self.host = host
         self.actor_uri = f"http://{host}:{port}/users/{username}"
         self.inbox_url = f"{self.actor_uri}/inbox"

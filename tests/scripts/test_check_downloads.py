@@ -34,18 +34,22 @@ V015 = _BINARIES + [
 ]
 V015 = V015 + [f"{name}.bundle" for name in V015]
 
-# What release.yml publishes from the next release on: v0.1.5's files plus the
-# linux desktop app for arm64, built natively since 2026-10-25.
-NEXT = V015 + ["fauna-linux-aarch64-linux", "fauna-linux-aarch64-linux.bundle"]
+# What release.yml publishes from the next release on: v0.1.5's files with the
+# linux desktop app as its install archive, for x64 and for arm64, in place of
+# the bare executable (installers/linux-desktop.md § What the release publishes).
+_DESKTOP = ["fauna-desktop-x86_64-linux.tar.gz", "fauna-desktop-aarch64-linux.tar.gz"]
+NEXT = ([f for f in V015 if not f.startswith("fauna-linux-")]
+        + _DESKTOP + [f"{name}.bundle" for name in _DESKTOP])
 
 
 def test_the_tree_table_agrees_with_the_next_release():
     assert mod.check(MANIFEST, "release.yml", NEXT) == []
 
 
-def test_the_v015_file_set_lacks_the_arm64_desktop_app():
-    errors = mod.check(MANIFEST, "release.yml", V015)
-    assert len(errors) == 1 and "fauna-linux-aarch64-linux" in errors[0]
+def test_the_v015_file_set_lacks_the_desktop_archives_and_carries_the_retired_bare_asset():
+    errors = "\n".join(mod.check(MANIFEST, "release.yml", V015))
+    for name in (*_DESKTOP, "fauna-linux-x86_64-linux"):
+        assert name in errors
 
 
 def test_a_cell_for_a_file_the_release_lacks_reds():

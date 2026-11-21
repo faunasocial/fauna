@@ -202,7 +202,7 @@ impl RuleEditorPanel {
             .borrow()
             .editor
             .as_ref()
-            .filter(|e| e.can_save())
+            .filter(|e| e.save_possibility().is_possible())
             .map(RuleEditor::document)
     }
 
@@ -297,7 +297,10 @@ fn refresh_footer(inner: &Inner) {
         return;
     };
     let view = editor.view();
-    inner.save.set_sensitive(view.can_save);
+    // Painted from the shared answer (`RuleEditor::save_possibility`), blocked
+    // by the sentence the status line below already states — so the reason
+    // rides the tooltip, never a second line.
+    crate::possible::paint(&inner.save, None, editor.save_possibility());
     match s
         .status
         .clone()
@@ -470,16 +473,27 @@ fn rebuild(inner: &Rc<Inner>) {
                 item.append(&field(t::KEYWORDS_LABEL, &entry));
             }
             RuleKind::Labeler => {
-                let selected = row
+                // A rule naming no labeler shows a blank first option (web's
+                // `<option value="">`): a `gtk::DropDown` shows its first item
+                // even when nothing is selected, so without it the first
+                // choice would read as picked and picking it would change
+                // nothing.
+                let named = row
                     .labeler
                     .as_deref()
                     .and_then(|l| labeler_names.iter().position(|n| n == l));
-                let labeler = dropdown(&labeler_names, selected, live);
+                let blank = usize::from(named.is_none());
+                let options: Vec<String> = std::iter::repeat_n(String::new(), blank)
+                    .chain(labeler_names.iter().cloned())
+                    .collect();
+                let labeler = dropdown(&options, named.map(|n| n + blank).or(Some(0)), live);
                 crate::testid::set_test_id(&labeler, ids::RULE_EDITOR_ITEM_LABELER_SELECT);
                 let weak = Rc::downgrade(inner);
                 labeler.connect_selected_notify(move |d| {
                     let Some(inner) = weak.upgrade() else { return };
-                    let index = d.selected() as usize;
+                    let Some(index) = (d.selected() as usize).checked_sub(blank) else {
+                        return;
+                    };
                     let choice = {
                         let s = inner.state.borrow();
                         s.editor
@@ -688,5 +702,117 @@ mod tests {
             doc.scorers[0].keyword_terms().unwrap(),
             vec!["casino", "lottery"]
         );
+    }
+
+    /// `rule-editor-save-button` is painted from the shared
+    /// `RuleEditor::save_possibility`: blocked by the sentence the status line
+    /// states (on its tooltip, the status line being the visible reason),
+    /// possible once the rule is complete.
+    #[test]
+    fn save_paints_the_shared_save_answer() {
+        crate::testid::run_on_gtk_thread(|| {
+            crate::offline_gate::reset_for_test("connected");
+            let p = RuleEditorPanel::new("fauna.admin.content_policy.set");
+            p.load(RuleEditor::load(
+                None,
+                Publisher::Nest("example.test".to_string()),
+            ));
+            p.inner.add.emit_clicked();
+            let answer = p
+                .inner
+                .state
+                .borrow()
+                .editor
+                .as_ref()
+                .unwrap()
+                .save_possibility();
+            assert!(!answer.is_possible(), "a new rule has no reason yet");
+            assert_eq!(
+                crate::possible::painted_answer(&p.inner.save),
+                Some(answer.clone())
+            );
+            assert!(!p.inner.save.is_sensitive());
+            assert_eq!(
+                p.inner.save.tooltip_text().map(|t| t.to_string()),
+                crate::possible::reason_text(&answer)
+            );
+            assert!(p.saveable_document().is_none());
+
+            p.inner
+                .state
+                .borrow_mut()
+                .editor
+                .as_mut()
+                .unwrap()
+                .set_kind(0, RuleKind::Keywords);
+            rebuild(&p.inner);
+            let root = p.widget().clone().upcast::<gtk::Widget>();
+            find(&root, ids::RULE_EDITOR_ITEM_KEYWORDS_INPUT)[0]
+                .clone()
+                .downcast::<gtk::Entry>()
+                .unwrap()
+                .set_text("casino");
+            find(&root, ids::RULE_EDITOR_ITEM_REASON_INPUT)[0]
+                .clone()
+                .downcast::<gtk::Entry>()
+                .unwrap()
+                .set_text("No gambling here");
+            assert!(crate::possible::painted_possible(&p.inner.save));
+            assert!(p.inner.save.is_sensitive());
+        });
+    }
+
+    /// A new labeler rule names no labeler, and its picker says so: picking
+    /// the only subscribed labeler is a real change that starts its module
+    /// fetch. A `gtk::DropDown` shows and reads back its first item after
+    /// `set_selected(INVALID_LIST_POSITION)`, so without the blank option
+    /// (web's `<option value="">`) picking that first item changed nothing
+    /// and the rule stayed labeler-less.
+    #[test]
+    fn picking_the_only_subscribed_labeler_starts_its_fetch() {
+        crate::testid::run_on_gtk_thread(|| {
+            crate::offline_gate::reset_for_test("connected");
+            let p = RuleEditorPanel::new("fauna.family.policy.update");
+            let fetched: Rc<RefCell<Vec<LabelerFetch>>> = Rc::default();
+            {
+                let fetched = Rc::clone(&fetched);
+                p.connect_labeler_fetch(move |_, f| fetched.borrow_mut().push(f));
+            }
+            p.load(RuleEditor::load(
+                None,
+                Publisher::Nest("example.test".to_string()),
+            ));
+            let id = "ab".repeat(32);
+            p.set_labelers(vec![id.clone()]);
+            p.inner.add.emit_clicked();
+            p.inner
+                .state
+                .borrow_mut()
+                .editor
+                .as_mut()
+                .unwrap()
+                .set_kind(0, RuleKind::Labeler);
+            rebuild(&p.inner);
+            let root = p.widget().clone().upcast::<gtk::Widget>();
+            let drop = find(&root, ids::RULE_EDITOR_ITEM_LABELER_SELECT)[0]
+                .clone()
+                .downcast::<gtk::DropDown>()
+                .unwrap();
+            let name = fauna_client_policy::labeler_scorer_name(&id);
+            let model = drop.model().unwrap();
+            let index = (0..model.n_items())
+                .find(|&i| {
+                    model
+                        .item(i)
+                        .and_downcast::<gtk::StringObject>()
+                        .is_some_and(|s| s.string() == name)
+                })
+                .expect("the subscribed labeler is offered");
+            drop.set_selected(index);
+            let fetched = fetched.borrow();
+            assert_eq!(fetched.len(), 1, "the pick starts the module fetch");
+            assert_eq!(fetched[0].labeler_id, id);
+            assert_eq!(fetched[0].name, name);
+        });
     }
 }

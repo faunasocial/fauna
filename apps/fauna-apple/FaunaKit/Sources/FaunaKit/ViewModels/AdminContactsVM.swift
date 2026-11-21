@@ -26,13 +26,16 @@ import SwiftUI
 /// whenever the snapshot read itself succeeded with no `snapshot.error` of
 /// its own — the same class of bug pass 68 fixed for `LinkedNestsVM`).
 @MainActor @Observable
-public final class AdminContactsVM: MachineBackedVM {
+public final class AdminContactsVM: ReadGatedToggleVM {
     /// Latest snapshot; `nil` until `configure`. The view reads `carddavEnabled` + `status`.
     public internal(set) var snapshot: CarddavPolicySnapshot?
     /// The single page error surface (`error-message`) — both connect/build failures and
     /// the machine's `snapshot.error` route here.
     public var errorMessage: String?
     public internal(set) var isLoading = false
+    /// The machine could not be built (``ReadGatedToggleVM``): the toggle
+    /// says *failed to load* rather than waiting for a read that never comes.
+    var machineBuildFailed = false
 
     var machine: CarddavPolicyMachine?
     /// The `APIClient` the cached ``machine`` was built from — re-vend on a session
@@ -53,10 +56,12 @@ public final class AdminContactsVM: MachineBackedVM {
             do {
                 let m = try await api.carddavPolicyMachine()
                 machine = m
+                machineBuildFailed = false
                 configuredApi = api
                 snapshot = m.snapshot()
             } catch {
                 errorMessage = DisplayError.message(error)
+                machineBuildFailed = true
                 return
             }
         }
@@ -83,6 +88,6 @@ public final class AdminContactsVM: MachineBackedVM {
 
     /// Dispatch a user action; the machine runs it to completion (or records an
     /// error on the snapshot), then we re-read.
-    public func dispatch(_ action: CarddavPolicyAction) async { await dispatchToMachine(action) }
+    public func dispatch(_ action: CarddavPolicyAction) async { await dispatchGated(action) }
 }
 #endif // !FAUNA_KIDS

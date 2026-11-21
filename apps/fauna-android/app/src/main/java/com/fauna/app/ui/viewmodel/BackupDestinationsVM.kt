@@ -188,6 +188,15 @@ class BackupDestinationsVM @Inject constructor(
         run { api.backupDestinationEdit(id, url.trim(), name.trim()) }
 
     /**
+     * Keep a destination the post-succession review raised
+     * (`backup-destination-keep-button`). Non-destructive and re-decidable — the
+     * row stays enrolled and removable — so no confirm, unlike [remove]. The
+     * returned list is the at-rest truth, so the mark clears from it rather than
+     * by an optimistic flip.
+     */
+    fun keep(id: String) = run { api.backupDestinationKeep(id) }
+
+    /**
      * Remove a destination, and — only when the user ticked
      * `backup-destination-remove-reclaim-checkbox` — free this device's copy
      * straight after.

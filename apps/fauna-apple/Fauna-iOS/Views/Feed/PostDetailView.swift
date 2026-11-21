@@ -178,6 +178,10 @@ struct PostDetailView: View {
                 // Body — the shared document walk (render-model.md § D6); replaces flat `post.body`.
                 DocumentBodyView(document: livePost.document)
                     .font(.body)
+                    // The post's text is selectable here, on the detail, not on the
+                    // feed list's card whose click opens it (ui/README.md § Text the
+                    // person reads can be copied, rule 3).
+                    .textSelection(.enabled)
                     .accessibilityIdentifier(Ids.feedPostDetailBody)
                     .automationValue(Ids.feedPostDetailBody, text: { renderDocumentToPlaintext(document: livePost.document) })
 

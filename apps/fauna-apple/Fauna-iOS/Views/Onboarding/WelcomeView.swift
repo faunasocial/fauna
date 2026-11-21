@@ -25,9 +25,15 @@ struct WelcomeView: View {
                 // (dynamic-features.md, the kids spine paragraph). The steps stay on
                 // handle entry, as on the android leg.
                 #if FAUNA_KIDS
-                case .dnsConfig, .vpsConfig, .nestProvisioning, .claimCode, .natModeChoice:
+                case .providerChoice, .dnsConfig, .vpsConfig, .nestProvisioning, .claimCode, .natModeChoice:
                     HandleEntryView(vm: vm)
                 #else
+                // The choose-providers page (onboarding-provisioning.md § 3d) — shared
+                // FaunaKit view; `setRendersProviderChoice(true)` declared at
+                // `OnboardingVM.init`, so the handle check lands here in place of
+                // dnsConfig → vpsConfig (which stay for the cloud-recovery path).
+                case .providerChoice:
+                    ProviderChoiceView(vm: vm)
                 case .dnsConfig:
                     DnsConfigView(vm: vm)
                 case .vpsConfig:
@@ -88,8 +94,11 @@ struct WelcomeView: View {
     private var doneRouter: some View {
         switch doneExit {
         case .feed:
-            // Handed off — the onboarding view is replaced by the authenticated UI.
-            Color.clear
+            // Handed off: the onboarding view is replaced by the authenticated UI
+            // in place. Until it is, the launch progress view — never a bare
+            // `Color.clear`, which painted nothing (`onboarding.md` § Wizard exit
+            // handling → *The wizard becomes the app in place*).
+            LaunchProgressView()
         // ⚠ There is deliberately no `.inviteSubmitted` arm (retired 2026-08-12).
         // It rendered `Color.clear` — nothing at all — and that whole exit is
         // gone: the pending-review journey stays on `invite_request` and polls
@@ -106,7 +115,8 @@ struct WelcomeView: View {
                 doneExit = .unknown
             }
         case .unknown:
-            Color.clear.onAppear { runHandoff() }
+            // The launch progress view from the wizard's first `.done` frame.
+            LaunchProgressView().onAppear { runHandoff() }
         }
     }
 

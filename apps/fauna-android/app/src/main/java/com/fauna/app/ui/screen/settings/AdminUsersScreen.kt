@@ -25,7 +25,14 @@ import com.fauna.app.R
 import com.fauna.app.ui.components.CopyButton
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.components.TokenSelect
+import com.fauna.app.ui.util.and
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.faunaFormGate
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.formRefusal
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.isShown
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.localizedNested
 import com.fauna.app.ui.util.resolveLocalized
@@ -35,11 +42,19 @@ import com.fauna.ffi.FfiAdminInviteCode
 import com.fauna.ffi.FfiAdminInviteRequest
 import com.fauna.ffi.FfiAdminPendingAction
 import com.fauna.ffi.FfiAdminUser
+import com.fauna.ffi.FfiAdminUserRowControl
 import com.fauna.ffi.FfiAdminUserRowControls
 import com.fauna.ffi.FfiAgeBandOption
 import com.fauna.ffi.FfiRegistrationMode
+import uniffi.fauna_core.Possibility
 import uniffi.fauna_core.LocalizedText
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.DropdownMenuItem
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.TextButton
+import com.fauna.app.ui.controls.ExposedDropdownMenuBox
 
 /**
  * The consolidated `admin-users` hub (admin.md § Users): four sections —
@@ -84,9 +99,6 @@ fun AdminUsersScreen(
     // Same shared `admin.users_page.*_default_reason` strings linux passes.
     val evictReason = stringResource(R.string.admin_users_page_evict_default_reason)
     val suspendReason = stringResource(R.string.admin_users_page_suspend_default_reason)
-    // Same Context-free-VM idiom for the Admit section's malformed-actor-id
-    // hint (tui/linux's `ADMIT_ACTOR_HINT`, surfaced on `admin-users-action-error`).
-    val admitActorHint = stringResource(R.string.admin_users_page_admit_actor_hint)
 
     AdminUsersContent(
         pendingRequests = pendingRequests,
@@ -119,8 +131,13 @@ fun AdminUsersScreen(
         onNextPage = vm::nextPage,
         onPrevPage = vm::prevPage,
         onSaveRegistration = vm::saveRegistration,
-        onAdmitUser = { actor, handle, tier, guardian, band -> vm.admitUser(actor, handle, tier, guardian, band, admitActorHint) },
+        onAdmitUser = vm::admitUser,
         rowControls = { com.fauna.ffi.adminUserRowControls(it, vm.viewerActor()) },
+        answers = AdminUsersAnswers(
+            pendingApprove = {
+                com.fauna.ffi.adminPendingApprovePossibility(it, vm.viewerActor() ?: ByteArray(0))
+            },
+        ),
         takeOver = TakeOverUi(
             armed = takeOverArmed,
             onArm = vm::armTakeOver,
@@ -206,9 +223,9 @@ fun AdminUsersContent(
     // section is read-only (no Save button renders then).
     onSaveRegistration: (FfiRegistrationMode, String, Boolean) -> Unit,
     // Section: Admit — direct admission, one `fauna.admin.users.create` call
-    // (actorHex, handle, tier, guardianActorId — null for "None"). Validation
-    // (64-hex actor id) is a VM concern (mirrors tui/linux); this screen passes
-    // through whatever was typed. No age band is sent from this section.
+    // (actorHex, handle, tier, guardianActorId — null for "None"). Fires only
+    // for a draft the shared `admit_actor_possibility` (64-hex account key)
+    // admitted; a malformed key is refused on `admin-users-action-error`.
     onAdmitUser: (actorHex: String, handle: String, tier: String, guardianActorId: ByteArray?, ageBand: String?) -> Unit,
     // Shared `fauna_core::format::hex_full` display encoder (value-formatting.md
     // § Hex id display), injected FFI-free so the Robolectric harness stays off
@@ -257,8 +274,17 @@ fun AdminUsersContent(
     // Shared `fauna_core::format::format_unix_local` timestamp (same as the
     // Settings pending-actions card), injected FFI-free for Robolectric.
     absoluteLocal: (Long) -> String = { com.fauna.app.ui.util.ValueFormat.absoluteLocal(it) },
+    // The page's offer-only-what-is-possible answers (admin.md § 2 → What a
+    // row offers), injected FFI-free like [rowControls].
+    answers: AdminUsersAnswers = AdminUsersAnswers(),
 ) {
-    val bandSelect = remember(ageBandNotSet) { AgeBandSelectSpec(ageBandOptions, ageBandNotSet) }
+    val bandSelect = remember(ageBandNotSet) { AgeBandSelectSpec(ageBandOptions, ageBandNotSet, answers.ageBand) }
+    // A press refused locally (its draft answer asked again — admin.md § Errors
+    // & edge cases, the form bullet) shows on `admin-users-action-error`; a
+    // later nest error replaces it, and a press that sends clears it.
+    var localRefusal by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(actionError) { if (actionError != null) localRefusal = null }
+    val refuse: (String?) -> Unit = { localRefusal = it }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -294,24 +320,28 @@ fun AdminUsersContent(
             HorizontalDivider()
             RegistrationSection(
                 registrationMode, unknownRegistrationMode, maxFreeUsers, ageVerificationRequired, onSaveRegistration,
+                answers.registrationCeiling, refuse,
             )
             HorizontalDivider()
-            AdmitSection(tiers, allUsers, guardianOption, bandSelect, onAdmitUser)
+            AdmitSection(tiers, allUsers, guardianOption, bandSelect, onAdmitUser, answers.admitActor, refuse) {
+                answers.tierPick(tiers)
+            }
             HorizontalDivider()
             InviteSection(
                 inviteCodes, tiers, allUsers, mintedCode, onCreateCode, onDeleteCode, hexFull, guardianOption,
-                bandSelect, ageBandLabel,
-            )
+                bandSelect, ageBandLabel, onCopyFailed = refuse,
+            ) { answers.tierPick(tiers) }
             HorizontalDivider()
             UsersSection(
                 users, userTotal, userOffset, tiers, onSetUserTier, hexFull, mailServingStatusLabel,
                 onEvictUser, onSuspendUser, onCancelEviction, onMakeAdmin, onRemoveAdmin,
                 rowControls, onNextPage, onPrevPage, totalPages, currentPage, takeOver, guardianOption,
+                answers.removeAdmin, answers.pageStep, answers.rowControl,
             )
             HorizontalDivider()
-            PendingActionsSection(pendingActions, onApprovePendingAction, onCancelPendingAction, absoluteLocal)
+            PendingActionsSection(pendingActions, onApprovePendingAction, onCancelPendingAction, absoluteLocal, answers.pendingApprove)
 
-            actionError?.let {
+            (localRefusal ?: actionError)?.let {
                 Text(
                     it,
                     color = MaterialTheme.colorScheme.error,
@@ -339,6 +369,7 @@ private fun PendingActionsSection(
     onApprove: (FfiAdminPendingAction) -> Unit,
     onCancel: (FfiAdminPendingAction) -> Unit,
     absoluteLocal: (Long) -> String,
+    approvePossibility: (FfiAdminPendingAction) -> Possibility,
 ) {
     Column {
         Text(
@@ -380,10 +411,17 @@ private fun PendingActionsSection(
                 },
                 trailingContent = {
                     Row {
-                        TextButton(
-                            onClick = { onApprove(action) },
-                            modifier = Modifier.testTag(Ids.ADMIN_PENDING_ACTION_APPROVE_BUTTON),
-                        ) { Text(stringResource(R.string.admin_users_page_pending_approve)) }
+                        // Absent on the viewer's own scheduled action (the nest
+                        // refuses self-approval — admin.md § 2 → *What a row
+                        // offers*); the click asks the shared answer again.
+                        if (approvePossibility(action).isShown) {
+                            TextButton(
+                                onClick = {
+                                    if (approvePossibility(action).isPossible) onApprove(action)
+                                },
+                                modifier = Modifier.testTag(Ids.ADMIN_PENDING_ACTION_APPROVE_BUTTON),
+                            ) { Text(stringResource(R.string.admin_users_page_pending_approve)) }
+                        }
                         TextButton(
                             onClick = { onCancel(action) },
                             modifier = Modifier.testTag(Ids.ADMIN_PENDING_ACTION_CANCEL_BUTTON),
@@ -498,7 +536,7 @@ private fun InviteRequestRow(
                 testId = Ids.INVITE_REQUEST_ROW_AGE_BAND_SELECT,
                 spec = bandSelect,
                 selected = selectedBand,
-                enabled = selectedGuardianActorId != null,
+                guardianSelected = selectedGuardianActorId != null,
                 onSelect = { selectedBand = it },
             )
             OutlinedTextField(
@@ -519,7 +557,7 @@ private fun InviteRequestRow(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = {
-                        onApprove(req, selectedTier, selectedGuardianActorId, bandSelect.wire(selectedBand))
+                        onApprove(req, selectedTier, selectedGuardianActorId, bandSelect.wire(selectedBand, selectedGuardianActorId != null))
                     },
                     enabled = approveGate.enabled,
                     modifier = Modifier.testTag(Ids.INVITE_REQUEST_ROW_APPROVE_BUTTON)
@@ -561,7 +599,12 @@ private fun RegistrationSection(
     maxFreeUsers: String,
     ageVerificationRequired: Boolean,
     onSave: (FfiRegistrationMode, String, Boolean) -> Unit,
+    // The ceiling draft's answer (`registration_ceiling_possibility`: blank or
+    // a whole number) and the page's refusal line.
+    ceilingAnswer: (String) -> Possibility,
+    refuse: (String?) -> Unit,
 ) {
+    val context = LocalContext.current
     Column(modifier = Modifier.testTag(Ids.ADMIN_USERS_REGISTRATION_SECTION)) {
         Text(
             stringResource(R.string.admin_users_page_section_registration),
@@ -638,9 +681,21 @@ private fun RegistrationSection(
             // plus `set_age_verification_required` only when the knob changed),
             // so the Save carries the whole section's declaration and the
             // controls above stay live as ordinary buffers.
-            val saveGate = faunaGate("fauna.admin.set_registration_mode")
+            val ceiling = ceilingAnswer(capInput)
+            val saveGate = faunaFormGate(
+                ceiling,
+                faunaGate("fauna.admin.set_registration_mode", enabled = ceiling.isPossible),
+            )
             Button(
-                onClick = { onSave(selectedMode, capInput, requireAgeVerification) },
+                onClick = {
+                    val refusal = formRefusal(context, ceilingAnswer(capInput))
+                    if (refusal != null) {
+                        refuse(refusal.reason)
+                    } else {
+                        refuse(null)
+                        onSave(selectedMode, capInput, requireAgeVerification)
+                    }
+                },
                 enabled = saveGate.enabled,
                 modifier = Modifier
                     .padding(top = 8.dp)
@@ -733,8 +788,10 @@ private fun RegistrationModeDropdown(
  * always choosing a tier"), and admits — one `fauna.admin.users.create`
  * call. The form is never cleared here, on success or failure (tui/linux's
  * own idiom) — the new row in the Users-section refetch below is the
- * feedback; errors (including a malformed actor id, validated VM-side) land
- * on `admin-users-action-error`.
+ * feedback. The admit button is painted from the tier gate folded with the
+ * shared `admit_actor_possibility` (a 64-hex account key) and asks both again
+ * at the press; a refusal and the nest's errors land on
+ * `admin-users-action-error`.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -744,7 +801,13 @@ private fun AdmitSection(
     guardianOption: (FfiAdminUser) -> String,
     bandSelect: AgeBandSelectSpec,
     onAdmit: (actorHex: String, handle: String, tier: String, guardianActorId: ByteArray?, ageBand: String?) -> Unit,
+    actorAnswer: (String) -> Possibility,
+    refuse: (String?) -> Unit,
+    // The shared tier gate (`admin.md` § 2 → *What a row offers*): never
+    // offered enabled beside an empty tier select; asked again at the press.
+    tierAnswer: () -> Possibility,
 ) {
+    val context = LocalContext.current
     var actorInput by remember { mutableStateOf("") }
     var handleInput by remember { mutableStateOf("") }
     var selectedTier by remember { mutableStateOf(tiers.firstOrNull() ?: "free") }
@@ -802,16 +865,24 @@ private fun AdmitSection(
             testId = Ids.ADMIN_USERS_ADMIT_AGE_BAND_SELECT,
             spec = bandSelect,
             selected = selectedBand,
-            enabled = selectedGuardianActorId != null,
+            guardianSelected = selectedGuardianActorId != null,
             onSelect = { selectedBand = it },
             modifier = Modifier.padding(top = 8.dp),
         )
-        val admitGate = faunaGate("fauna.admin.users.create")
+        // The read gate (a tier to pick) speaks first, then the draft's.
+        val admitAnswer = tierAnswer() and actorAnswer(actorInput)
+        val admitGate = faunaFormGate(admitAnswer, faunaGate("fauna.admin.users.create", enabled = admitAnswer.isPossible))
         Button(
             onClick = {
+                val refusal = formRefusal(context, tierAnswer() and actorAnswer(actorInput))
+                if (refusal != null) {
+                    refuse(refusal.reason)
+                    return@Button
+                }
+                refuse(null)
                 onAdmit(
                     actorInput, handleInput, selectedTier, selectedGuardianActorId,
-                    bandSelect.wire(selectedBand),
+                    bandSelect.wire(selectedBand, selectedGuardianActorId != null),
                 )
             },
             enabled = admitGate.enabled,
@@ -837,8 +908,15 @@ private fun InviteSection(
     guardianOption: (FfiAdminUser) -> String,
     bandSelect: AgeBandSelectSpec,
     ageBandLabel: (String) -> LocalizedText?,
+    // A clipboard write that failed (`common.copy_failed`), for
+    // `admin-users-action-error`.
+    onCopyFailed: (String) -> Unit,
+    // The shared tier gate on the opener and the confirm, asked again at each
+    // press.
+    tierAnswer: () -> Possibility,
 ) {
     var formVisible by remember { mutableStateOf(false) }
+    val tierGate = tierAnswer()
     var selectedTier by remember { mutableStateOf(tiers.firstOrNull() ?: "free") }
     var maxUses by remember { mutableStateOf("1") }
     var selectedGuardianActorId by remember { mutableStateOf<ByteArray?>(null) }
@@ -899,7 +977,7 @@ private fun InviteSection(
                 testId = Ids.ADMIN_USERS_INVITE_AGE_BAND_SELECT,
                 spec = bandSelect,
                 selected = selectedBand,
-                enabled = selectedGuardianActorId != null,
+                guardianSelected = selectedGuardianActorId != null,
                 onSelect = { selectedBand = it },
                 modifier = Modifier.padding(top = 8.dp),
             )
@@ -922,13 +1000,21 @@ private fun InviteSection(
                     testTag = Ids.ADMIN_USERS_INVITE_CODE_COPY_BTN,
                     text = code,
                     label = stringResource(R.string.admin_users_page_copy_code),
+                    // Confirmed like `account-actor-id-copy-btn`: "Copied!"
+                    // beside the code + the code as its `copied` attr; a
+                    // failed write says so on the page's action error.
+                    confirm = true,
+                    onCopyFailed = onCopyFailed,
                 )
             }
             if (!formVisible) {
+                val openGate = faunaFormGate(tierGate)
                 Button(
-                    onClick = { formVisible = true },
+                    onClick = { if (tierAnswer().isPossible) formVisible = true },
+                    enabled = openGate.enabled,
                     modifier = Modifier.testTag(Ids.CREATE_INVITE_CODE_BTN)
                 ) { Text(stringResource(R.string.admin_settings_page_create_code)) }
+                DisabledControlReasonText(openGate.reason)
             } else {
                 OutlinedButton(
                     onClick = { formVisible = false },
@@ -939,12 +1025,16 @@ private fun InviteSection(
                 // both pure-local (the arming/disarming split tui states in its
                 // admin kind map), so neither declares and both stay live with
                 // no nest.
-                val mintGate = faunaGate("fauna.admin.invite_codes.create")
+                val mintGate = faunaFormGate(
+                    tierGate,
+                    faunaGate("fauna.admin.invite_codes.create", enabled = tierGate.isPossible),
+                )
                 Button(
                     onClick = {
+                        if (!tierAnswer().isPossible) return@Button
                         onCreateCode(
                             selectedTier, maxUses.toLongOrNull() ?: 1L, selectedGuardianActorId,
-                            bandSelect.wire(selectedBand),
+                            bandSelect.wire(selectedBand, selectedGuardianActorId != null),
                         )
                         formVisible = false
                     },
@@ -1015,6 +1105,9 @@ private fun UsersSection(
     currentPage: (Long, Long) -> Long,
     takeOver: TakeOverUi,
     guardianOption: (FfiAdminUser) -> String,
+    removeAdminPossibility: (FfiAdminUser) -> Possibility,
+    pageStep: (offset: Long, total: Long, pageSize: Long, forward: Boolean) -> Possibility,
+    rowControl: (FfiAdminUserRowControls, FfiAdminUserRowControl) -> Possibility,
 ) {
     Column(modifier = Modifier.testTag(Ids.ADMIN_USERS_LIST_SECTION)) {
         Text(
@@ -1032,13 +1125,15 @@ private fun UsersSection(
             UserRow(
                 user, tiers, onSetUserTier, hexFull, mailServingStatusLabel,
                 onEvictUser, onSuspendUser, onCancelEviction, onMakeAdmin, onRemoveAdmin,
-                rowControls, takeOver, guardianOption,
+                rowControls, takeOver, guardianOption, removeAdminPossibility, rowControl,
             )
         }
         // Pagination (admin.md § Users — limit/offset on `fauna.admin.users.list`).
-        // Buttons stay enabled at a boundary too (the shared stepper no-ops the
-        // click, mirrors web/apple); the `enabled` flags below are a visual nicety
-        // (mirrors linux's `set_sensitive`), not a correctness dependency.
+        // Each button is painted from the shared `users_page_step_possibility`
+        // (blocked at a bound, the reason beside it) and asks it again at the
+        // press.
+        val prevAnswer = pageStep(userOffset, userTotal, AdminUsersVM.PAGE_SIZE, false)
+        val nextAnswer = pageStep(userOffset, userTotal, AdminUsersVM.PAGE_SIZE, true)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1048,8 +1143,10 @@ private fun UsersSection(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             OutlinedButton(
-                onClick = onPrevPage,
-                enabled = userOffset > 0,
+                onClick = {
+                    if (pageStep(userOffset, userTotal, AdminUsersVM.PAGE_SIZE, false).isPossible) onPrevPage()
+                },
+                enabled = prevAnswer.isPossible,
                 modifier = Modifier.testTag(Ids.ADMIN_USERS_PREV_PAGE),
             ) { Text(stringResource(R.string.admin_users_page_prev_page)) }
             Text(
@@ -1063,11 +1160,14 @@ private fun UsersSection(
                 modifier = Modifier.padding(horizontal = 12.dp),
             )
             OutlinedButton(
-                onClick = onNextPage,
-                enabled = userOffset + AdminUsersVM.PAGE_SIZE < userTotal,
+                onClick = {
+                    if (pageStep(userOffset, userTotal, AdminUsersVM.PAGE_SIZE, true).isPossible) onNextPage()
+                },
+                enabled = nextAnswer.isPossible,
                 modifier = Modifier.testTag(Ids.ADMIN_USERS_NEXT_PAGE),
             ) { Text(stringResource(R.string.admin_users_page_next_page)) }
         }
+        DisabledControlReasonText(localized((prevAnswer.blockedReason ?: nextAnswer.blockedReason)))
     }
 }
 
@@ -1086,8 +1186,26 @@ private fun UserRow(
     rowControls: (FfiAdminUser) -> FfiAdminUserRowControls,
     takeOver: TakeOverUi,
     guardianOption: (FfiAdminUser) -> String,
+    // The injected shared remove-admin answer ([AdminUsersAnswers.removeAdmin]),
+    // so the row stays FFI-free under Robolectric.
+    removeAdminPossibility: (FfiAdminUser) -> Possibility,
+    // The shared offered-or-absent row-control answer
+    // ([AdminUsersAnswers.rowControl]), injected for the same reason.
+    rowControl: (FfiAdminUserRowControls, FfiAdminUserRowControl) -> Possibility,
 ) {
     val controls = rowControls(user)
+    // Each lifecycle and roster control is painted from its shared
+    // `AdminUserRowControls::*_possibility` sibling (admin.md § Errors & edge
+    // cases, *Role and state gates answer one `Possibility` too*): absent where
+    // the row does not offer it. The click asks the same answer again, over a
+    // fresh `rowControls` read, and sends nothing when it no longer holds.
+    val answer = { kind: FfiAdminUserRowControl -> rowControl(controls, kind) }
+    val stillPossible = { kind: FfiAdminUserRowControl -> rowControl(rowControls(user), kind).isPossible }
+    val evict = answer(FfiAdminUserRowControl.EVICT)
+    val suspendIt = answer(FfiAdminUserRowControl.SUSPEND)
+    val restore = answer(FfiAdminUserRowControl.RESTORE)
+    val makeAdmin = answer(FfiAdminUserRowControl.MAKE_ADMIN)
+    val takeOverAnswer = answer(FfiAdminUserRowControl.TAKE_OVER)
     Column(
         modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp).testTag(Ids.USER_ROW),
         verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -1143,32 +1261,32 @@ private fun UserRow(
         // re-read `eviction`/`isAdmin` here). One click acts immediately, no confirm
         // dialog: both cut-off paths are reversible by the Cancel-eviction control
         // beside them. Descendants of `user-row`, so the e2e queries them scoped.
-        if (controls.evict || controls.`suspend` || controls.restore) {
+        if (evict.isShown || suspendIt.isShown || restore.isShown) {
             // Each of the three is its own wire kind, so each declares its own —
             // NOT one gate for the ladder. `cancel_eviction` in particular is
             // the reversal of the other two and could look like a local undo;
             // it is a nest call like the rest.
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (controls.evict) {
+                if (evict.isShown) {
                     TextButton(
-                        onClick = { onEvictUser(user) },
-                        enabled = faunaGate("fauna.admin.users.evict").enabled,
+                        onClick = { if (stillPossible(FfiAdminUserRowControl.EVICT)) onEvictUser(user) },
+                        enabled = evict.isPossible && faunaGate("fauna.admin.users.evict").enabled,
                         colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
                         modifier = Modifier.testTag(Ids.ADMIN_USERS_EVICT_BUTTON),
                     ) { Text(stringResource(R.string.admin_users_page_evict)) }
                 }
-                if (controls.`suspend`) {
+                if (suspendIt.isShown) {
                     TextButton(
-                        onClick = { onSuspendUser(user) },
-                        enabled = faunaGate("fauna.admin.users.suspend").enabled,
+                        onClick = { if (stillPossible(FfiAdminUserRowControl.SUSPEND)) onSuspendUser(user) },
+                        enabled = suspendIt.isPossible && faunaGate("fauna.admin.users.suspend").enabled,
                         colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
                         modifier = Modifier.testTag(Ids.ADMIN_USERS_SUSPEND_BUTTON),
                     ) { Text(stringResource(R.string.admin_users_page_suspend)) }
                 }
-                if (controls.restore) {
+                if (restore.isShown) {
                     TextButton(
-                        onClick = { onCancelEviction(user) },
-                        enabled = faunaGate("fauna.admin.users.cancel_eviction").enabled,
+                        onClick = { if (stillPossible(FfiAdminUserRowControl.RESTORE)) onCancelEviction(user) },
+                        enabled = restore.isPossible && faunaGate("fauna.admin.users.cancel_eviction").enabled,
                         modifier = Modifier.testTag(Ids.ADMIN_USERS_CANCEL_EVICTION_BUTTON),
                     ) { Text(stringResource(R.string.admin_users_page_cancel_eviction)) }
                 }
@@ -1178,24 +1296,32 @@ private fun UserRow(
         // 1) — same shared `controls` decision as the cut-off ladder above, own
         // row so a plain row's Make Admin never sits inside the (empty) cut-off
         // `Row` above and get skipped by its `if` guard.
-        if (controls.makeAdmin || controls.removeAdmin) {
+        // Remove admin is painted from the shared answer (admin.md § 2 → *What
+        // a row offers*): absent without the role, blocked — with its reason —
+        // on the nest's last superadmin; the click asks it again.
+        val removeAdmin = removeAdminPossibility(user)
+        if (makeAdmin.isShown || controls.removeAdmin) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (controls.makeAdmin) {
+                if (makeAdmin.isShown) {
                     TextButton(
-                        onClick = { onMakeAdmin(user) },
-                        enabled = faunaGate("fauna.admin.admins.add").enabled,
+                        onClick = { if (stillPossible(FfiAdminUserRowControl.MAKE_ADMIN)) onMakeAdmin(user) },
+                        enabled = makeAdmin.isPossible && faunaGate("fauna.admin.admins.add").enabled,
                         modifier = Modifier.testTag(Ids.ADMIN_USERS_MAKE_ADMIN_BUTTON),
                     ) { Text(stringResource(R.string.admin_users_page_make_admin)) }
                 }
                 if (controls.removeAdmin) {
                     TextButton(
-                        onClick = { onRemoveAdmin(user) },
-                        enabled = faunaGate("fauna.admin.admins.remove").enabled,
+                        onClick = {
+                            if (removeAdminPossibility(user).isPossible) onRemoveAdmin(user)
+                        },
+                        enabled = removeAdmin.isPossible &&
+                            faunaGate("fauna.admin.admins.remove").enabled,
                         colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
                         modifier = Modifier.testTag(Ids.ADMIN_USERS_REMOVE_ADMIN_BUTTON),
                     ) { Text(stringResource(R.string.admin_users_page_remove_admin)) }
                 }
             }
+            DisabledControlReasonText(localized(removeAdmin.blockedReason))
         }
         // The admin take-over of a supervised account (family-safety.md § App
         // surface → *Admin take-over*): the guardian label and the offer are the
@@ -1209,9 +1335,10 @@ private fun UserRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.testTag(Ids.ADMIN_USERS_SUPERVISED_BY),
             )
-            if (controls.takeOver && !armed) {
+            if (takeOverAnswer.isShown && !armed) {
                 TextButton(
-                    onClick = { takeOver.onArm(user) },
+                    onClick = { if (stillPossible(FfiAdminUserRowControl.TAKE_OVER)) takeOver.onArm(user) },
+                    enabled = takeOverAnswer.isPossible,
                     modifier = Modifier.testTag(Ids.ADMIN_USERS_TAKE_OVER_BUTTON),
                 ) { Text(stringResource(R.string.admin_users_page_take_over)) }
             }
@@ -1366,11 +1493,18 @@ private fun GuardianDropdown(
  * the admission call. Built once per screen so the Invite form and every
  * request row draw the same list.
  */
-private class AgeBandSelectSpec(options: () -> List<FfiAgeBandOption>, val notSet: String) {
+private class AgeBandSelectSpec(
+    options: () -> List<FfiAgeBandOption>,
+    val notSet: String,
+    /** `fauna_client_admin::age_band_possibility`: blocked until a guardian is picked. */
+    val possibility: (Boolean) -> Possibility,
+) {
     val options: List<FfiAgeBandOption> = options()
 
-    /** The admission carry's `age_band` for a selected value — `null` for *not set*. */
-    fun wire(selected: String): String? = selected.takeIf { it != notSet }
+    /** The admission carry's `age_band` for a selected value, asking the
+     *  shared answer again — `null` for *not set* and with no guardian. */
+    fun wire(selected: String, guardianSelected: Boolean): String? =
+        selected.takeIf { it != notSet && possibility(guardianSelected).isPossible }
 }
 
 /**
@@ -1386,16 +1520,60 @@ private fun AgeBandSelect(
     testId: String,
     spec: AgeBandSelectSpec,
     selected: String,
-    enabled: Boolean,
+    guardianSelected: Boolean,
     onSelect: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    TokenSelect(
-        testTagValue = testId,
-        selected = selected,
-        options = spec.options.map { it.value to (localized(it.label) ?: it.value) },
-        onSelect = onSelect,
-        enabled = enabled,
-        modifier = modifier,
-    )
+    // Painted from the shared answer (admin.md § 2 → What a row offers):
+    // blocked, with its reason beside it, until a guardian is picked.
+    val answer = spec.possibility(guardianSelected)
+    Column(modifier = modifier) {
+        TokenSelect(
+            testTagValue = testId,
+            selected = selected,
+            options = spec.options.map { it.value to (localized(it.label) ?: it.value) },
+            onSelect = onSelect,
+            enabled = answer.isPossible,
+        )
+        DisabledControlReasonText(localized(answer.blockedReason))
+    }
 }
+
+/**
+ * The users page's offer-only-what-is-possible answers (admin.md § 2 → *What
+ * a row offers*): each one shared `fauna_client_admin` predicate over UniFFI,
+ * painted and asked again before the action. Injected FFI-free like
+ * `rowControls`, so the Robolectric harness stays off the native path; the
+ * real screen binds [pendingApprove] to the viewing admin's actor id.
+ */
+class AdminUsersAnswers(
+    val removeAdmin: (FfiAdminUser) -> Possibility = { com.fauna.ffi.adminRemoveAdminPossibility(it) },
+    val pendingApprove: (FfiAdminPendingAction) -> Possibility = {
+        com.fauna.ffi.adminPendingApprovePossibility(it, ByteArray(0))
+    },
+    val ageBand: (Boolean) -> Possibility = { com.fauna.ffi.adminAgeBandPossibility(it) },
+    // The admit and invite controls' tier gate (`tier_pick_possibility`) and
+    // the pager's bounds (`users_page_step_possibility`); defaults fail open
+    // ([askForm]) so a harness that injects only the older answers stays off
+    // the native path.
+    val tierPick: (List<String>) -> Possibility = {
+        askForm { com.fauna.ffi.adminTierPickPossibility(it) }
+    },
+    val pageStep: (offset: Long, total: Long, pageSize: Long, forward: Boolean) -> Possibility = { o, t, p, f ->
+        askForm { com.fauna.ffi.adminUsersPageStepPossibility(o, t, p, f) }
+    },
+    // The two forms' draft answers (admin.md § Errors & edge cases, the form
+    // bullet): the registration ceiling (`registration_ceiling_possibility`,
+    // blank or a whole number) and the admit account key
+    // (`admit_actor_possibility`, 64 hex). Fail open like the two above.
+    val registrationCeiling: (String) -> Possibility = {
+        askForm { com.fauna.ffi.adminRegistrationCeilingPossibility(it) }
+    },
+    val admitActor: (String) -> Possibility = { askForm { com.fauna.ffi.adminAdmitActorPossibility(it) } },
+    // A users-row lifecycle or roster control (admin.md § Errors & edge cases,
+    // *Role and state gates answer one `Possibility` too*): the shared
+    // `AdminUserRowControls::*_possibility` sibling over UniFFI.
+    val rowControl: (FfiAdminUserRowControls, FfiAdminUserRowControl) -> Possibility = { controls, kind ->
+        com.fauna.ffi.adminUserRowControlPossibility(controls, kind)
+    },
+)

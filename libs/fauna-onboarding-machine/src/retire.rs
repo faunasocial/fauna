@@ -603,11 +603,26 @@ impl NestRetireMachine {
     /// Whether the sign-in button is pressable: the form's `base-url` is
     /// filled in and no attempt on this field is mid-flight.
     pub fn hosted_auth_can_begin(&self, field_id: String) -> bool {
-        self.hosted_auth_base_url().is_some()
-            && !matches!(
-                self.hosted_auth_state(field_id),
-                HostedAuthState::Pending { .. }
-            )
+        self.hosted_auth_possibility(field_id).is_possible()
+    }
+
+    /// The sign-in button's answer, with its reason — the wizard's
+    /// `hosted_auth_possibility` over this form.
+    pub fn hosted_auth_possibility(
+        &self,
+        field_id: String,
+    ) -> fauna_core::possibility::Possibility {
+        use crate::credential_gate::{BASE_URL_FIRST, FINISH_FIRST, first_blocked};
+        first_blocked(&[
+            (self.hosted_auth_base_url().is_none(), BASE_URL_FIRST),
+            (
+                matches!(
+                    self.hosted_auth_state(field_id),
+                    HostedAuthState::Pending { .. }
+                ),
+                FINISH_FIRST,
+            ),
+        ])
     }
 
     /// The `hosted-auth` button's label — the wizard's one mapping.
@@ -670,6 +685,10 @@ impl NestRetireMachine {
 
     /// Move to the confirm state, computing the DNS plan the summary shows.
     pub fn begin_confirm(&self) {
+        // The delete button's own answer first (rule 6).
+        if !self.delete_possibility().is_possible() {
+            return;
+        }
         let mut inner = self.inner.lock().expect("retire mutex");
         let Some(row) = inner.snap.selected_row().cloned() else {
             inner.snap.error = Some("no server selected".into());
@@ -747,22 +766,79 @@ impl NestRetireMachine {
             .unwrap_or_default()
     }
 
-    /// Whether the verify button is pressable: a provider is picked, every
-    /// required field is filled in, no listing is in flight, and no input the
-    /// app announced is still on its way.
+    /// [`Self::verify_possibility`] as the bare flag; kept public for the apps
+    /// that still read it until their trickle-down lands.
     pub fn can_verify(&self) -> bool {
+        self.verify_possibility().is_possible()
+    }
+
+    /// `vps-verify-button`'s answer on the retire page (`ui/README.md`
+    /// § Offer only what is possible, rules 2 and 6), each blocked state
+    /// naming what revives it: the app's late inputs still loading, no
+    /// provider picked, the listing this verify started still running, a
+    /// required field empty. Outside the credential and listing phases the
+    /// page shows no verify button at all: absent. [`Self::verify`] asks it
+    /// first.
+    pub fn verify_possibility(&self) -> fauna_core::possibility::Possibility {
+        use crate::credential_gate::{CHECKING, FILL_REQUIRED, first_blocked, required_filled};
         let fields = self.visible_fields();
         let inner = self.inner.lock().expect("retire mutex");
-        !inner.inputs_pending
-            && inner.provider_id.is_some()
-            && inner.snap.phase == RetirePhase::Credentials
-            && fields.iter().all(|f| {
-                !f.required
-                    || inner
-                        .creds
-                        .get(&f.id)
-                        .is_some_and(|v| !v.as_str().is_empty())
-            })
+        if !matches!(
+            inner.snap.phase,
+            RetirePhase::Credentials | RetirePhase::Listing
+        ) {
+            return fauna_core::possibility::Possibility::Absent;
+        }
+        first_blocked(&[
+            (inner.inputs_pending, "common.still_loading"),
+            (
+                inner.provider_id.is_none(),
+                "onboarding.vps_config.status_pick_provider",
+            ),
+            (inner.snap.phase == RetirePhase::Listing, CHECKING),
+            (
+                !required_filled(&fields, |id| {
+                    inner.creds.get(id).is_some_and(|v| !v.as_str().is_empty())
+                }),
+                FILL_REQUIRED,
+            ),
+        ])
+    }
+
+    /// `retire-delete-button`'s answer (`ui/README.md` § Offer only what is
+    /// possible, rule 6): shown in the list state only (absent elsewhere),
+    /// blocked `onboarding.retire.delete_blocked_pick_server` until a listed
+    /// server is chosen. [`Self::begin_confirm`] asks it first.
+    pub fn delete_possibility(&self) -> fauna_core::possibility::Possibility {
+        use fauna_core::possibility::Possibility;
+        let inner = self.inner.lock().expect("retire mutex");
+        if inner.snap.phase != RetirePhase::List {
+            return Possibility::Absent;
+        }
+        if inner.snap.selected_row().is_some() {
+            Possibility::Possible
+        } else {
+            Possibility::blocked(LocalizedText::key(
+                "onboarding.retire.delete_blocked_pick_server",
+            ))
+        }
+    }
+
+    /// `retire-confirm-button`'s answer: shown in the confirm state only,
+    /// blocked `onboarding.retire.confirm_blocked_name` until the typed name
+    /// matches the selected server's exactly (§ Confirm shape, the gate
+    /// [`Self::set_confirm_name`] keeps). [`Self::confirm`] asks it first.
+    pub fn confirm_possibility(&self) -> fauna_core::possibility::Possibility {
+        use fauna_core::possibility::Possibility;
+        let inner = self.inner.lock().expect("retire mutex");
+        if inner.snap.phase != RetirePhase::Confirm {
+            return Possibility::Absent;
+        }
+        if inner.snap.confirm_enabled && inner.snap.selected.is_some() {
+            Possibility::Possible
+        } else {
+            Possibility::blocked(LocalizedText::key("onboarding.retire.confirm_blocked_name"))
+        }
     }
 
     /// The app is reading more inputs after the page opened (the admin
@@ -1101,6 +1177,16 @@ impl NestRetireMachine {
 
     /// Verify the entered credential and list the fauna boxes in the account.
     pub async fn verify(&self) {
+        // The action asks the button's predicate first (rule 6): a press the
+        // page shows blocked — a second verify while the listing runs, a
+        // field left empty — does nothing. An absent answer (a re-list from a
+        // later phase, which shows no verify button) is not a refusal.
+        if matches!(
+            self.verify_possibility(),
+            fauna_core::possibility::Possibility::Blocked { .. }
+        ) {
+            return;
+        }
         // A re-list puts the list, not the run, on screen — and leaving the
         // run disarms it (§ Confirm shape), for every exit, so the offer made
         // for the armed server goes with it.
@@ -1218,6 +1304,10 @@ impl NestRetireMachine {
     /// `force_server` act on that id and no other, so the typed name guards
     /// every door into `delete_server`, not only this one.
     pub async fn confirm(&self) {
+        // The confirm button's own answer first (rule 6).
+        if !self.confirm_possibility().is_possible() {
+            return;
+        }
         let armed = {
             let mut inner = self.inner.lock().expect("retire mutex");
             if inner.snap.phase != RetirePhase::Confirm || !inner.snap.confirm_enabled {
@@ -1345,7 +1435,7 @@ fn relative_name(
 /// `creds_json[i]`, each a `providers.yaml`-keyed JSON bag. A bag that does not
 /// parse keeps its provider with no fields (its `verify()` then fails and it is
 /// simply not usable); a pair missing its other half is dropped.
-fn held_dns_from_json(
+pub(crate) fn held_dns_from_json(
     provider_ids: Vec<String>,
     creds_json: Vec<String>,
 ) -> Vec<HeldDnsCredential> {

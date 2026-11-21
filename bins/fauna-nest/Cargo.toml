@@ -465,8 +465,9 @@ fauna-client-config = { path = "../../libs/fauna-client-config", features = ["te
 # `TierPeriodKeys` test-fixture builder, round 92 lift (mirrors
 # fauna-client-dns's own dev-dep re-declaration of fauna-core/test-helpers).
 # The [dependencies] entry above stays production-clean; this feature reaches
-# test builds only.
-fauna-core = { path = "../../libs/fauna-core", features = ["test-helpers"] }
+# test builds only. `test-util` unlocks `PagingRule::with_thresholds`, the small
+# paging rule the nest's paged-manifest tests write roots and pages with.
+fauna-core = { path = "../../libs/fauna-core", features = ["test-helpers", "test-util"] }
 # Test-only feature widening of the prod dep above: the account store seams
 # (`preference-store`) and the W3 lifecycle runtime (`conformance_account_runtime.rs`
 # proves V1/V3 over the real handlers;
@@ -759,6 +760,12 @@ required-features = ["activitypub"]
 # `nest-testhooks-check` gate.
 [[test]]
 name = "conformance_content_sealing_epochs_client"
+required-features = ["test-hooks"]
+
+# Withholds `paged-manifests` from the in-process nest's advertised set
+# (`AppState::capabilities_withheld`, a `test-hooks` field).
+[[test]]
+name = "conformance_paged_manifest_two_engines"
 required-features = ["test-hooks"]
 
 # The four `desktop_serve` loop proofs below have the SAME runtime dependency the

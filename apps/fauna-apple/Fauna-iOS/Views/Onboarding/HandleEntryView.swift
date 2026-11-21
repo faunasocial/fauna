@@ -20,12 +20,14 @@ struct HandleEntryView: View {
 
             Text(L.onboarding.handle.examplesHelp)
                 .font(.subheadline)
+                .textSelection(.enabled)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity, alignment: .center)
 
             Text(L.onboarding.handle.localhostHint)
                 .font(.caption)
+                .textSelection(.enabled)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity, alignment: .center)
@@ -39,55 +41,27 @@ struct HandleEntryView: View {
                 .submitLabel(.go)
                 .accessibilityIdentifier(Ids.handleInput)
                 .automationField(Ids.handleInput, text: handleBinding)
-                .onSubmit { runCheck() }
+                .onSubmit { vm.runHandleCheck() }
 
-                Button(L.common.check) { runCheck() }
+                Button(L.common.check) { vm.runHandleCheck() }
                     .buttonStyle(.bordered)
-                    .disabled(vm.machine.currentHandle().isEmpty)
                     .accessibilityIdentifier(Ids.handleCheckButton)
-                    .automationActivate(Ids.handleCheckButton,
-                                        isEnabled: { !vm.machine.currentHandle().isEmpty }) {
-                        runCheck()
-                    }
+                    .automationActivate(Ids.handleCheckButton) { vm.runHandleCheck() }
+                    // A handle typed, no check in flight; `runHandleCheck` re-asks it.
+                    .faunaPossible(vm.handleCheckAnswer)
             }
+            FaunaPossibilityReason(vm.handleCheckAnswer)
 
             Text(renderLocalizedText(snap.message))
                 .font(.subheadline)
+                // Read-only text is selectable (ui/README.md § Text the person reads
+                // can be copied).
+                .textSelection(.enabled)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityIdentifier(Ids.handleMessageArea)
                 .automationValue(Ids.handleMessageArea,
                                  text: { renderLocalizedText(vm.machine.handleCheckSnapshot().message) })
-
-            if snap.controlCheckboxVisible {
-                // Use a Button wrapping the Toggle so the entire row is the
-                // tap target (XCUITest's `tap()` on a SwiftUI Toggle's
-                // accessibility wrapper doesn't reliably flip the underlying
-                // UISwitch on iOS — the inner Switch is hit-testable only on
-                // its right edge).
-                Button(action: {
-                    vm.machine.setControlCheckbox(checked: !snap.controlCheckboxChecked)
-                }) {
-                    HStack {
-                        Image(systemName: snap.controlCheckboxChecked
-                              ? "checkmark.square.fill" : "square")
-                            .foregroundStyle(snap.controlCheckboxChecked
-                                             ? Color.accentColor : Color.secondary)
-                        Text(L.onboarding.handle.controlCheckbox)
-                            .foregroundStyle(.primary)
-                        Spacer()
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier(Ids.handleControlCheckbox)
-                // A toggle's "click" is a flip — read the live checked state and
-                // invert it through the same machine setter the Button action uses.
-                .automationActivate(Ids.handleControlCheckbox) {
-                    vm.machine.setControlCheckbox(
-                        checked: !vm.machine.handleCheckSnapshot().controlCheckboxChecked)
-                }
-            }
 
             if let error = vm.errorMessage {
                 ErrorBanner(message: error)
@@ -104,12 +78,12 @@ struct HandleEntryView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
             .frame(maxWidth: .infinity)
-            .disabled(!snap.continueEnabled)
             .accessibilityIdentifier(Ids.handleEntryContinueButton)
-            .automationActivate(Ids.handleEntryContinueButton,
-                                isEnabled: { vm.machine.handleCheckSnapshot().continueEnabled }) {
+            .automationActivate(Ids.handleEntryContinueButton) {
                 submitContinue()
             }
+            // The machine's answer; its reason is the handle status line.
+            .faunaPossible(vm.machine.handleContinuePossibility())
         }
         .padding()
         .toolbar {
@@ -121,12 +95,6 @@ struct HandleEntryView: View {
                 .automationActivate(Ids.handleEntryBackButton) { vm.machine.back() }
             }
         }
-    }
-
-    private func runCheck() {
-        let handle = vm.machine.currentHandle()
-        guard !handle.isEmpty else { return }
-        Task { await vm.machine.startHandleCheck(handle: handle) }
     }
 
     /// Real "Continue" action (routing lives in the machine), referenced by both

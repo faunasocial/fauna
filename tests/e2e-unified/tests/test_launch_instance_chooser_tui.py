@@ -299,3 +299,57 @@ def test_tui_focus_existing_onto_an_instance_that_has_gone_starts_normally(
     finally:
         second.teardown()
         first.teardown()
+
+
+@pytest.mark.feature("second-identity-in-its-own-window")
+def test_tui_chooser_opens_the_account_by_itself_once_the_served_instance_quits(
+    nest_instance, tui_app_path, request
+):
+    """While the chooser is shown it watches the facts it rests on
+    (`account-scoping.md` § Concurrent instances → the colliding instance's
+    surface; `fauna_client_accounts::chooser_watch_step`): when the instance
+    serving the account quits, this process continues as the plain launch of
+    that account with NO input — the chooser does not keep offering a
+    collision that no longer exists.
+
+    The order is causal, not timed: the first instance is torn down (process
+    gone, lock released by the kernel) and the assertion waits on the second
+    process's own state; nothing is clicked."""
+    seed, user_actor, _other_actor = _seed_two_accounts(nest_instance)
+    world = _shared_instance_world()
+
+    first = create_driver("tui")
+    second = create_driver("tui")
+    try:
+        first.launch({
+            "app_path": tui_app_path,
+            "url": nest_instance["url"],
+            "seed_credentials": seed,
+            "environment": _seeded_environment(request, nest_instance),
+            **world,
+        })
+        _wait_authenticated(first)
+
+        second.launch({
+            "app_path": tui_app_path,
+            "url": nest_instance["url"],
+            "environment": _seeded_environment(request, nest_instance),
+            **world,
+        })
+        second.wait_for(CHOOSER_ANCHOR, timeout=30)
+
+        first.teardown()
+        assert not first.is_app_alive(), "the served instance must be gone"
+
+        state = second.wait_for_state(
+            lambda s: s.get("session", {}).get("actor_id") == user_actor
+            and bool(s.get("session", {}).get("authenticated")),
+            timeout=45,
+        )
+        assert state["session"]["actor_id"] == user_actor, (
+            "once the served instance quit, the chooser must open that "
+            f"account by itself; got {state.get('session')!r}"
+        )
+    finally:
+        second.teardown()
+        first.teardown()

@@ -44,6 +44,10 @@ private val DNS_E2E_ENV_KEYS = listOf(
     // session's receive loop starts at login) — conftest's
     // `_apply_real_conversations_env` sets it beside the gate.
     "FAUNA_CONV_POLL_SECS",
+    // The conversations push arm's e2e off switch (`fauna-client-conversations`
+    // `conv_push_source`, read via std::env when the session starts at login):
+    // conftest's second-real-engine seat sets it for the drain-alone shape.
+    "FAUNA_E2E_SUPPRESS_CONV_PUSH",
 )
 
 class BridgeHttpServer(
@@ -115,6 +119,9 @@ class BridgeHttpServer(
                 val scope = parseScope(session.parms["scope"])
                 json(Response.Status.OK, """{"visible":${elementOps.isVisible(id, scope)}}""")
             }
+            // The whole frame as cross-app records — what the systematic
+            // walks read (`drivers/base.py::registry_snapshot`).
+            "/registry" -> json(Response.Status.OK, elementOps.registry().toString())
             "/element/count" -> {
                 val id = session.parms["id"] ?: return badReq("id required")
                 val scope = parseScope(session.parms["scope"])
@@ -191,7 +198,8 @@ class BridgeHttpServer(
             }
             // The documents provider as a picker drives it (`DocumentsOps`;
             // `drivers/android.py`'s `documents_*` verbs): a directory's
-            // children, one document's bytes, and each presented set's park.
+            // children, one document's bytes, each presented set's park, and
+            // one document's residency.
             "/documents/children" -> {
                 val parent = session.parms["parent"] ?: return badReq("parent required")
                 json(Response.Status.OK, JSONObject().put("children", documents.children(parent)).toString())
@@ -206,6 +214,10 @@ class BridgeHttpServer(
                 )
             }
             "/documents/parks" -> json(Response.Status.OK, JSONObject().put("parks", documents.parks()).toString())
+            "/documents/residency" -> {
+                val id = session.parms["document_id"] ?: return badReq("document_id required")
+                json(Response.Status.OK, JSONObject().put("residency", documents.residency(id)).toString())
+            }
             else -> json(Response.Status.NOT_FOUND, """{"error":"Unknown: GET $uri"}""")
         }
 
@@ -270,6 +282,9 @@ class BridgeHttpServer(
                     val handle = documents.openWrite(d.getString("document_id"))
                     json(Response.Status.OK, JSONObject().put("handle", handle).toString())
                 }
+                "/documents/reclaim-cache" -> {
+                    json(Response.Status.OK, JSONObject().put("reclaimed", documents.reclaimCache()).toString())
+                }
                 "/documents/write-close" -> {
                     val d = JSONObject(body)
                     documents.writeClose(
@@ -277,6 +292,27 @@ class BridgeHttpServer(
                         android.util.Base64.decode(d.getString("body_b64"), android.util.Base64.NO_WRAP),
                     )
                     json(Response.Status.OK, """{}""")
+                }
+                // The standing selection's text (`drivers/android.py::selected_text`;
+                // `ElementOps.selectedText`), `null` when none stands. POST: the
+                // read copies the selection, which writes the clipboard.
+                // The person's long-press on an element, then what the selection
+                // it made holds (`drivers/http_bridge.py::is_text_selectable`,
+                // the reply shape web, macos, linux and ios share).
+                "/element/select-text" -> {
+                    val d = JSONObject(body)
+                    val r = elementOps.selectText(
+                        d.getString("id"), d.optInt("index", 0), scopeOf(d),
+                        launcher::clipboardText, launcher::setClipboardText,
+                    )
+                    val reply = JSONObject().put("selected", r.selected).put("copy_offered", r.copyOffered)
+                    r.why?.let { reply.put("why", it) }
+                    json(Response.Status.OK, reply.toString())
+                }
+                "/page/selection" -> {
+                    val text: Any = elementOps.selectedText(launcher::clipboardText, launcher::setClipboardText)
+                        ?: JSONObject.NULL
+                    json(Response.Status.OK, JSONObject().put("selected", text).toString())
                 }
                 "/element/click" -> {
                     val d = JSONObject(body)
@@ -404,6 +440,15 @@ class AppLauncher(private val instrumentation: android.app.Instrumentation) {
             out = item?.coerceToText(ctx)?.toString()?.takeIf { it.isNotEmpty() }
         }
         return out
+    }
+
+    /** Set the clipboard to plain [text], on the main looper as [clipboardText] reads it. */
+    fun setClipboardText(text: String) {
+        instrumentation.runOnMainSync {
+            val cm = instrumentation.targetContext
+                .getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("fauna-e2e", text))
+        }
     }
 
     /** The credential file's flat map, `{}` when absent or unreadable. */

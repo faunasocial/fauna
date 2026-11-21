@@ -10,13 +10,14 @@ import Testing
 
 #if canImport(FileProvider)
 
-    /// Headless pins for the working set's change feed
-    /// (`FileProviderWorkingSetFeed`, `on-demand-files-apple.md` § Apple File
-    /// Provider binding): a refresh that changed something signals the working
-    /// set as well as the root, and the feed reports exactly the items whose kept
-    /// bit flipped, as they stand now, before it finishes. Which items flipped is
-    /// the host's (pinned in Rust, `kept_flips_across`); whether the OS then
-    /// honours the new keep policy is the live inch.
+    /// Headless pins for the change feed (`FileProviderWorkingSetFeed`,
+    /// `on-demand-files-apple.md` § Apple File Provider binding, *the change
+    /// feed*): a refresh that changed something signals the working set as well
+    /// as the root; the feed reports the set's changes since the anchor (updates
+    /// and deletions) plus the items whose kept bit flipped, once each, then
+    /// finishes at the feed's new anchor. What changed is the host's (pinned in
+    /// Rust, `provider_face::change_feed` and `kept_flips_across`); whether the
+    /// OS then lists it is the live inch.
     @Suite struct FileProviderWorkingSetFeedTests {
         private final class Observer: NSObject, NSFileProviderChangeObserver {
             var events: [String] = []
@@ -26,7 +27,9 @@ import Testing
                 }
             }
             func didDeleteItems(withIdentifiers deletedItemIdentifiers: [NSFileProviderItemIdentifier]) {
-                events.append("delete")
+                for id in deletedItemIdentifiers {
+                    events.append("delete \(id.rawValue)")
+                }
             }
             func finishEnumeratingChanges(upTo anchor: NSFileProviderSyncAnchor, moreComing: Bool) {
                 events.append("finish \(String(decoding: anchor.rawValue, as: UTF8.self)) \(moreComing)")
@@ -54,7 +57,13 @@ import Testing
                 contentVersion: Data(), kept: kept, shareLinkEligible: false)
         }
 
-        private let anchor = NSFileProviderSyncAnchor(Data("v1".utf8))
+        private func changes(
+            _ updated: [FfiFileProviderItem], deleted: [String] = [], anchor: String = "g2"
+        ) -> FfiFileProviderChanges {
+            FfiFileProviderChanges(updated: updated, deleted: deleted, anchor: Data(anchor.utf8))
+        }
+
+        private let anchor = NSFileProviderSyncAnchor(Data("g1".utf8))
 
         @Test func aChangedRefreshSignalsTheWorkingSetToo() {
             #expect(
@@ -63,29 +72,79 @@ import Testing
             #expect(FileProviderWorkingSetFeed.containersToSignal(changed: false).isEmpty)
         }
 
-        @Test func theFlippedItemsAreReportedWithTheirNewWordBeforeTheFinish() async {
+        /// iOS's fileproviderd drops a root signal when no enumerator watches
+        /// the root ("signalled … without active enumerators, not launching
+        /// it"), so a nudge that named the root alone never reached the
+        /// extension with Files closed. The working set is always watched.
+        @Test func aNudgeSignalsTheWorkingSetFirst() {
+            #expect(FileProviderWorkingSetFeed.nudgedContainers.first == .workingSet)
+            #expect(FileProviderWorkingSetFeed.nudgedContainers.contains(.rootContainer))
+        }
+
+        @Test func theWorkingSetAndTheRootReportTheSet() {
+            #expect(FileProviderWorkingSetFeed.reportsTheSet(.workingSet))
+            #expect(FileProviderWorkingSetFeed.reportsTheSet(.rootContainer))
+            #expect(!FileProviderWorkingSetFeed.reportsTheSet(NSFileProviderItemIdentifier("sub")))
+        }
+
+        /// The live failure this pins (`p2p-shared-set-build.md` § The live
+        /// witness): a row that landed after the OS listed the root is
+        /// reported as an update, and the feed finishes at the new anchor.
+        @Test func aLandedRowAndAGoneRowAreReportedAndTheFeedFinishesAtTheNewAnchor() async {
             let observer = Observer()
-            let flipped = [ffi("doc.txt", kept: false), ffi("sub/a.txt", kept: true)]
+            let landed = changes([ffi("offline.txt", kept: false)], deleted: ["gone.txt"])
             await FileProviderWorkingSetFeed.reportChanges(
-                to: observer, upTo: anchor, takeKeptFlips: { flipped }, item: { Item($0) })
+                to: observer, from: anchor,
+                changesSince: { asked in
+                    #expect(asked == Data("g1".utf8))
+                    return landed
+                },
+                takeKeptFlips: { [] }, item: { Item($0) })
             #expect(
                 observer.events == [
-                    "update doc.txt kept=false", "update sub/a.txt kept=true", "finish v1 false",
+                    "update offline.txt kept=false", "delete gone.txt", "finish g2 false",
                 ])
         }
 
-        @Test func noFlipReportsNoUpdate() async {
+        @Test func theFlippedItemsAreReportedWithTheirNewWordBeforeTheFinish() async {
             let observer = Observer()
+            let flipped = [ffi("doc.txt", kept: false), ffi("sub/a.txt", kept: true)]
+            let none = changes([])
             await FileProviderWorkingSetFeed.reportChanges(
-                to: observer, upTo: anchor, takeKeptFlips: { [] }, item: { Item($0) })
-            #expect(observer.events == ["finish v1 false"])
+                to: observer, from: anchor, changesSince: { _ in none },
+                takeKeptFlips: { flipped }, item: { Item($0) })
+            #expect(
+                observer.events == [
+                    "update doc.txt kept=false", "update sub/a.txt kept=true", "finish g2 false",
+                ])
         }
 
-        @Test func aFailedTakeStillFinishes() async {
+        @Test func aFlipTheFeedAlreadyReportsIsReportedOnce() async {
+            let observer = Observer()
+            let both = changes([ffi("doc.txt", kept: true)])
+            let flipped = [ffi("doc.txt", kept: true)]
+            await FileProviderWorkingSetFeed.reportChanges(
+                to: observer, from: anchor, changesSince: { _ in both },
+                takeKeptFlips: { flipped }, item: { Item($0) })
+            #expect(observer.events == ["update doc.txt kept=true", "finish g2 false"])
+        }
+
+        @Test func nothingMovedReportsNoUpdate() async {
+            let observer = Observer()
+            let none = changes([], anchor: "g1")
+            await FileProviderWorkingSetFeed.reportChanges(
+                to: observer, from: anchor, changesSince: { _ in none },
+                takeKeptFlips: { [] }, item: { Item($0) })
+            #expect(observer.events == ["finish g1 false"])
+        }
+
+        /// A feed that fails keeps the anchor, so the next ask covers the span.
+        @Test func aFailedFeedAndTakeStillFinishAtTheOldAnchor() async {
             let observer = Observer()
             await FileProviderWorkingSetFeed.reportChanges(
-                to: observer, upTo: anchor, takeKeptFlips: { throw TakeFailed() }, item: { Item($0) })
-            #expect(observer.events == ["finish v1 false"])
+                to: observer, from: anchor, changesSince: { _ in throw TakeFailed() },
+                takeKeptFlips: { throw TakeFailed() }, item: { Item($0) })
+            #expect(observer.events == ["finish g1 false"])
         }
     }
 #endif

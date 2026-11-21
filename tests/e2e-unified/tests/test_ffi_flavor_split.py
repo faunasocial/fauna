@@ -26,6 +26,7 @@ deriving its seam set from the tree it just generated rather than a list anyone
 has to maintain — the shape `scripts/check-wasm-seam-exclusion.py` established.
 """
 
+import functools
 import re
 from pathlib import Path
 
@@ -2125,10 +2126,12 @@ _RUST_FLAVOR_CFG_NEEDLES = (
 )
 
 
+@functools.cache
 def _rust_scan_files():
     """Hand-written `.rs` files under libs/, bins/ and apps/ — never `tests/` (a
     separate cargo target that never ships in a release artifact) or
-    generated output."""
+    generated output. Listed once per process: four sweeps below walk the same
+    set, about 1 s a walk on Windows."""
     out = []
     for root in _RUST_SCAN_ROOTS:
         for p in sorted((_REPO / root).rglob("*.rs")):
@@ -2136,7 +2139,14 @@ def _rust_scan_files():
             if "/tests/" in rel or "/target/" in rel or "/generated/" in rel:
                 continue
             out.append((rel, p))
-    return out
+    return tuple(out)
+
+
+@functools.cache
+def _rust_text(path):
+    """One scanned file's text, read once per process (the four sweeps read the
+    same ~107 MB; about 2.4 s a pass on Windows)."""
+    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def _rust_harness_env_call_sites(text):
@@ -2224,7 +2234,7 @@ def _flavor_gated_module_paths():
     so an env read inside the child file has no cfg of its own to find."""
     gated = set()
     for rel, path in _rust_scan_files():
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = _rust_text(path).splitlines()
         parent = path.parent
         base = parent if path.name in ("lib.rs", "main.rs", "mod.rs") else parent / path.stem
         for i, line in enumerate(lines):
@@ -2258,7 +2268,7 @@ def test_rust_harness_env_sweep_is_not_vacuous():
     below pass by finding nothing at all."""
     per_root = dict.fromkeys(_RUST_SCAN_ROOTS, 0)
     for rel, path in _rust_scan_files():
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = _rust_text(path)
         per_root[rel.split("/", 1)[0]] += len(_rust_harness_env_call_sites(text))
     # Floors per root, not one total: the apps leg alone could silently stop
     # matching while libs/ kept the sum above a combined floor.
@@ -2488,7 +2498,7 @@ def test_production_env_allowlist_is_live_and_holds_no_harness_knob():
     read = {
         name
         for _, path in _rust_scan_files()
-        for _, name in _rust_fauna_env_call_sites(path.read_text(encoding="utf-8", errors="replace"))
+        for _, name in _rust_fauna_env_call_sites(_rust_text(path))
     }
     stale = sorted(set(_PRODUCTION_ENV_ALLOWLIST) - read)
     assert not stale, f"allowlist entries with no remaining env read: {stale}"
@@ -2530,7 +2540,7 @@ def test_no_rust_harness_env_read_compiles_unconditionally():
             continue
         if any(rel == g or rel.startswith(g + "/") for g in gated_modules):
             continue
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = _rust_text(path)
         lines = text.splitlines()
         for n, name in _rust_fauna_env_call_sites(text):
             if name in _PRODUCTION_ENV_ALLOWLIST:

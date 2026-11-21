@@ -101,6 +101,12 @@ interface OnDemandSetHost {
     /** Re-pull the set from the nest; true when something changed. */
     suspend fun refresh(): Boolean
 
+    /** Every rel the host holds hydrated: a row whose body this device keeps. */
+    suspend fun hydratedRels(): List<String>
+
+    /** [rel]'s body as it rests (kept root first, then cache root), or null for a placeholder. */
+    suspend fun lookupBody(rel: String): String?
+
     /**
      * Re-drive the start sweep: every kept-root body (a write that did not
      * record — offline, or a process killed before its upload) is ingested,

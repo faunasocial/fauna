@@ -22,6 +22,8 @@ import Foundation
 /// it held `APIClient?` before.
 public protocol EventsAPI: AnyObject {
     func listCalendars() async throws -> [FaunaCalendar]
+    /// The shared calendar read (defaulted below for doubles).
+    func readCalendars() async throws -> CalendarsLoad
     func createCalendar(name: String) async throws
     func queryEvents(calendarId: String) async throws -> [EventSummary]
     /// `queryEvents`'s COST-saving twin for the backstop poll (events.md §
@@ -47,7 +49,37 @@ public protocol EventsAPI: AnyObject {
     func refusedChangeDismiss(key: String) async throws -> Bool
 }
 
+/// The Events page's calendar read in the shared answers
+/// (`FfiCalendarsRead`: unresolved — a missing key included — / provision
+/// failed / loaded)
+/// beside the calendars it carries, as the page's own rows.
+public struct CalendarsLoad: Equatable {
+    public var read: FfiCalendarsRead
+    public var calendars: [FaunaCalendar]
+
+    public init(read: FfiCalendarsRead, calendars: [FaunaCalendar]) {
+        self.read = read
+        self.calendars = calendars
+    }
+}
+
 extension EventsAPI {
+    /// Test doubles that stub only `listCalendars` read as the shared
+    /// `CalendarsRead::from_listing` does: an empty list is a refused
+    /// provision, anything else *loaded*. `APIClient` supplies the real read.
+    public func readCalendars() async throws -> CalendarsLoad {
+        let cals = try await listCalendars()
+        if cals.isEmpty {
+            return CalendarsLoad(
+                read: .provisionFailed(error: "the Personal calendar was not listed"),
+                calendars: [])
+        }
+        return CalendarsLoad(
+            read: .loaded(calendars: cals.map {
+                FfiCalendarRow(id: $0.id, name: $0.name, color: $0.color ?? "")
+            }, unreadable: 0),
+            calendars: cals)
+    }
     public func refusedChangesOpen() async -> [FfiRefusedChange] { [] }
     @discardableResult
     public func refusedChangeDismiss(key: String) async throws -> Bool { false }

@@ -4,6 +4,7 @@ import com.fauna.app.core.ApiClient
 import com.fauna.ffi.FfiAdminPendingAction
 import com.fauna.ffi.FfiAdminUser
 import com.fauna.ffi.FfiAdminUsersListReply
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -73,6 +74,7 @@ class AdminUsersVMTest {
     @Test
     fun refreshLoadsPendingAdminActions() = runTest {
         val api = mock(ApiClient::class.java)
+        whenever(api.reconnectTick).thenReturn(MutableSharedFlow())
         val action = pendingAction(3)
         whenever(api.adminUsersList(AdminUsersVM.PAGE_SIZE, 0L)).thenReturn(FfiAdminUsersListReply(emptyList(), 0))
         whenever(api.adminInviteCodesList()).thenReturn(emptyList())
@@ -88,6 +90,7 @@ class AdminUsersVMTest {
     @Test
     fun approveAndCancelCallTheKindsThenRelist() = runTest {
         val api = mock(ApiClient::class.java)
+        whenever(api.reconnectTick).thenReturn(MutableSharedFlow())
         val action = pendingAction(3)
         whenever(api.adminPendingActionsList()).thenReturn(listOf(action))
         val vm = AdminUsersVM(api)
@@ -103,6 +106,7 @@ class AdminUsersVMTest {
     @Test
     fun refreshPopulatesAllUsersSeparatelyFromThePaginatedPage() = runTest {
         val api = mock(ApiClient::class.java)
+        whenever(api.reconnectTick).thenReturn(MutableSharedFlow())
         val onPage = user(0x11, "alex99")
         // A guardian who exists on the nest but is NOT on the current
         // (single-row) Users page — only `adminUsersListAll` can see them.
@@ -120,6 +124,7 @@ class AdminUsersVMTest {
     @Test
     fun rowActionRefetchesAllUsersToo() = runTest {
         val api = mock(ApiClient::class.java)
+        whenever(api.reconnectTick).thenReturn(MutableSharedFlow())
         val alice = user(0x33, "alice")
         val guardian = user(0x44, "guardy99")
         whenever(api.adminUsersList(AdminUsersVM.PAGE_SIZE, 0L)).thenReturn(FfiAdminUsersListReply(listOf(alice), 1))

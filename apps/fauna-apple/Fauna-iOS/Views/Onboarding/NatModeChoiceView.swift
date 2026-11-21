@@ -63,12 +63,11 @@ struct NatModeChoiceView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .frame(maxWidth: .infinity)
-                .disabled(!snap.submitEnabled)
                 .accessibilityIdentifier(Ids.natModeConfirmButton)
-                .automationActivate(Ids.natModeConfirmButton,
-                                    isEnabled: { vm.machine.natModeSnapshot().submitEnabled }) {
+                .automationActivate(Ids.natModeConfirmButton) {
                     submitMode()
                 }
+                .faunaPossible(vm.machine.natModeSubmitPossibility())
 
                 Button(L.onboarding.natMode.deferButton) {
                     _ = vm.machine.deferNatModeChoice()

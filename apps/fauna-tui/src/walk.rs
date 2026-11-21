@@ -290,6 +290,73 @@ fn check_declared_kinds_registered(app: &App, ctx: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// I8 — **enabled means possible** (`enabled-means-possible`,
+/// `e2e-systematic-ui-walks.md` § Implementation status today, the
+/// possibility invariants, layer (a); the rule is `ui/README.md` § Offer only
+/// what is possible). Every painted element whose gesture has a shared-Rust
+/// possibility predicate is enabled only while that predicate answers
+/// *possible*, no element whose predicate answers *absent* is painted at all,
+/// and every painted disabled element whose predicate gave a reason has that
+/// reason painted on the same surface (its own label, or a line of the page).
+///
+/// True by construction of the UI model, like I6: [`App::page_elements`]
+/// applies each element's answer ([`App::element_possibility`]: the page's
+/// declared predicate folded with the offline gate). So the only ways to
+/// violate it are a page that builds its elements past the seam, and an
+/// app-side condition that disagrees with the predicate. The second includes
+/// a page that paints a blocked control without its reason.
+pub(crate) fn check_enabled_means_possible(app: &App, ctx: &str) -> Result<(), String> {
+    check_possibility_over(app, &app.page_elements(), ctx)
+}
+
+/// I8's body over a given element list: the walk hands it
+/// [`App::page_elements`]; the red-verification hands it the list from
+/// before the seam ran.
+fn check_possibility_over(
+    app: &App,
+    elements: &[crate::element::Element],
+    ctx: &str,
+) -> Result<(), String> {
+    let painted = |text: &str| {
+        elements
+            .iter()
+            .any(|e| e.text == text || e.label.as_deref() == Some(text))
+    };
+    for element in elements {
+        if element.possibility.is_none() {
+            continue;
+        }
+        let answer = app.element_possibility(element);
+        if !answer.is_shown() {
+            return Err(format!(
+                "{ctx}: {:?} on {:?} is painted, but its predicate answers absent \
+                 — a choice this person can never make here is offered",
+                element.id, app.page,
+            ));
+        }
+        if element.enabled && !answer.is_possible() {
+            return Err(format!(
+                "{ctx}: {:?} on {:?} is enabled, but its predicate answers {answer:?} \
+                 — an affordance offered that cannot succeed",
+                element.id, app.page,
+            ));
+        }
+        if !element.enabled
+            && let Some(reason) = answer.reason()
+        {
+            let text = reason.resolve(fauna_i18n::strings::lookup);
+            if !painted(&text) {
+                return Err(format!(
+                    "{ctx}: {:?} on {:?} is disabled for {:?}, and that reason \
+                     is painted nowhere on the surface",
+                    element.id, app.page, reason.key,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn check_all(app: &App, ctx: &str) -> Result<(), String> {
     check_focus_paint(app, ctx)?;
     check_focus_model(app, ctx)?;
@@ -298,6 +365,7 @@ fn check_all(app: &App, ctx: &str) -> Result<(), String> {
     check_radio_groups(app, ctx)?;
     check_offline_gate(app, ctx)?;
     check_declared_kinds_registered(app, ctx)?;
+    check_enabled_means_possible(app, ctx)?;
     Ok(())
 }
 
@@ -346,6 +414,42 @@ fn admin_app() -> App {
     app
 }
 
+/// The FRESH account: signed in, connected, every first read resolved, and
+/// every collection empty — the first-use state the possibility invariants
+/// exist for (`e2e-systematic-ui-walks.md` § the possibility invariants: "the
+/// existing one and a FRESH account with every collection empty").
+///
+/// It differs from [`authed_app`] in two ways that matter to I8. It is
+/// CONNECTED, so the offline gate (which blocks every online-only control on
+/// the offline fixture) does not mask a page's own predicate. And its list
+/// reads have RESOLVED to empty, so a page is in its empty state, not its
+/// loading state (`ui/README.md` § List pages: loading is not empty). Only
+/// pages that keep an explicit loaded bit are set; every other page's state is
+/// already its empty default. Spawned ops dial a closed port and their
+/// outcomes land in a dropped channel, as on the offline fixture.
+fn fresh_account_app() -> App {
+    let mut app = authed_app();
+    app.connection = fauna_ws_substrate::supervisor::ConnectionState::Connected;
+    app.moderation.reports_loaded = true;
+    app.admin.reports_loaded = true;
+    app.admin.blocked_loaded = true;
+    // A freshly claimed account's calendar read before its first-connect key
+    // mint lands: a wait, painted as loading (`ui/events.md` § *No calendar
+    // to hold an event*, ruling 5).
+    app.events.calendars_read = fauna_client_caldav::CalendarsReadState::Unresolved;
+    app.notifications.read = fauna_core::possibility::ReadState::Resolved;
+    app
+}
+
+/// The fresh account with the gated tabs visible, as [`admin_app`] is for
+/// the offline fixture.
+fn fresh_admin_app() -> App {
+    let mut app = fresh_account_app();
+    app.am_i_admin = true;
+    app.has_family = true;
+    app
+}
+
 /// Sweep-1 body: every visible sidebar page, every focus position.
 fn sweep_every_sidebar_page(app: &mut App) {
     for page in app.sidebar_pages().clone() {
@@ -381,17 +485,22 @@ async fn every_admin_and_family_page_paints_at_most_one_focused_line_too() {
 /// exactly why no per-id e2e query can cover this and an in-process sweep can.
 #[tokio::test]
 async fn every_settings_sub_surface_paints_at_most_one_focused_line() {
-    let mut app = authed_app();
+    sweep_every_settings_sub_surface(&mut authed_app());
+}
+
+/// Sweep-2 body: every Settings rail child, its whole ring, and the surface
+/// Esc pops back to.
+fn sweep_every_settings_sub_surface(app: &mut App) {
     let rail_len = {
-        sidebar_ring_to(&mut app, Page::Settings);
+        sidebar_ring_to(app, Page::Settings);
         app.enter_page_zone();
         app.page_elements().len()
     };
     for child in 0..rail_len {
         // A fresh Settings entry per child: ring away and back — the nav-edge
         // reset itself restores the rail Root baseline.
-        sidebar_ring_to(&mut app, Page::Feed);
-        sidebar_ring_to(&mut app, Page::Settings);
+        sidebar_ring_to(app, Page::Feed);
+        sidebar_ring_to(app, Page::Settings);
         assert_eq!(
             app.settings.sub,
             crate::settings::SubPage::Root,
@@ -399,11 +508,11 @@ async fn every_settings_sub_surface_paints_at_most_one_focused_line() {
         );
         app.enter_page_zone();
         app.click_page_element(child);
-        walk_full_ring(&mut app, &format!("Settings child {child}")).unwrap();
+        walk_full_ring(app, &format!("Settings child {child}")).unwrap();
         // Esc pops whatever the click opened (sub-page, overlay) — and the
         // popped-back surface must uphold the invariants too.
         app.handle_key(key(KeyCode::Esc));
-        walk_full_ring(&mut app, &format!("after Esc from Settings child {child}")).unwrap();
+        walk_full_ring(app, &format!("after Esc from Settings child {child}")).unwrap();
     }
 }
 
@@ -463,12 +572,16 @@ async fn returning_to_settings_via_the_sidebar_always_lands_on_the_rail_root() {
 /// hand-authored tests cover it.
 #[tokio::test]
 async fn every_admin_sub_surface_paints_at_most_one_focused_line() {
-    let mut app = admin_app();
+    sweep_every_admin_sub_surface(&mut admin_app());
+}
+
+/// Sweep-4 body: every admin rail child, its whole ring.
+fn sweep_every_admin_sub_surface(app: &mut App) {
     for child in 0..crate::admin::AdminPage::BUILT.len() {
         // A fresh Admin entry per child — the nav-edge reset restores the
         // Dashboard baseline, sweep 2's own re-entry idiom.
-        sidebar_ring_to(&mut app, Page::Feed);
-        sidebar_ring_to(&mut app, Page::Admin);
+        sidebar_ring_to(app, Page::Feed);
+        sidebar_ring_to(app, Page::Admin);
         assert_eq!(
             app.admin.sub,
             crate::admin::AdminPage::Dashboard,
@@ -476,8 +589,80 @@ async fn every_admin_sub_surface_paints_at_most_one_focused_line() {
         );
         app.enter_page_zone();
         app.click_page_element(child);
-        walk_full_ring(&mut app, &format!("Admin child {child}")).unwrap();
+        walk_full_ring(app, &format!("Admin child {child}")).unwrap();
     }
+}
+
+/// Exhaustive sweep 6 — the possibility invariants on the FRESH account
+/// (`e2e-systematic-ui-walks.md` § the possibility invariants, layer (a)):
+/// every sidebar page, every Settings and admin sub-surface, every focus
+/// position, under the whole invariant bundle, I8 included. The offline
+/// fixture runs the same sweeps above. Here the account is connected and
+/// every first read has resolved empty, the first-use state where a page
+/// offers what nothing can yet succeed at (the zero-calendar Events defect's
+/// shape).
+#[tokio::test]
+async fn a_fresh_account_offers_only_what_is_possible_on_every_page() {
+    sweep_every_sidebar_page(&mut fresh_admin_app());
+    sweep_every_settings_sub_surface(&mut fresh_account_app());
+    sweep_every_admin_sub_surface(&mut fresh_admin_app());
+}
+
+/// I8's red-verification, kept as a test: bypass the seam for one gated
+/// element and I8 must red. The VPS page's Continue declares the machine's
+/// answer and leaves enabling to [`App::page_elements`]; with nothing chosen
+/// that answer is blocked. The page's own list, read before the seam ran,
+/// has it enabled, and I8 has to say so. The same page through the seam is
+/// green, which is the other half: the seam, not the page, disables it.
+#[test]
+fn enabled_means_possible_reds_on_an_element_that_bypasses_the_seam() {
+    let app = wizard_step_to(fauna_onboarding_machine::OnboardingStep::VpsConfig);
+    let bypassed = app.wizard.elements();
+    let cont = bypassed
+        .iter()
+        .find(|e| e.id == "vps-config-continue-button")
+        .expect("the VPS page paints Continue");
+    assert!(
+        cont.possibility.as_ref().is_some_and(|p| !p.is_possible()),
+        "precondition: nothing is chosen, so the predicate answers blocked"
+    );
+    let err = check_possibility_over(&app, &bypassed, "bypass")
+        .expect_err("I8 must red on a blocked control left enabled");
+    assert!(err.contains("vps-config-continue-button"), "{err}");
+    check_possibility_over(&app, &app.page_elements(), "through the seam")
+        .expect("the seam disables it and the page paints its reason");
+}
+
+/// I8 reds on the two other ways a page can break the rule: a control
+/// painted while its predicate answers absent, and a blocked control
+/// disabled with its reason painted nowhere.
+#[test]
+fn enabled_means_possible_reds_on_absent_painted_and_on_a_silent_block() {
+    use fauna_core::localized::LocalizedText;
+    use fauna_core::possibility::Possibility;
+    let app = fresh_account_app();
+    let button = || {
+        crate::element::Element::button(
+            "vps-config-continue-button",
+            "Continue",
+            false,
+            crate::wizard::Action::ContinueFromVps,
+        )
+    };
+    let absent = [button().possible(Possibility::Absent)];
+    assert!(
+        check_possibility_over(&app, &absent, "absent")
+            .expect_err("absent must not paint")
+            .contains("absent")
+    );
+    let silent = [button().possible(Possibility::blocked(LocalizedText::key(
+        "onboarding.vps_config.status_pick_provider",
+    )))];
+    assert!(
+        check_possibility_over(&app, &silent, "silent")
+            .expect_err("a block with no painted reason must red")
+            .contains("painted nowhere")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -943,6 +1128,210 @@ async fn every_wizard_step_upholds_every_invariant_at_every_focus_position() {
     );
 }
 
+/// I8 over the signed-out FORMS, each at a blank, a malformed and a complete
+/// draft (`ui/README.md` § Offer only what is possible, rule 4's form case):
+/// the onboarding wizard's import, restore, lock, handle, invite-code and
+/// claim forms, the credential-store unlock in both modes, and the
+/// identity-stolen entry. At every draft the whole ring passes the invariant
+/// bundle — so a submit enabled while its draft predicate answers blocked, or
+/// disabled with the reason painted nowhere, reds — and the submit is enabled
+/// exactly when the draft is complete.
+#[tokio::test]
+async fn every_signed_out_form_paints_its_submit_from_its_draft() {
+    use crate::element::Field;
+    use crate::launch::LaunchSurface;
+    use crate::locked::LockedField;
+    use crate::unlock::UnlockField;
+    use crate::wizard::WizardField as W;
+    use fauna_onboarding_machine::OnboardingStep as S;
+
+    // A placeholder the loop swaps for a 64-hex key built at run time: the
+    // literal in a shipped file reads as a key to the publish secret scan.
+    const KEY: &str = "<a 64-hex identity secret>";
+    type Draft = &'static [(Field, &'static str)];
+    type Reach = Box<dyn Fn() -> App>;
+    type Case = (&'static str, Reach, &'static str, Vec<(Draft, bool)>);
+    // (what the surface is, how to reach it, the submit, drafts: (fields, enabled?))
+    let wizard = |step| -> Reach { Box::new(move || wizard_step_to(step)) };
+    let launch = |surface: fn() -> LaunchSurface| -> Reach {
+        Box::new(move || {
+            let mut app = crate::app::tests::test_app();
+            app.launch = surface();
+            app
+        })
+    };
+    let cases: Vec<Case> = vec![
+        (
+            "identity_import",
+            wizard(S::IdentityImport),
+            "import-submit-button",
+            vec![
+                (&[], false),
+                (&[(Field::Wizard(W::ImportSecret), "not a key")], false),
+                (&[(Field::Wizard(W::ImportSecret), KEY)], true),
+            ],
+        ),
+        (
+            "recovery_entry",
+            wizard(S::RecoveryEntry),
+            "recovery-entry-submit-button",
+            vec![
+                (&[], false),
+                (&[(Field::Wizard(W::RecoveryPhrase), KEY)], false),
+                (
+                    &[
+                        (Field::Wizard(W::RecoveryPhrase), KEY),
+                        (Field::Wizard(W::RecoveryAccount), "alice"),
+                    ],
+                    false,
+                ),
+                (
+                    &[
+                        (Field::Wizard(W::RecoveryPhrase), KEY),
+                        (Field::Wizard(W::RecoveryAccount), "alice@example.com"),
+                    ],
+                    true,
+                ),
+            ],
+        ),
+        (
+            "emergency_lockout_entry",
+            wizard(S::EmergencyLockoutEntry),
+            "sessions-lockout-button",
+            vec![
+                (&[], false),
+                (
+                    &[
+                        (Field::Wizard(W::LockoutSecret), KEY),
+                        (Field::Wizard(W::LockoutAccount), "alice@example.com"),
+                    ],
+                    false,
+                ),
+                (
+                    &[
+                        (Field::Wizard(W::LockoutSecret), KEY),
+                        (Field::Wizard(W::LockoutAccount), "alice@example.com"),
+                        (Field::Wizard(W::LockoutConfirm), "LOCK"),
+                    ],
+                    true,
+                ),
+            ],
+        ),
+        (
+            "handle_entry",
+            wizard(S::HandleEntry),
+            "handle-check-button",
+            vec![
+                (&[], false),
+                (&[(Field::Wizard(W::Handle), "alice@example.com")], true),
+            ],
+        ),
+        (
+            "invite_request",
+            wizard(S::InviteRequest),
+            "invite-code-check-button",
+            vec![
+                (&[], false),
+                (&[(Field::Wizard(W::InviteCode), "CODE")], true),
+            ],
+        ),
+        (
+            "claim_code",
+            wizard(S::ClaimCode),
+            "claim-code-submit-button",
+            vec![
+                (&[], false),
+                (&[(Field::Wizard(W::ClaimCode), "CODE")], true),
+            ],
+        ),
+        (
+            "unlock",
+            launch(|| LaunchSurface::Unlock),
+            "unlock-submit-button",
+            vec![
+                (&[], false),
+                (&[(Field::Unlock(UnlockField::Passphrase), "hunter2")], true),
+            ],
+        ),
+        (
+            "create passphrase",
+            launch(|| LaunchSurface::CreatePassphrase),
+            "unlock-submit-button",
+            vec![
+                (&[], false),
+                (
+                    &[(Field::Unlock(UnlockField::Passphrase), "hunter2")],
+                    false,
+                ),
+                (
+                    &[
+                        (Field::Unlock(UnlockField::Passphrase), "hunter2"),
+                        (Field::Unlock(UnlockField::Confirm), "hunter2"),
+                    ],
+                    true,
+                ),
+            ],
+        ),
+        (
+            "identity_stolen_entry",
+            launch(|| LaunchSurface::IdentityStolenEntry {
+                locked_until_secs: 1_800_000_000,
+            }),
+            "identity-stolen-button",
+            vec![
+                (&[], false),
+                (&[(Field::Locked(LockedField::Phrase), KEY)], false),
+                (
+                    &[
+                        (Field::Locked(LockedField::Phrase), KEY),
+                        (Field::Locked(LockedField::Confirm), "SUCCEED"),
+                    ],
+                    true,
+                ),
+            ],
+        ),
+    ];
+
+    let mut failures = Vec::new();
+    for (name, reach, submit, drafts) in &cases {
+        for (i, (fields, enabled)) in drafts.iter().enumerate() {
+            let mut app = reach();
+            for (field, value) in fields.iter() {
+                // These buffers are local: no pending write follows.
+                let value = if *value == KEY {
+                    "01".repeat(32)
+                } else {
+                    (*value).to_string()
+                };
+                let _ = app.set_field(field.clone(), value);
+            }
+            let ctx = format!("{name} draft {i}");
+            let painted = app
+                .page_elements()
+                .into_iter()
+                .find(|e| e.id == *submit)
+                .unwrap_or_else(|| panic!("{ctx}: {submit} is painted"));
+            if painted.possibility.is_none() {
+                failures.push(format!("{ctx}: {submit} declares no draft predicate"));
+            }
+            if painted.enabled != *enabled {
+                failures.push(format!(
+                    "{ctx}: {submit} enabled={}, want {enabled}",
+                    painted.enabled
+                ));
+            }
+            if let Err(e) = walk_full_ring(&mut app, &ctx) {
+                failures.push(e);
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "signed-out forms break the draft rule:\n  - {}",
+        failures.join("\n  - ")
+    );
+}
+
 /// The wizard's inputs specifically — a named guard on the class sweep 5's I3
 /// leg covers, kept because it also pins that the wizard still *renders* inputs
 /// at all. A step list that silently stopped rendering would leave sweep 5
@@ -1012,6 +1401,7 @@ fn dump_onboarding_and_launch_surfaces() {
         OnboardingStep::InviteRequest,
         OnboardingStep::ClaimCode,
         OnboardingStep::NatModeChoice,
+        OnboardingStep::ProviderChoice,
         OnboardingStep::DnsConfig,
         OnboardingStep::VpsConfig,
         OnboardingStep::NestProvisioning,

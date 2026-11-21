@@ -20,9 +20,11 @@ import SwiftUI
 /// surfaced (`mail-policy-config.md` § Policy catalog banner).
 ///
 /// Each group's controls are read **on Save** (gather → full-PUT), mirroring linux:
-/// integer/list fields hold a string edit buffer parsed on Save with a fall-back to
-/// the persisted value (a stray edit never silently zeroes a knob), and a save
-/// re-reads the whole effective config so every group reflects persisted state.
+/// integer/list fields hold a string edit buffer, and the group's Save is painted
+/// from the shared draft answer (`mailKnobsDraftPossibility`) — blocked with the
+/// field's reason while any number does not parse, never sent with the stored
+/// value in its place (`admin.md` § Errors & edge cases, the form bullet) — and a
+/// save re-reads the whole effective config so every group reflects persisted state.
 ///
 /// `admin-nav-back` is provided by the admin shell rail (macOS) / the navigation
 /// stack (iOS), not this page.
@@ -50,6 +52,11 @@ public struct AdminMailView: View {
                 }
 
                 if let snap = vm.snapshot {
+                    // Every write on this page waits for the policy read
+                    // (admin.md § Errors & edge cases, *Controls wait for
+                    // their read*): the defaults painted before it are not the
+                    // nest's policy, so nothing here may write over them.
+                    FaunaPossibilityReason(vm.writeAnswer)
                     enableGroup(snap)
                     // Read-only readout directly under the enable toggle; omitted
                     // until the health read answers (`snap.health == nil`).
@@ -63,37 +70,48 @@ public struct AdminMailView: View {
                                           baselineState: snap.baselineState, armed: snap.armed,
                                           onPublish: { await vm.press(.publishSpamBaseline) },
                                           onSetStanding: { await vm.setBaselineStandingPublish($0) }) { await vm.saveSpam($0) }
+                        .faunaPossible(vm.writeAnswer)
                     MailAuthPolicySection(policy: snap.auth, reloadToken: vm.snapshotVersion,
                                           isBusy: vm.isBusy) { await vm.saveAuth($0) }
+                        .faunaPossible(vm.writeAnswer)
                     MailSubmissionPolicySection(policy: snap.submission, reloadToken: vm.snapshotVersion,
                                                 isBusy: vm.isBusy) { await vm.saveSubmission($0) }
+                        .faunaPossible(vm.writeAnswer)
                     MailImapPolicySection(policy: snap.imap, reloadToken: vm.snapshotVersion,
                                           isBusy: vm.isBusy) { await vm.saveImap($0) }
+                        .faunaPossible(vm.writeAnswer)
                     MailOutboundPolicySection(policy: snap.outbound, reloadToken: vm.snapshotVersion,
                                               isBusy: vm.isBusy) { await vm.saveOutbound($0) }
+                        .faunaPossible(vm.writeAnswer)
                     MailAliasPolicySection(policy: snap.alias, reloadToken: vm.snapshotVersion,
                                            isBusy: vm.isBusy) { await vm.saveAlias($0) }
+                        .faunaPossible(vm.writeAnswer)
                     MailDmarcPolicySection(policy: snap.dmarc, reloadToken: vm.snapshotVersion,
                                            isBusy: vm.isBusy) { await vm.saveDmarc($0) }
+                        .faunaPossible(vm.writeAnswer)
                     MailMicrosoftRegistrationSection(registration: snap.microsoftRegistration,
                                                      reloadToken: vm.snapshotVersion,
                                                      isBusy: vm.isBusy) { clientId, tenant in
                         await vm.saveMicrosoftRegistration(clientId: clientId, tenant: tenant)
                     }
+                    .faunaPossible(vm.writeAnswer)
                     // At the page's foot (mail-mass-mailing.md § Secret rotation).
                     MailSecretsSection(armed: snap.armed, rotation: snap.secretRotation,
                                        isBusy: vm.isBusy) { await vm.press($0) }
+                        .faunaPossible(vm.writeAnswer)
                 } else {
                     ProgressView().frame(maxWidth: .infinity)
                 }
             }
+            .environment(\.mailDraftGate, MailDraftGate(
+                read: vm.writeAnswer,
+                refuse: { draft in
+                    refusePress(vm.writeAnswer.and(draft), errorMessage: &vm.errorMessage)
+                }))
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .task(id: reloadToken) {
-            guard let client else { return }
-            await vm.configure(api: client.api)
-        }
+        .adminReadOnEntryAndReconnect(vm, reloadToken: reloadToken)
     }
 
     // MARK: - Deployment-wide toggles (dispatch-on-change)
@@ -105,10 +123,6 @@ public struct AdminMailView: View {
                     get: { snap.mailEnabled },
                     set: { on in Task { await vm.setMailEnabled(on) } }
                 ))
-                // A box that cannot enable mail (no content scanners): disabled with
-                // state `unavailable`, the notice directly under it. Where mail is
-                // already on, the toggle stays live so it can be turned off.
-                .disabled(!snap.mailEnabled && snap.mailUnavailableHere)
                 .accessibilityIdentifier(Ids.adminMailEnabledToggle)
                 // Read the LIVE snapshot (not the captured `snap`) and flip via the
                 // SAME VM dispatch the Toggle's setter runs.
@@ -116,7 +130,7 @@ public struct AdminMailView: View {
                     Ids.adminMailEnabledToggle,
                     isEnabled: {
                         let s = vm.snapshot
-                        return (s?.mailEnabled ?? false) || !(s?.mailUnavailableHere ?? false)
+                        return vm.writeAnswer.isPossible && vm.enableTogglePossibility.isPossible
                     },
                     value: {
                         let s = vm.snapshot
@@ -127,9 +141,16 @@ public struct AdminMailView: View {
                     let next = !(vm.snapshot?.mailEnabled ?? false)
                     Task { await vm.setMailEnabled(next) }
                 }
+                // Never flipped from the defaults painted before the read.
+                .faunaPossible(vm.writeAnswer)
+                // A box that cannot enable mail (no content scanners): blocked
+                // by the shared answer, state `unavailable`, its reason the
+                // notice directly under it. Where mail is already on, the
+                // toggle stays possible so it can be turned off.
+                .faunaPossible(vm.enableTogglePossibility)
                 // Dispatch-on-change (no Save), so the toggle itself is the write.
                 .faunaGate("fauna.bridges.set_mail_enabled")
-                if !snap.mailEnabled && snap.mailUnavailableHere {
+                if !vm.enableTogglePossibility.isPossible, vm.snapshot != nil {
                     Text(L.mailSettings.unavailableNotice)
                         .font(.caption).foregroundStyle(.secondary)
                         .accessibilityIdentifier(Ids.adminMailUnavailableNotice)
@@ -153,6 +174,7 @@ public struct AdminMailView: View {
                     let next = !(vm.snapshot?.autoEnableMailForNewUsers ?? false)
                     Task { await vm.setAutoEnableMailForNewUsers(next) }
                 }
+                .faunaPossible(vm.writeAnswer)
                 .faunaGate("fauna.bridges.set_auto_enable_mail_for_new_users")
                 Text(L.admin.mailPage.autoEnableNewUsersSubtitle)
                     .font(.caption).foregroundStyle(.secondary)
@@ -207,27 +229,59 @@ private func policyToggle(_ label: String, _ id: String, _ isOn: Binding<Bool>) 
 /// question: this is the local stand-in for tui's exhaustive `Action::wire_kind`
 /// match. Only the Save gates — editing a group's fields is a local buffer edit
 /// that works fine with no nest.
-@ViewBuilder
+///
+/// `draft` is the group's draft-validity answer (`admin.md` § Errors & edge
+/// cases → *A form's submit is live only for a draft the nest would accept*):
+/// the shared `mailKnobsDraftPossibility` over the group's numeric drafts (or
+/// `mailMicrosoftDraftPossibility` for the Microsoft pair). The Save is painted
+/// from the page's read answer folded with it, and the press asks the same
+/// fold again through `gate.refuse`, which puts the reason on the page's
+/// `error-message` and sends nothing.
+@MainActor @ViewBuilder
 private func policyGroup<Content: View>(
     title: String, desc: String, saveLabel: String, saveId: String, saveKind: String,
-    isBusy: Bool, onSave: @escaping () -> Void,
+    isBusy: Bool, draft: Possibility, gate: MailDraftGate, onSave: @escaping () -> Void,
     @ViewBuilder content: () -> Content
 ) -> some View {
+    let press = { if !gate.refuse(draft) { onSave() } }
     GroupBox(title) {
         VStack(alignment: .leading, spacing: 10) {
             Text(desc).font(.caption).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
             content()
             HStack {
+                FaunaPossibilityReason(draft)
                 Spacer()
-                Button(saveLabel) { onSave() }
+                Button(saveLabel) { press() }
                     .disabled(isBusy)
                     .accessibilityIdentifier(saveId)
-                    .automationActivate(saveId, isEnabled: { !isBusy }) { onSave() }
+                    .automationActivate(saveId, isEnabled: { !isBusy }) { press() }
                     .faunaGate(saveKind)
+                    .faunaPossible(gate.read.and(draft))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// What every group's Save needs from the page: the page's read answer (folded
+/// before a group's draft answer, so a page still loading says so first) and the
+/// press-time refusal, which asks the same fold and writes its reason to the
+/// page's `error-message` (`true` when refused). Handed down through the
+/// environment so the eight groups share one wiring.
+struct MailDraftGate {
+    var read: Possibility = .possible
+    var refuse: @MainActor (Possibility) -> Bool = { _ in false }
+}
+
+private struct MailDraftGateKey: EnvironmentKey {
+    static let defaultValue = MailDraftGate()
+}
+
+extension EnvironmentValues {
+    var mailDraftGate: MailDraftGate {
+        get { self[MailDraftGateKey.self] }
+        set { self[MailDraftGateKey.self] = newValue }
     }
 }
 
@@ -237,20 +291,36 @@ private func parseLines(_ s: String) -> [String] {
     s.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
 }
 
-/// Parse one `UInt64` per non-blank line; fall back to the whole persisted list if
-/// any line fails (full-PUT replaces the list — never send a partially parsed one).
-private func parseU64Lines(_ s: String, fallback: [UInt64]) -> [UInt64] {
-    let lines = parseLines(s)
-    let parsed = lines.compactMap { UInt64($0) }
-    return parsed.count == lines.count ? parsed : fallback
-}
+/// A group's gather of its numeric drafts through the shared parsers
+/// (`parseCount` / `parseCountU64`, the ones `admin_policy::parse_knob*` run).
+/// There is no fallback to the stored value: a draft that does not parse marks
+/// the gather `failed`, and the group sends nothing. The Save only reaches a
+/// gather once the group's `mailKnobsDraftPossibility` answer is possible, which
+/// asks the same parsers, so `failed` is a backstop, never the refusal the admin
+/// reads.
+private struct KnobGather {
+    private(set) var failed = false
 
-private func parseU32(_ s: String, _ fallback: UInt32) -> UInt32 {
-    parseCount(input: s) ?? fallback
-}
+    mutating func u32(_ s: String) -> UInt32 {
+        if let v = parseCount(input: s) { return v }
+        failed = true
+        return 0
+    }
 
-private func parseU64(_ s: String, _ fallback: UInt64) -> UInt64 {
-    parseCountU64(input: s) ?? fallback
+    mutating func u64(_ s: String) -> UInt64 {
+        if let v = parseCountU64(input: s) { return v }
+        failed = true
+        return 0
+    }
+
+    /// One number per non-blank line; any line that does not parse fails the
+    /// whole list (full-PUT replaces it — never a partly parsed one).
+    mutating func u64Lines(_ s: String) -> [UInt64] {
+        let lines = parseLines(s)
+        let parsed = lines.compactMap { parseCountU64(input: $0) }
+        if parsed.count != lines.count { failed = true }
+        return parsed
+    }
 }
 
 // MARK: - Mail health readout (mail-deliverability.md § The mail health readout)
@@ -409,6 +479,7 @@ private struct MailSpamPolicySection: View {
     let onPublish: () async -> Void
     let onSetStanding: (Bool) async -> Void
 
+    @Environment(\.mailDraftGate) private var gate
     @State private var draft: SpamPolicyView
     // Integer / list fields edit as string buffers (parsed on Save).
     @State private var junk = ""
@@ -488,7 +559,8 @@ private struct MailSpamPolicySection: View {
         policyGroup(title: L.admin.mailPage.spamGroupTitle, desc: L.admin.mailPage.spamGroupDesc,
                     saveLabel: L.admin.mailPage.spamSave, saveId: Ids.adminMailSpamSaveButton,
                     saveKind: "fauna.bridges.put_spam_policy",
-                    isBusy: isBusy, onSave: { Task { await onSave(gather()) } }) {
+                    isBusy: isBusy, draft: draftAnswer, gate: gate,
+                    onSave: { if let p = gather() { Task { await onSave(p) } } }) {
             EditableFieldRow(L.admin.mailPage.thresholdJunkLabel, Ids.adminMailSpamThresholdJunk,
                         $junk, subtitle: L.admin.mailPage.thresholdJunkSubtitle)
             EditableFieldRow(L.admin.mailPage.thresholdRejectLabel, Ids.adminMailSpamThresholdReject,
@@ -606,20 +678,32 @@ private struct MailSpamPolicySection: View {
         unlistedRecipientPenalty = String(policy.unlistedRecipientPenalty)
     }
 
-    private func gather() -> SpamPolicyView {
+    /// The group's `u32` drafts, in gather order.
+    private var counts: [String] {
+        [junk, reject, greylistDelay, maxConnPerMin, maxMessageBytes, bayesianWeight,
+         bayesianMinSamples, bayesianFullConfidenceSamples, trainingHistoryRetention,
+         unlistedRecipientPenalty]
+    }
+
+    private var draftAnswer: Possibility {
+        mailKnobsDraftPossibility(counts: counts, countsU64: [], lists: [])
+    }
+
+    private func gather() -> SpamPolicyView? {
+        var g = KnobGather()
         var p = draft
-        p.maxScoreBeforeSpamFolder = parseU32(junk, policy.maxScoreBeforeSpamFolder)
-        p.maxScoreBeforeReject = parseU32(reject, policy.maxScoreBeforeReject)
+        p.maxScoreBeforeSpamFolder = g.u32(junk)
+        p.maxScoreBeforeReject = g.u32(reject)
         p.dnsblServers = parseLines(dnsbl)
-        p.greylistDelaySecs = parseU32(greylistDelay, policy.greylistDelaySecs)
-        p.maxConnPerMin = parseU32(maxConnPerMin, policy.maxConnPerMin)
-        p.maxMessageBytes = parseU32(maxMessageBytes, policy.maxMessageBytes)
-        p.bayesianWeightMilli = parseU32(bayesianWeight, policy.bayesianWeightMilli)
-        p.bayesianMinSamples = parseU32(bayesianMinSamples, policy.bayesianMinSamples)
-        p.bayesianFullConfidenceSamples = parseU32(bayesianFullConfidenceSamples, policy.bayesianFullConfidenceSamples)
-        p.trainingHistoryRetentionDays = parseU32(trainingHistoryRetention, policy.trainingHistoryRetentionDays)
-        p.unlistedRecipientPenalty = parseU32(unlistedRecipientPenalty, policy.unlistedRecipientPenalty)
-        return p
+        p.greylistDelaySecs = g.u32(greylistDelay)
+        p.maxConnPerMin = g.u32(maxConnPerMin)
+        p.maxMessageBytes = g.u32(maxMessageBytes)
+        p.bayesianWeightMilli = g.u32(bayesianWeight)
+        p.bayesianMinSamples = g.u32(bayesianMinSamples)
+        p.bayesianFullConfidenceSamples = g.u32(bayesianFullConfidenceSamples)
+        p.trainingHistoryRetentionDays = g.u32(trainingHistoryRetention)
+        p.unlistedRecipientPenalty = g.u32(unlistedRecipientPenalty)
+        return g.failed ? nil : p
     }
 }
 
@@ -631,6 +715,7 @@ private struct MailAuthPolicySection: View {
     let isBusy: Bool
     let onSave: (AuthPolicyView) async -> Void
 
+    @Environment(\.mailDraftGate) private var gate
     @State private var draft: AuthPolicyView
     @State private var maxFailures = ""
     @State private var maxConnPerIp = ""
@@ -648,7 +733,8 @@ private struct MailAuthPolicySection: View {
         policyGroup(title: L.admin.mailPage.authGroupTitle, desc: L.admin.mailPage.authGroupDesc,
                     saveLabel: L.admin.mailPage.authSave, saveId: Ids.adminMailAuthSaveButton,
                     saveKind: "fauna.bridges.put_auth_policy",
-                    isBusy: isBusy, onSave: { Task { await onSave(gather()) } }) {
+                    isBusy: isBusy, draft: draftAnswer, gate: gate,
+                    onSave: { if let p = gather() { Task { await onSave(p) } } }) {
             policyToggle(L.admin.mailPage.enforceDmarcLabel, Ids.adminMailAuthEnforceDmarcToggle,
                          $draft.enforceDmarc)
             policyToggle(L.admin.mailPage.enforceDmarcQuarantineLabel,
@@ -675,11 +761,16 @@ private struct MailAuthPolicySection: View {
         maxConnPerIp = String(policy.maxConnPerIp)
     }
 
-    private func gather() -> AuthPolicyView {
+    private var draftAnswer: Possibility {
+        mailKnobsDraftPossibility(counts: [maxFailures, maxConnPerIp], countsU64: [], lists: [])
+    }
+
+    private func gather() -> AuthPolicyView? {
+        var g = KnobGather()
         var p = draft
-        p.maxAuthFailuresPerMinute = parseU32(maxFailures, policy.maxAuthFailuresPerMinute)
-        p.maxConnPerIp = parseU32(maxConnPerIp, policy.maxConnPerIp)
-        return p
+        p.maxAuthFailuresPerMinute = g.u32(maxFailures)
+        p.maxConnPerIp = g.u32(maxConnPerIp)
+        return g.failed ? nil : p
     }
 }
 
@@ -691,6 +782,7 @@ private struct MailSubmissionPolicySection: View {
     let isBusy: Bool
     let onSave: (SubmissionPolicyView) async -> Void
 
+    @Environment(\.mailDraftGate) private var gate
     @State private var maxPerDay = ""
     @State private var maxRecipients = ""
 
@@ -700,7 +792,8 @@ private struct MailSubmissionPolicySection: View {
                     saveLabel: L.admin.mailPage.submissionSave,
                     saveId: Ids.adminMailSubmissionSaveButton,
                     saveKind: "fauna.bridges.put_submission_policy",
-                    isBusy: isBusy, onSave: { Task { await onSave(gather()) } }) {
+                    isBusy: isBusy, draft: draftAnswer, gate: gate,
+                    onSave: { if let p = gather() { Task { await onSave(p) } } }) {
             EditableFieldRow(L.admin.mailPage.submissionMaxPerDayLabel,
                         Ids.adminMailSubmissionMaxPerDayInput, $maxPerDay,
                         subtitle: L.admin.mailPage.submissionMaxPerDaySubtitle)
@@ -716,11 +809,16 @@ private struct MailSubmissionPolicySection: View {
         maxRecipients = String(policy.maxRecipientsPerMessage)
     }
 
-    private func gather() -> SubmissionPolicyView {
+    private var draftAnswer: Possibility {
+        mailKnobsDraftPossibility(counts: [maxPerDay, maxRecipients], countsU64: [], lists: [])
+    }
+
+    private func gather() -> SubmissionPolicyView? {
+        var g = KnobGather()
         var p = policy
-        p.maxPerDay = parseU32(maxPerDay, policy.maxPerDay)
-        p.maxRecipientsPerMessage = parseU32(maxRecipients, policy.maxRecipientsPerMessage)
-        return p
+        p.maxPerDay = g.u32(maxPerDay)
+        p.maxRecipientsPerMessage = g.u32(maxRecipients)
+        return g.failed ? nil : p
     }
 }
 
@@ -732,6 +830,7 @@ private struct MailImapPolicySection: View {
     let isBusy: Bool
     let onSave: (ImapPolicyView) async -> Void
 
+    @Environment(\.mailDraftGate) private var gate
     @State private var draft: ImapPolicyView
     @State private var idleTimeout = ""
     @State private var tombstoneRetention = ""
@@ -752,7 +851,8 @@ private struct MailImapPolicySection: View {
         policyGroup(title: L.admin.mailPage.imapGroupTitle, desc: L.admin.mailPage.imapGroupDesc,
                     saveLabel: L.admin.mailPage.imapSave, saveId: Ids.adminMailImapSaveButton,
                     saveKind: "fauna.bridges.put_imap_policy",
-                    isBusy: isBusy, onSave: { Task { await onSave(gather()) } }) {
+                    isBusy: isBusy, draft: draftAnswer, gate: gate,
+                    onSave: { if let p = gather() { Task { await onSave(p) } } }) {
             EditableFieldRow(L.admin.mailPage.imapIdleTimeoutLabel, Ids.adminMailImapIdleTimeoutInput,
                         $idleTimeout, subtitle: L.admin.mailPage.imapIdleTimeoutSubtitle)
             EditableFieldRow(L.admin.mailPage.imapTombstoneRetentionLabel,
@@ -792,14 +892,21 @@ private struct MailImapPolicySection: View {
         messageCount = String(policy.messageCountDefault)
     }
 
-    private func gather() -> ImapPolicyView {
+    private var draftAnswer: Possibility {
+        mailKnobsDraftPossibility(
+            counts: [idleTimeout, tombstoneRetention, bodystructureCache, messageCount],
+            countsU64: [storageBytes], lists: [])
+    }
+
+    private func gather() -> ImapPolicyView? {
+        var g = KnobGather()
         var p = draft
-        p.idleTimeoutSecs = parseU32(idleTimeout, policy.idleTimeoutSecs)
-        p.tombstoneRetentionDays = parseU32(tombstoneRetention, policy.tombstoneRetentionDays)
-        p.bodystructureCacheMax = parseU32(bodystructureCache, policy.bodystructureCacheMax)
-        p.storageBytesDefault = parseU64(storageBytes, policy.storageBytesDefault)
-        p.messageCountDefault = parseU32(messageCount, policy.messageCountDefault)
-        return p
+        p.idleTimeoutSecs = g.u32(idleTimeout)
+        p.tombstoneRetentionDays = g.u32(tombstoneRetention)
+        p.bodystructureCacheMax = g.u32(bodystructureCache)
+        p.storageBytesDefault = g.u64(storageBytes)
+        p.messageCountDefault = g.u32(messageCount)
+        return g.failed ? nil : p
     }
 }
 
@@ -811,6 +918,7 @@ private struct MailOutboundPolicySection: View {
     let isBusy: Bool
     let onSave: (OutboundPolicyView) async -> Void
 
+    @Environment(\.mailDraftGate) private var gate
     @State private var draft: OutboundPolicyView
     @State private var retrySchedule = ""
     @State private var permfailTimeout = ""
@@ -831,7 +939,8 @@ private struct MailOutboundPolicySection: View {
         policyGroup(title: L.admin.mailPage.outboundGroupTitle, desc: L.admin.mailPage.outboundGroupDesc,
                     saveLabel: L.admin.mailPage.outboundSave, saveId: Ids.adminMailOutboundSaveButton,
                     saveKind: "fauna.bridges.put_outbound_policy",
-                    isBusy: isBusy, onSave: { Task { await onSave(gather()) } }) {
+                    isBusy: isBusy, draft: draftAnswer, gate: gate,
+                    onSave: { if let p = gather() { Task { await onSave(p) } } }) {
             policyMultiline(L.admin.mailPage.outboundRetryScheduleLabel, Ids.adminMailOutboundRetrySchedule,
                             $retrySchedule, subtitle: L.admin.mailPage.outboundRetryScheduleSubtitle)
             EditableFieldRow(L.admin.mailPage.outboundPermfailTimeoutLabel,
@@ -876,14 +985,20 @@ private struct MailOutboundPolicySection: View {
         treat5xx = policy.treat5xxAsTransient.joined(separator: "\n")
     }
 
-    private func gather() -> OutboundPolicyView {
+    private var draftAnswer: Possibility {
+        mailKnobsDraftPossibility(counts: [permfailTimeout, delayWarning, ndrRateLimit],
+                                  countsU64: [], lists: [retrySchedule])
+    }
+
+    private func gather() -> OutboundPolicyView? {
+        var g = KnobGather()
         var p = draft
-        p.retryScheduleSeconds = parseU64Lines(retrySchedule, fallback: policy.retryScheduleSeconds)
-        p.permanentFailureTimeoutHours = parseU32(permfailTimeout, policy.permanentFailureTimeoutHours)
-        p.delayWarningAtHours = parseU32(delayWarning, policy.delayWarningAtHours)
-        p.ndrRateLimitDays = parseU32(ndrRateLimit, policy.ndrRateLimitDays)
+        p.retryScheduleSeconds = g.u64Lines(retrySchedule)
+        p.permanentFailureTimeoutHours = g.u32(permfailTimeout)
+        p.delayWarningAtHours = g.u32(delayWarning)
+        p.ndrRateLimitDays = g.u32(ndrRateLimit)
         p.treat5xxAsTransient = parseLines(treat5xx)
-        return p
+        return g.failed ? nil : p
     }
 }
 
@@ -895,6 +1010,7 @@ private struct MailAliasPolicySection: View {
     let isBusy: Bool
     let onSave: (AliasPolicyView) async -> Void
 
+    @Environment(\.mailDraftGate) private var gate
     @State private var draft: AliasPolicyView
     @State private var exactMax = ""
     @State private var reserved = ""
@@ -912,7 +1028,8 @@ private struct MailAliasPolicySection: View {
         policyGroup(title: L.admin.mailPage.aliasGroupTitle, desc: L.admin.mailPage.aliasGroupDesc,
                     saveLabel: L.admin.mailPage.aliasSave, saveId: Ids.adminMailAliasSaveButton,
                     saveKind: "fauna.bridges.put_alias_policy",
-                    isBusy: isBusy, onSave: { Task { await onSave(gather()) } }) {
+                    isBusy: isBusy, draft: draftAnswer, gate: gate,
+                    onSave: { if let p = gather() { Task { await onSave(p) } } }) {
             EditableFieldRow(L.admin.mailPage.aliasExactMaxLabel, Ids.adminMailAliasExactMaxInput,
                         $exactMax, subtitle: L.admin.mailPage.aliasExactMaxSubtitle)
             policyMultiline(L.admin.mailPage.aliasReservedLabel, Ids.adminMailAliasReservedLocalParts,
@@ -931,12 +1048,17 @@ private struct MailAliasPolicySection: View {
         reserved = policy.reservedLocalParts.joined(separator: "\n")
     }
 
-    private func gather() -> AliasPolicyView {
+    private var draftAnswer: Possibility {
+        mailKnobsDraftPossibility(counts: [exactMax], countsU64: [], lists: [])
+    }
+
+    private func gather() -> AliasPolicyView? {
+        var g = KnobGather()
         var p = draft
-        p.exactAliasesMax = parseU32(exactMax, policy.exactAliasesMax)
+        p.exactAliasesMax = g.u32(exactMax)
         // An empty box clears the reservation (full-PUT — distinct from "default").
         p.reservedLocalParts = parseLines(reserved)
-        return p
+        return g.failed ? nil : p
     }
 }
 
@@ -953,6 +1075,7 @@ private struct MailDmarcPolicySection: View {
     let isBusy: Bool
     let onSave: (DmarcPolicyView) async -> Void
 
+    @Environment(\.mailDraftGate) private var gate
     @State private var draft: DmarcPolicyView
     @State private var aggregateRetention = ""
     @State private var forensicRetention = ""
@@ -970,7 +1093,8 @@ private struct MailDmarcPolicySection: View {
         policyGroup(title: L.admin.mailPage.dmarcGroupTitle, desc: L.admin.mailPage.dmarcGroupDesc,
                     saveLabel: L.admin.mailPage.dmarcSave, saveId: Ids.adminMailDmarcSaveButton,
                     saveKind: "fauna.bridges.put_dmarc_policy",
-                    isBusy: isBusy, onSave: { Task { await onSave(gather()) } }) {
+                    isBusy: isBusy, draft: draftAnswer, gate: gate,
+                    onSave: { if let p = gather() { Task { await onSave(p) } } }) {
             policyToggle(L.admin.mailPage.dmarcRufPublishLabel, Ids.adminMailDmarcRufPublishToggle,
                          $draft.rufPublish)
             // Always rendered: the PII notice is the point of the opt-in.
@@ -1009,14 +1133,20 @@ private struct MailDmarcPolicySection: View {
         forensicRetention = String(policy.forensicRetentionDays)
     }
 
-    private func gather() -> DmarcPolicyView {
+    private var draftAnswer: Possibility {
+        mailKnobsDraftPossibility(counts: [aggregateRetention, forensicRetention],
+                                  countsU64: [], lists: [])
+    }
+
+    private func gather() -> DmarcPolicyView? {
+        var g = KnobGather()
         var p = policy
         p.rufPublish = draft.rufPublish
         p.foMode = draft.foMode
         p.outboundAggregateEnabled = draft.outboundAggregateEnabled
-        p.aggregateRetentionDays = parseU32(aggregateRetention, policy.aggregateRetentionDays)
-        p.forensicRetentionDays = parseU32(forensicRetention, policy.forensicRetentionDays)
-        return p
+        p.aggregateRetentionDays = g.u32(aggregateRetention)
+        p.forensicRetentionDays = g.u32(forensicRetention)
+        return g.failed ? nil : p
     }
 }
 
@@ -1032,6 +1162,7 @@ private struct MailMicrosoftRegistrationSection: View {
     let isBusy: Bool
     let onSave: (String, String) async -> Void
 
+    @Environment(\.mailDraftGate) private var gate
     @State private var clientId = ""
     @State private var tenant = ""
 
@@ -1039,7 +1170,9 @@ private struct MailMicrosoftRegistrationSection: View {
         policyGroup(title: L.admin.mailPage.microsoftGroupTitle, desc: L.admin.mailPage.microsoftGroupDesc,
                     saveLabel: L.admin.mailPage.microsoftSave, saveId: Ids.adminMailMicrosoftSaveButton,
                     saveKind: "fauna.bridges.set_microsoft_registration",
-                    isBusy: isBusy, onSave: { Task { await onSave(clientId, tenant) } }) {
+                    isBusy: isBusy,
+                    draft: mailMicrosoftDraftPossibility(clientId: clientId, tenant: tenant),
+                    gate: gate, onSave: { Task { await onSave(clientId, tenant) } }) {
             Text(L.admin.mailPage.microsoftRequirements)
                 .font(.caption).foregroundStyle(.secondary)
             Text(registration.isDefault ? L.admin.mailPage.microsoftUsingDefault

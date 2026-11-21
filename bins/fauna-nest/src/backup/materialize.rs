@@ -85,6 +85,19 @@
 //! server receive time, recovery's collision rule (a) (`recover.rs`'s
 //! [`super::recover::DavFold`]).
 //!
+//! ## A finished flip is answered by its receipt
+//!
+//! The transaction that makes a set live also writes its **materialize
+//! receipt** (`db/materialize_receipts.rs`; `backup-destinations.md` § Third
+//! destination kind → *A lived-in segment set is completed by record in the
+//! same gesture*, rule (2)): the corpus's ledger generation and the copy's
+//! manifest anchor. A later call for a copy the receipt covers answers
+//! [`MaterializeRefusal::AlreadyMaterialized`] (`already_materialized`) —
+//! read after the marker, before any freshness question — so `target_not_empty`
+//! means one thing: live content this ceremony did not put there. The covered
+//! re-delivery's landing set is reclaimed before that answer, as after a whole
+//! landing, so a repeated gesture leaves no second copy behind.
+//!
 //! ## The two axes, and why only one of them holds a key
 //!
 //! A segment corpus rests sealed under the owner's `NestBackupKey` root, so
@@ -131,7 +144,9 @@ use crate::db::nest_backup_keys::NEST_BACKUP_KEY_LEN;
 use crate::routes::AppState;
 
 /// Every way materialize declines, each a **typed** refusal the handler renders
-/// as its own wire code. None of them mutates anything: the checks that can fail
+/// as its own wire code. None of them mutates anything — save
+/// [`Self::AlreadyMaterialized`], no refusal of a rule, which reclaims the
+/// landing set its receipt covers: the checks that can fail
 /// all run before the first byte is written, and the write itself is one SQLite
 /// transaction plus a segment-area write that only ever *adds* files.
 #[derive(Debug)]
@@ -315,6 +330,27 @@ pub(crate) enum MaterializeRefusal {
     /// corpus supersedes that. Not asked of mail while the scope's in-flight
     /// marker stands; calendar and contacts are still asked.
     PlacementNotFresh { kind: &'static str, history: u64 },
+    /// **The copy is one this nest already made live** — the materialize
+    /// receipt covers it (`backup-destinations.md` § Third destination kind →
+    /// *A lived-in segment set is completed by record in the same gesture*,
+    /// rule (2)). A segment set: the delivered mirror's ledger generation is at
+    /// or below the receipt's. A covered folder: the copy's anchor is the
+    /// receipt's, and the folder refused as lived-in or not fresh.
+    ///
+    /// Its own wire code (`already_materialized`), so `target_not_empty` means
+    /// one thing — live content this ceremony did not put there — and a driver
+    /// says *already restored* on this answer alone. Asked after the in-flight
+    /// marker (a standing marker is a flip to finish, never a finished one) and
+    /// before every freshness question. The one answer here that is no
+    /// refusal of a rule, and the one that writes: on the segment axis the
+    /// re-delivered landing set is reclaimed first ([`reclaim_landing_set`]),
+    /// since the copy is covered by a committed flip — derived twice over, as
+    /// after a whole landing. Nothing else is touched; the covered-folder
+    /// axis's set is no landing set and is kept.
+    AlreadyMaterialized {
+        set_name: String,
+        ledger_generation: u32,
+    },
     /// The set holds no `manifest.<kind>` mirror. Delivery writes the mirror
     /// **last**, so its absence is the signature of a torn or never-finished
     /// delivery, not of a corrupt one — the fix is to finish delivering.
@@ -466,6 +502,15 @@ impl std::fmt::Display for MaterializeRefusal {
                      has been lived in"
                 )
             }
+            Self::AlreadyMaterialized {
+                set_name,
+                ledger_generation,
+            } => write!(
+                f,
+                "this nest already made `{set_name}` live from a copy at ledger generation \
+                 {ledger_generation}, and the delivered copy is no newer; there is nothing \
+                 left to restore"
+            ),
             Self::SegmentPathOccupied { segment_id, path } => write!(
                 f,
                 "segment {segment_id}'s path ({path}) holds bytes this ceremony cannot prove \
@@ -743,31 +788,27 @@ pub(crate) async fn materialize_segment_set(
     }
     let mid_flip = in_flight.is_some();
 
-    // ── The empty-target rule, before anything is read ───────────────────
-    if !mid_flip {
-        let live = state
+    // ── The receipt: did a flip of this set already commit here? ─────────
+    //
+    // After the marker (a standing marker is a flip to finish) and before
+    // every freshness question (`backup-destinations.md` § Third destination
+    // kind → *A lived-in segment set is completed by record in the same
+    // gesture*, rule (2)). With a receipt standing, the delivered copy's
+    // generation decides, which needs its mirror opened — so the empty-target
+    // rule waits for the key below rather than refusing first.
+    let receipt = if mid_flip {
+        None
+    } else {
+        state
             .db
-            .segment_records_count_live(&scope, kind)
+            .materialize_receipt_get(&scope, set_name)
             .await
-            .map_err(MaterializeRefusal::Integrity)?;
-        if live > 0 {
-            return Err(MaterializeRefusal::ScopeNotEmpty {
-                kind,
-                records: live,
-            });
-        }
-        // The journal half's cheap form: a placement row is a filed message.
-        // The full form (history the rows no longer show) needs the journal's
-        // fold and is judged below, once the corpus has been read.
-        let filed = count_placed_rows(state, &scope, arm)
-            .await
-            .map_err(MaterializeRefusal::Integrity)?;
-        if filed > 0 {
-            return Err(MaterializeRefusal::PlacementNotFresh {
-                kind,
-                history: filed,
-            });
-        }
+            .map_err(MaterializeRefusal::Integrity)?
+    };
+
+    // ── The empty-target rule, before anything is read ───────────────────
+    if !mid_flip && receipt.is_none() {
+        empty_target_rule(state, &scope, arm, kind).await?;
     }
 
     // ── The key the owner granted at enrollment ──────────────────────────
@@ -815,6 +856,41 @@ pub(crate) async fn materialize_segment_set(
         keys: &keys,
         by_path: &by_path,
     };
+
+    // The copy's anchor: the manifest its `manifest.<kind>` mirror custody
+    // row names — what the receipt records beside the generation.
+    let mirror_path = SegmentFamily::Content.mirror_path(&scope_hex, kind);
+    let manifest_anchor: [u8; 32] = by_path
+        .get(&mirror_path)
+        .map_or([0u8; 32], ContentHash::digest);
+
+    // ── A receipt standing: is the delivered copy one it covers? ─────────
+    if let Some(receipt) = &receipt {
+        // A copy with no mirror is an unfinished delivery whatever the
+        // receipt says; the ordinary path below names it.
+        if let Some(bytes) = custody
+            .open(&mirror_path)
+            .await
+            .map_err(MaterializeRefusal::Integrity)?
+        {
+            let mirror = LiveManifestMirror::from_bytes(&bytes)
+                .map_err(|e| MaterializeRefusal::Integrity(e.into()))?;
+            if mirror.next_segment_id_seen <= receipt.ledger_generation {
+                // The re-delivered copy is one the committed flip already
+                // made live, so its landing set is derived twice over, as
+                // after a whole landing: reclaim it before answering, or a
+                // second copy stands charged to the owner's quota that no
+                // app lists (`client-device-custodian.md` § *Empty-target
+                // rule*, the wire face). Best-effort, like every reclaim.
+                reclaim_landing_set(state, &scope, set_name).await;
+                return Err(MaterializeRefusal::AlreadyMaterialized {
+                    set_name: set_name.to_string(),
+                    ledger_generation: receipt.ledger_generation,
+                });
+            }
+        }
+        empty_target_rule(state, &scope, arm, kind).await?;
+    }
 
     // ── Open and verify EVERY pair, of BOTH families, before writing ANY ──
     //
@@ -1276,6 +1352,19 @@ pub(crate) async fn materialize_segment_set(
         )
         .context("retire the marker's deleted-collection notes")
         .map_err(MaterializeRefusal::Integrity)?;
+        // The receipt, in the same transaction: a repeat of this flip is
+        // answered `already_materialized` exactly when the flip committed.
+        crate::db::materialize_receipts::receipt_put_in_tx(
+            &tx,
+            &scope,
+            set_name,
+            &crate::db::materialize_receipts::MaterializeReceipt {
+                ledger_generation,
+                manifest_anchor,
+                materialized_at: now_epoch_secs(),
+            },
+        )
+        .map_err(MaterializeRefusal::Integrity)?;
         tx.commit()
             .context("commit the materialize transaction")
             .map_err(MaterializeRefusal::Integrity)?;
@@ -1293,6 +1382,41 @@ pub(crate) async fn materialize_segment_set(
         remaining: None,
         landing_reclaimed,
     })
+}
+
+/// **The empty-target rule's top-of-verb half**: a live record of `kind`
+/// refuses [`MaterializeRefusal::ScopeNotEmpty`]; a placement row (the journal
+/// half's cheap form — the full form, history the rows no longer show, needs
+/// the journal's fold and is judged once the corpus has been read) refuses
+/// [`MaterializeRefusal::PlacementNotFresh`]. Not asked under a standing
+/// in-flight marker, nor ahead of a standing receipt's answer.
+async fn empty_target_rule(
+    state: &Arc<AppState>,
+    scope: &[u8; 32],
+    arm: KindArm,
+    kind: &'static str,
+) -> Result<(), MaterializeRefusal> {
+    let live = state
+        .db
+        .segment_records_count_live(scope, kind)
+        .await
+        .map_err(MaterializeRefusal::Integrity)?;
+    if live > 0 {
+        return Err(MaterializeRefusal::ScopeNotEmpty {
+            kind,
+            records: live,
+        });
+    }
+    let filed = count_placed_rows(state, scope, arm)
+        .await
+        .map_err(MaterializeRefusal::Integrity)?;
+    if filed > 0 {
+        return Err(MaterializeRefusal::PlacementNotFresh {
+            kind,
+            history: filed,
+        });
+    }
+    Ok(())
 }
 
 /// The test seam's tear ([`crate::materialize_tear_test_hook`]): stop the verb
@@ -1316,8 +1440,10 @@ fn test_tear(
 /// `reserved-folders.md` § __mail Sync → *The landing set*.
 ///
 /// Called by both segment-axis verbs once the landing is whole (materialize:
-/// the corpus live and the in-flight marker retired; recover: every candidate
-/// landed), never on a torn or refused one, whose set is the retry's input. A
+/// the corpus live and the in-flight marker retired, or a re-delivered copy
+/// the materialize receipt covers — answered `already_materialized`; recover:
+/// every candidate landed), never on a torn or refused one, whose set is the
+/// retry's input. A
 /// whole landing verified every pair before its first write and the custodian
 /// still holds its own copy, so the set is derived twice over; left standing
 /// it is a second copy charged to the owner's quota that no app lists.
@@ -3383,6 +3509,32 @@ pub(crate) async fn materialize_folder_set(
     // (ruling (7)(a)(ii)).
     let recorder_device = fauna_core::label_custody::reseed_pseudo_device_id(actor);
 
+    // The copy's anchor: what the receipt records when this page leaves
+    // nothing owed, and what a standing receipt is compared against when the
+    // target refuses below.
+    let anchor = crate::db::materialize_receipts::folder_copy_anchor(
+        rows.iter().map(|r| (&r.path_hash, &r.manifest_hash)),
+    );
+    // A refusal of the empty-target rule is first read against the receipt:
+    // a folder this ceremony made live from this very copy, lived in since,
+    // is `already_materialized`, never `target_not_empty`
+    // (`backup-destinations.md` § Third destination kind → *A lived-in
+    // segment set is completed by record in the same gesture*, rule (2)).
+    // Asked only on a refusal, so a torn run's replayed page still resumes.
+    let already = || async {
+        let receipt = state
+            .db
+            .materialize_receipt_get(actor, set_name)
+            .await
+            .map_err(MaterializeRefusal::Integrity)?;
+        Ok::<_, MaterializeRefusal>(receipt.filter(|r| r.manifest_anchor == anchor).map(|r| {
+            MaterializeRefusal::AlreadyMaterialized {
+                set_name: set_name.to_string(),
+                ledger_generation: r.ledger_generation,
+            }
+        }))
+    };
+
     match state
         .db
         .materialize_folder_custody(
@@ -3393,6 +3545,11 @@ pub(crate) async fn materialize_folder_set(
             &rows,
             &page,
             max_storage,
+            crate::db::sync_storage::FolderReceipt {
+                set_name,
+                anchor,
+                now: now_epoch_secs(),
+            },
         )
         .await
     {
@@ -3438,16 +3595,20 @@ pub(crate) async fn materialize_folder_set(
             })
         }
         Ok(crate::db::sync_storage::FolderMaterializeOutcome::NotEmpty { records }) => {
-            Err(MaterializeRefusal::FolderNotEmpty {
-                folder: display_name.to_string(),
-                records,
-            })
+            Err(already()
+                .await?
+                .unwrap_or(MaterializeRefusal::FolderNotEmpty {
+                    folder: display_name.to_string(),
+                    records,
+                }))
         }
         Ok(crate::db::sync_storage::FolderMaterializeOutcome::NotFresh { property }) => {
-            Err(MaterializeRefusal::FolderNotFresh {
-                folder: display_name.to_string(),
-                property,
-            })
+            Err(already()
+                .await?
+                .unwrap_or(MaterializeRefusal::FolderNotFresh {
+                    folder: display_name.to_string(),
+                    property,
+                }))
         }
         Err(e) => Err(match e {
             crate::db::sync_storage::StorageQuotaError::Db(inner) => {

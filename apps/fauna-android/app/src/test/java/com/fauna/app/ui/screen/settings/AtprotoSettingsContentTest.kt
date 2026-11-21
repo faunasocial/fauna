@@ -25,6 +25,10 @@ import uniffi.fauna_atproto_settings_machine.RetireIdentityOptIn
 import uniffi.fauna_atproto_settings_machine.IdentitySummaryRow
 import uniffi.fauna_atproto_settings_machine.TransitionCardModel
 import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
+import com.fauna.app.R
+import com.fauna.app.core.atproto.AtprotoPossibilities
+import org.robolectric.RuntimeEnvironment
 
 /**
  * Compose-level coverage for the stateless [AtprotoSettingsContent] — the
@@ -92,8 +96,24 @@ class AtprotoSettingsContentTest {
         error = null,
     )
 
+    // The machine's own answers are INPUTS to the page (`ui/README.md` § Offer
+    // only what is possible, rule 6): every rung is possible unless a test says
+    // otherwise, so the page tests below exercise layout, not the gate.
+    private val allRungs = listOf("off", "linked", "hosted_visible", "hosted_full")
+
+    private fun ready(
+        blocked: Map<String, Possibility> = emptyMap(),
+        authorize: Possibility = Possibility.Possible,
+    ) = AtprotoPossibilities.forTest(
+        rungs = allRungs.associateWith { blocked[it] ?: Possibility.Possible },
+        authorize = authorize,
+    )
+
+    private fun blocked(key: String) = Possibility.Blocked(LocalizedText(key, emptyMap()))
+
     private fun render(
         snapshot: AtprotoSettingsSnapshot = emptySnapshot,
+        possibilities: AtprotoPossibilities = ready(),
         blueskyBridge: FfiBridgeStatus? = unlinkedBridge(),
         blueskyFollows: List<FfiBridgeFollow> = emptyList(),
         onOpenContestConfirm: () -> Unit = {},
@@ -122,6 +142,7 @@ class AtprotoSettingsContentTest {
         composeTestRule.setContent {
             AtprotoSettingsContent(
                 snapshot = snapshot,
+                possibilities = possibilities,
                 blueskyBridge = blueskyBridge,
                 blueskyFollows = blueskyFollows,
                 onBack = {},
@@ -153,7 +174,8 @@ class AtprotoSettingsContentTest {
 
     @Test
     fun rendersStaticSelectorAtOffWithHostedRungsGated() {
-        render()
+        val hostedGate = blocked("atproto_settings.gate_reason")
+        render(possibilities = ready(blocked = mapOf("hosted_visible" to hostedGate, "hosted_full" to hostedGate)))
         composeTestRule.onNodeWithTag("page-heading").assertExists()
         composeTestRule.onNodeWithTag("atproto-page").assertExists()
         composeTestRule.onNodeWithTag("atproto-depth-selector").assertExists()
@@ -169,9 +191,51 @@ class AtprotoSettingsContentTest {
 
     @Test
     fun hostedRungsEnabledWhenGateAllows() {
-        render(snapshot = emptySnapshot.copy(hostedAllowed = true))
+        render(possibilities = ready())
         composeTestRule.onNodeWithTag("atproto-depth-hosted-visible").assertIsEnabled()
         composeTestRule.onNodeWithTag("atproto-depth-hosted-full").assertIsEnabled()
+    }
+
+    /** Rule 5: before the first status read resolves no rung is offered on a
+     *  guess, and each is disabled WITH its reason — `common.still_loading`,
+     *  painted once for the whole group, not once per rung. */
+    @Test
+    fun everyRungIsDisabledWithStillLoadingBeforeTheFirstRead() {
+        render(possibilities = AtprotoPossibilities.PENDING)
+        for (id in listOf("off", "linked", "hosted-visible", "hosted-full")) {
+            composeTestRule.onNodeWithTag("atproto-depth-$id").assertIsNotEnabled()
+        }
+        composeTestRule.onAllNodesWithText("Still loading — try again in a moment")
+            .assertCountEquals(1)
+    }
+
+    /** Rule 4: with no signing identity held, authorize is disabled and says
+     *  why (`authorize_possibility`) instead of opening a form that fails at
+     *  its submit — in the empty state and on a live row alike. */
+    @Test
+    fun authorizeIsDisabledWithTheNoIdentityReasonWhereNoIdentityIsHeld() {
+        val noIdentity = blocked("atproto_settings.error_no_identity")
+        render(
+            snapshot = emptySnapshot.copy(level = "hosted_full", delegation = null),
+            possibilities = ready(authorize = noIdentity),
+        )
+        composeTestRule.onNodeWithTag("atproto-delegation-authorize").assertIsNotEnabled()
+        composeTestRule.onAllNodesWithText(
+            RuntimeEnvironment.getApplication().getString(R.string.atproto_settings_error_no_identity),
+        ).assertCountEquals(1)
+    }
+
+    /** Rule 7: a machine that failed to build offers nothing — one reason line
+     *  stands in for every control. */
+    @Test
+    fun aFailedMachineRendersOnlyTheUnavailableLine() {
+        render(possibilities = AtprotoPossibilities.UNAVAILABLE)
+        composeTestRule.onNodeWithTag("atproto-page").assertExists()
+        composeTestRule.onNodeWithText(
+            RuntimeEnvironment.getApplication().getString(R.string.atproto_settings_page_unavailable),
+        ).assertExists()
+        composeTestRule.onNodeWithTag("atproto-depth-selector").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("atproto-delegation-authorize").assertDoesNotExist()
     }
 
     @Test
@@ -531,6 +595,22 @@ class AtprotoSettingsContentTest {
         )
         composeTestRule.onNodeWithTag("atproto-did-method-web").performScrollTo().performClick()
         assertEquals("web", method)
+    }
+
+    /** The radios publish the depth rungs' vocabulary, `active` / `inactive`,
+     *  as `state` — what `get_attr(id, "state")` reads on every app (atproto 22),
+     *  never the radio's native `true`/`false`. */
+    @Test
+    fun didMethodRadiosPublishActiveAndInactiveAsTheirState() {
+        render(
+            snapshot = emptySnapshot.copy(level = "hosted_visible", showDidMethodRadio = true, didMethod = "web"),
+        )
+        composeTestRule.onNodeWithTag("atproto-did-method-web").assert(
+            SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "active"),
+        )
+        composeTestRule.onNodeWithTag("atproto-did-method-plc").assert(
+            SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "inactive"),
+        )
     }
 
     @Test

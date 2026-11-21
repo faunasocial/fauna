@@ -24,6 +24,7 @@ Stamped 2026-11-07 at 6a0ded1015.
 
 1. [app] A join request is approved at a tier and the member appears; invite codes mint and copy — `docs/goal/behavior/admin.md` § 2. Users
    - `tests/e2e-unified/tests/test_admin_users_hub.py::test_approve_invite_request_at_tier`
+   - `tests/e2e-unified/tests/test_use_case_admin_journeys.py::test_admin_approves_an_invite_request_by_gestures`
    - `tests/e2e-unified/tests/test_admin_users_hub.py::test_mint_code_and_copy`
    - `tests/e2e-unified/tests/test_admin.py::test_admin_invite_codes`
    - `tests/e2e-unified/tests/test_admin.py::test_admin_user_list`
@@ -114,25 +115,30 @@ Stamped 2026-11-07 at 6a0ded1015.
     - `tests/e2e-unified/tests/test_admin_pending_actions.py::test_a_co_admin_sees_who_scheduled_an_action_and_approves_it_in_one_click`
 41. [app] A registration mode this app cannot name — reported by an older or a newer nest — is shown read-only, never replaced by a guess that saving would write over the nest's real posture — `docs/goal/architecture/nest/public-mode.md` § Registration Modes
     - `tests/e2e-unified/tests/test_admin_registration_posture.py::test_an_unnamed_registration_mode_is_shown_read_only_and_never_saved_over`
+42. [app] On the nest's last admin, Remove admin is shown disabled and says to make another person an admin first; a row without the role carries no Remove admin, and an action you scheduled yourself carries no Approve — `docs/goal/behavior/admin.md` § 2. Users
+    - `tests/e2e-unified/tests/test_admin_offer_only_possible.py::test_the_users_page_offers_no_role_removal_or_approval_the_nest_always_refuses`
+43. [app] When admitting or inviting a person, the age band is disabled and says to pick a guardian first, until a guardian is picked — `docs/goal/behavior/admin.md` § 2. Users
+    - `tests/e2e-unified/tests/test_admin_offer_only_possible.py::test_the_age_band_says_to_pick_a_guardian_first_until_one_is_picked`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+acde58f9 standalone |
-| linux | ✅ full | 0.1.5-dev+acde58f9 standalone |
-| windows | ⚠ partial | 0.1.5-dev+acde58f9 standalone |
-| macos | ✅ full | 0.1.5-dev+acde58f9 standalone |
-| ios | ⚠ partial | 0.1.5-dev+407a19e1 standalone |
+| web | ⚠ partial | 0.1.7-dev+00c1f744 standalone |
+| linux | ⚠ partial | 0.1.7-dev+00c1f744 standalone |
+| windows | ⚠ partial | 0.1.7-dev+00c1f744 standalone |
+| macos | ⚠ partial | 0.1.6-dev+e46418b8 standalone |
+| ios | ⚠ partial | 0.1.7-dev+00c1f744 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.5-dev+acde58f9 standalone |
+| tui | ✅ full | 0.1.7-dev+00c1f744 standalone |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_admin_users_hub.py::test_approve_invite_request_at_tier` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_use_case_admin_journeys.py::test_admin_approves_an_invite_request_by_gestures` | tui (macos): passed |
 | 1 | app | `tests/e2e-unified/tests/test_admin_users_hub.py::test_mint_code_and_copy` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 1 | app | `tests/e2e-unified/tests/test_admin.py::test_admin_invite_codes` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 1 | app | `tests/e2e-unified/tests/test_admin.py::test_admin_user_list` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
@@ -182,5 +188,7 @@ Stamped 2026-11-07 at 6a0ded1015.
 | 38 | nest | `tests/e2e-unified/tests/api/test_admin_users_cut_off.py::test_a_restored_member_comes_back_as_they_were` | nest (linux): passed, nest (macos): passed |
 | 39 | nest | `tests/e2e-unified/tests/api/test_invite_requests.py::test_admin_list_shows_submitted` | nest (linux): passed, nest (macos): passed |
 | 40 | app | `tests/e2e-unified/tests/test_admin_pending_actions.py::test_a_co_admin_sees_who_scheduled_an_action_and_approves_it_in_one_click` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 41 | app | `tests/e2e-unified/tests/test_admin_registration_posture.py::test_an_unnamed_registration_mode_is_shown_read_only_and_never_saved_over` | web (linux): passed, linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 41 | app | `tests/e2e-unified/tests/test_admin_registration_posture.py::test_an_unnamed_registration_mode_is_shown_read_only_and_never_saved_over` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 42 | app | `tests/e2e-unified/tests/test_admin_offer_only_possible.py::test_the_users_page_offers_no_role_removal_or_approval_the_nest_always_refuses` — requires `blocked-reason-read` (test harness) (not built: windows) | macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 43 | app | `tests/e2e-unified/tests/test_admin_offer_only_possible.py::test_the_age_band_says_to_pick_a_guardian_first_until_one_is_picked` — requires `blocked-reason-read` (test harness) (not built: windows) | macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

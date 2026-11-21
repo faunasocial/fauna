@@ -702,6 +702,20 @@ class MacosInProcessDriver(InProcessAgentDriver):
         return True
 
     # ------------------------------------------------------------------
+    # Text selection (`e2e-conventions.md` § Driver primitives → *Reading
+    # whether text can be selected*; the routes are web's, by name and shape)
+    # ------------------------------------------------------------------
+    # The agent's ``/element/select-text`` makes the selection with Select All
+    # on the element's own SwiftUI text view — the selection a person makes
+    # with a click and Edit ▸ Select All, so text with selection off and an
+    # element published ``selectable=false`` read False; a pointer drag selects
+    # nothing while the app is not the active app, which an e2e app cannot
+    # count on being (`Testing/TextSelectionRead.swift`). ``/page/selection``
+    # reads it back through the first responder's own Services write, and the
+    # agent names the step that answered no selection (`HttpBridgeDriver`).
+    _serves_select_text = True
+
+    # ------------------------------------------------------------------
     # Window-level ops (mirrors linux/windows drivers' window_close/
     # is_app_alive; the InProcessAutomationServer's `/window/close` route
     # owns the AppKit `performClose` mechanism)

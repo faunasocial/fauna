@@ -303,17 +303,20 @@ public partial class ModerationViewModel : ViewModelBase
             if (action.IsLocal)
             {
                 // A local detection has no server obligation to train against. Read the
-                // retained decrypted body BEFORE dropping the flag (mirroring linux
-                // correct_moderation_row order), train the caller's Bayesian model "not
-                // spam" client-side over that text, then remove the false-positive flag
-                // (moderation.md § State: local detections are held client-side) and
-                // repaint. The machine self-gates: a nest without spam-model-sealed-at-rest
-                // yields ServerPath → a silent no-op (there is no server train path for
-                // local content). A null body (aged out) ⇒ just remove.
+                // retained decrypted body, train the caller's Bayesian model "not spam"
+                // client-side over that text FIRST, and only then remove the
+                // false-positive flag (moderation.md § State: local detections are held
+                // client-side) and repaint. A degraded outcome (mail not enabled, a nest
+                // without spam-model-sealed-at-rest, no token) is an Ok no-op and stays
+                // silent; a train dispatch that THROWS lands in the catch below — said on
+                // error-message, and the flag is KEPT so the correction can be tried
+                // again rather than lost (moderation.md § Errors & edge cases;
+                // docs/goal/ui/README.md § Offer only what is possible, rule 7; tui's
+                // moderation Op::Correct). A null or blank body (aged out) ⇒ just remove.
                 var text = _local?.Body(action.ContentId);
-                _local?.Remove(action.ContentId);
-                if (_spamWrite is not null && !string.IsNullOrEmpty(text))
+                if (_spamWrite is not null && !string.IsNullOrWhiteSpace(text))
                     await _spamWrite.TrainSpamModelClientAsync(text, isSpam: false);
+                _local?.Remove(action.ContentId);
             }
             else
             {

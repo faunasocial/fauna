@@ -64,6 +64,7 @@ pub mod public_follow;
 // not-found mapping; every app that can follow already links that stack.
 #[cfg(feature = "mls")]
 pub mod follow_ops;
+pub mod forms;
 pub mod recipient;
 pub use recipient::{
     AcceptShareError, DeclineShareError, FolderWelcomeJoin, accept_folder_share,

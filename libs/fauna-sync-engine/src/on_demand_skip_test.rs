@@ -224,6 +224,7 @@ fn seed_too_new_manifest(store: &crate::test_support::BlobStore) -> ContentHash 
         stored_hashes: None,
         sealed_hashes: None,
         min_reader: Some(99),
+        pages: None,
     };
     let bytes = fauna_core::encoding::canonical_encode(&manifest).unwrap();
     let hash = ContentHash::of_raw(&bytes);

@@ -141,6 +141,27 @@ public class AtprotoViewModelTests
         public override void SetHistoryBackfill(bool enabled) => Calls.Add($"SetHistoryBackfill:{enabled}");
         public override Task SetExternalAppsEnabled(bool enabled) { Calls.Add($"SetExternalAppsEnabled:{enabled}"); return Task.CompletedTask; }
         public override Task Refresh() { Calls.Add("Refresh"); return Task.CompletedTask; }
+
+        /// <summary>The rung answer the page paints once the machine answers. Scripted
+        /// when a case needs a specific answer; otherwise played back the way the
+        /// machine's own `rung_possibility_in` gates a read snapshot (blocked by the
+        /// hosted gate's reason on ENTERING a hosted rung the box refuses), so the
+        /// projection cases keep varying one axis of the snapshot.</summary>
+        public Func<string, Possibility>? OnRung;
+        public override Possibility RungPossibility(string targetLevel)
+        {
+            if (OnRung is not null) return OnRung(targetLevel);
+            var hosted = FaunaAtprotoSettingsMachineMethods.DepthLevelOptions()
+                .Single(o => o.@level == targetLevel).@hosted;
+            return hosted && !Snap.@hostedAllowed && Snap.@level != targetLevel
+                ? new Possibility.Blocked(Snap.@hostedGateReason ?? Text("atproto_settings/gate_localhost"))
+                : new Possibility.Possible();
+        }
+
+        /// <summary>`authorize_possibility`: possible unless a case says the app
+        /// holds no signing identity.</summary>
+        public Possibility Authorize = new Possibility.Possible();
+        public override Possibility AuthorizePossibility() => Authorize;
         // Revoke and the external-apps authorize pair are left to
         // the base's throwing defaults — this fake's cases never reach them, and
         // not restating them is what keeps the file immune to the next interface
@@ -247,6 +268,81 @@ public class AtprotoViewModelTests
     /// logic lives → *The rung catalog*).</summary>
     private static AtprotoViewModel.DepthRungRowVm Rung(AtprotoViewModel vm, string level) =>
         vm.DepthRungs.Single(r => r.Level == level);
+
+    // ── What the page may offer (ui/README.md § Offer only what is possible;
+    //    ui/atproto.md § Errors & edge cases) ──────────────────────────────────
+
+    /// <summary>No rung is offered before the first status read resolves: the
+    /// production VM has no machine yet, and a test VM whose machine would answer
+    /// "possible" has not read yet — both paint every rung blocked "still loading",
+    /// with that reason on the page once.</summary>
+    [Fact]
+    public void No_rung_is_offered_before_the_first_status_read()
+    {
+        UseRealStrings();
+        var stillLoading = FaunaApp.Core.Services.Strings.Resolve(Text("common.still_loading"));
+
+        foreach (var vm in new[]
+                 {
+                     new AtprotoViewModel(new MockNestRpcClient()),
+                     new AtprotoViewModel(new FakeMachine(Snapshot(hostedAllowed: true))),
+                 })
+        {
+            Assert.All(vm.DepthRungs, r => Assert.False(r.Enabled, $"{r.Level} offered before the read"));
+            Assert.Equal(new[] { stillLoading }, vm.RungReasonLines);
+        }
+    }
+
+    /// <summary>Once the machine answers, the rungs are its `rung_possibility` —
+    /// a failed status read blocks them all with its one reason, painted once.</summary>
+    [Fact]
+    public async Task Once_read_the_rungs_paint_the_machines_answer_with_each_reason_once()
+    {
+        UseRealStrings();
+        var m = new FakeMachine(Snapshot(hostedAllowed: true))
+        {
+            OnRung = _ => new Possibility.Blocked(Text("common.load_failed")),
+        };
+        var vm = new AtprotoViewModel(m);
+        await vm.LoadAsync();
+
+        Assert.All(vm.DepthRungs, r => Assert.False(r.Enabled));
+        Assert.Equal(
+            new[] { FaunaApp.Core.Services.Strings.Resolve(Text("common.load_failed")) },
+            vm.RungReasonLines);
+    }
+
+    /// <summary>Authorize is blocked with the no-identity reason at the entry when this
+    /// app holds no signing identity (rule 4), never opened to fail at its submit.</summary>
+    [Fact]
+    public async Task Authorize_is_blocked_with_its_reason_when_no_identity_is_held()
+    {
+        UseRealStrings();
+        var noIdentity = Text("atproto_settings.error_no_identity");
+        var (vm, m) = await LoadedAsync(Snapshot(level: "hosted_full"));
+        m.Authorize = new Possibility.Blocked(noIdentity);
+
+        var answer = vm.AuthorizeAnswer();
+
+        Assert.True(answer.Shown);
+        Assert.False(answer.Enabled);
+        Assert.Equal(FaunaApp.Core.Services.Strings.Resolve(noIdentity), answer.Reason);
+    }
+
+    /// <summary>A machine that failed to build paints the one unavailable line instead
+    /// of every control (rule 7) — the production VM over a client that cannot build it.</summary>
+    [Fact]
+    public async Task A_machine_that_failed_to_build_paints_the_unavailable_page()
+    {
+        var rpc = new MockNestRpcClient();
+        var vm = new AtprotoViewModel(rpc);
+
+        await vm.LoadAsync();
+
+        Assert.True(vm.Unavailable);
+        Assert.Contains("BuildAtprotoSettingsMachine", rpc.Calls);
+        Assert.All(vm.DepthRungs, r => Assert.False(r.Enabled));
+    }
 
     // ── The selector ────────────────────────────────────────────────────────
 

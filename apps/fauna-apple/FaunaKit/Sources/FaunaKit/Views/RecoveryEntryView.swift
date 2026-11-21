@@ -73,22 +73,21 @@ public struct RecoveryEntryView: View {
                         .accessibilityIdentifier(Ids.recoveryEntryBackButton)
                         .automationActivate(Ids.recoveryEntryBackButton) { vm.machine.back() }
 
-                    // Enabled whenever no restore is in flight: every way the
-                    // input can be wrong is an answer the ceremony gives on
-                    // `error-message` — a disabled submit would make "why can't I
-                    // click this?" the user's problem.
+                    // Painted from the shared draft answer (a kit, then an
+                    // account — `recovery_entry_possibility`), its reason
+                    // within eyeshot below, and blocked while a restore is in
+                    // flight. The machine's `submit_recovery_entry` runs the
+                    // same checks, so the press asks what the paint asked.
                     Button(L.onboarding.recoveryEntry.submit) { submit() }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.large)
-                        .disabled(submitting)
                         .accessibilityIdentifier(Ids.recoveryEntrySubmitButton)
-                        .automationActivate(
-                            Ids.recoveryEntrySubmitButton, isEnabled: { !submitting }
-                        ) {
-                            submit()
-                        }
+                        .automationActivate(Ids.recoveryEntrySubmitButton) { submit() }
+                        .faunaPossible(answer)
                 }
                 .frame(maxWidth: .infinity, alignment: .trailing)
+                FaunaPossibilityReason(answer)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
 
                 if let error = vm.errorMessage {
                     ErrorBanner(message: error)
@@ -96,6 +95,12 @@ public struct RecoveryEntryView: View {
             }
             .padding()
         }
+    }
+
+    /// `recovery-entry-submit-button`'s one answer
+    /// (``OnboardingVM/recoveryEntryAnswer(phrase:account:submitting:)``).
+    private var answer: Possibility {
+        vm.recoveryEntryAnswer(phrase: phrase, account: account, submitting: submitting)
     }
 
     /// Referenced by both the `Button` and its `automationActivate` so the two

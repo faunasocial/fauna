@@ -27,10 +27,61 @@ public final class ArchiveImportVM {
     static let progressTickMs: UInt64 = 400
 
     /// Latest snapshot; `nil` until `configure`.
-    public private(set) var snapshot: ArchiveImportSnapshot?
+    public internal(set) var snapshot: ArchiveImportSnapshot?
     /// Page-level error surface (`error-message`).
     public var errorMessage: String?
     public private(set) var isLoading = false
+
+    /// `wizard-next-button`'s shared answer (`archive-import.md` § The wizard
+    /// and its machine, *Next, Start and the prefill offer only what can
+    /// succeed*): on Archive it waits for an opened archive, on Scope for a
+    /// range that resolves — asked over the Scope page's typed date drafts,
+    /// folded in by the shared face exactly as tui folds them (off Scope the
+    /// drafts are ignored). Before the first snapshot it is not known yet
+    /// (rule 5).
+    public func nextAnswer(dateFrom: String, dateTo: String) -> Possibility {
+        guard let snapshot else { return readPossibility(read: .pending) }
+        return archiveImportNextPossibility(snapshot: snapshot, dateFrom: dateFrom, dateTo: dateTo)
+    }
+
+    /// `archive-import-start-button`'s shared answer: an opened archive and a
+    /// scope that resolves — the checks the run's Start makes before it commits.
+    public var startAnswer: Possibility {
+        guard let snapshot else { return readPossibility(read: .pending) }
+        return archiveImportStartPossibility(snapshot: snapshot)
+    }
+
+    /// `archive-import-profile-prefill-button`'s shared answer: blocked, saying
+    /// so, when the run found no profile or once it was applied — shown either
+    /// way, so the Done step always says whether a profile can be taken over.
+    public var profilePrefillAnswer: Possibility {
+        guard let snapshot else { return readPossibility(read: .pending) }
+        return archiveImportProfilePrefillPossibility(snapshot: snapshot)
+    }
+
+    /// The Next press: asks what the paint asked over the same drafts and
+    /// refuses on `error-message` with the reason (`ui/README.md` § Offer only
+    /// what is possible, rule 7); otherwise runs `actions` — the bare `.next`,
+    /// or Scope's draft commits followed by it.
+    public func pressNext(_ actions: [ArchiveImportAction], dateFrom: String, dateTo: String) async {
+        if refusePress(nextAnswer(dateFrom: dateFrom, dateTo: dateTo), errorMessage: &errorMessage) {
+            return
+        }
+        await dispatchSequence(actions)
+    }
+
+    /// The Start press, refused with ``startAnswer``'s reason the same way.
+    public func pressStart() async {
+        if refusePress(startAnswer, errorMessage: &errorMessage) { return }
+        await dispatch(.start)
+    }
+
+    /// The profile prefill press, refused with ``profilePrefillAnswer``'s
+    /// reason — a second tap never re-publishes the profile.
+    public func pressApplyProfile() async {
+        if refusePress(profilePrefillAnswer, errorMessage: &errorMessage) { return }
+        await dispatch(.applyArchiveProfile)
+    }
     /// Set when the glue refused to build the machine (a bearer-only session
     /// holds no identity key to sign the imported posts with): the page states
     /// it and offers no wizard that could not commit (the tui UNAVAILABLE shape).

@@ -4,11 +4,20 @@ import { joinChunk } from './chunk-join';
 import type { LabelerCatalogMachine } from '../../static/fauna_wasm_labeler_catalog.js';
 import { hexToBytes } from './hex';
 import { sharedAccountPort } from './account-runtime';
+import type { Possibility } from './form-gate';
 
 // Re-export so route/component files consume the machine type via
 // `#lib/wasm-labeler-catalog` rather than a fragile relative path into
 // `static/` (mirrors `wasm-media.ts` / `wasm-folders.ts`).
 export type { LabelerCatalogMachine };
+
+/** The catalog row at `index`'s subscribe answer, with its reason — the shared
+ *  `LabelerCatalogMachine::subscribe_possibility` (blocked with the refusal's
+ *  reason once this row's inspect failed; `docs/goal/ui/settings.md` § Errors &
+ *  edge cases). */
+export function subscribePossibility(machine: LabelerCatalogMachine, index: number): Possibility {
+  return JSON.parse(machine.subscribePossibilityJson(index)) as Possibility;
+}
 
 // Loader for the page-level community-labeler-catalog WASM chunk
 // (`libs/fauna-wasm-labeler-catalog`: the `LabelerCatalogMachine` — browse /

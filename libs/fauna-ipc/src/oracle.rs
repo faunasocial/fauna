@@ -373,6 +373,11 @@ pub enum OracleRefusal {
     /// The custodian is not serving the account right now (signed out, or the
     /// conversations engine is held elsewhere).
     NotServing,
+    /// The custodian has not read its rooms yet (its first receive sweep has
+    /// not returned), so it cannot tell an empty list from an unread one: a
+    /// listing is refused rather than answered empty (`apps/cli.md` § A tool
+    /// that cannot run, rule 4). Retrying shortly succeeds.
+    NotLoaded,
 }
 
 impl std::fmt::Display for OracleRefusal {
@@ -400,6 +405,10 @@ impl std::fmt::Display for OracleRefusal {
             OracleRefusal::NotServing => {
                 f.write_str("the Fauna app on this device is not serving this account right now")
             }
+            OracleRefusal::NotLoaded => f.write_str(
+                "the Fauna app on this device has not finished loading your conversations yet; \
+                 try again in a moment",
+            ),
         }
     }
 }
@@ -449,7 +458,7 @@ use std::future::Future;
 /// stream so the unix socket and the windows pipe share it.
 pub async fn serve_connection<S, D>(stream: S, door: std::sync::Arc<D>) -> io::Result<()>
 where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     D: OracleDoor,
 {
     use tokio::io::AsyncWriteExt;
@@ -481,30 +490,37 @@ where
         return Ok(());
     }
     writer.write_all(&frame(&Admission::Admitted)?).await?;
-    let principal = pending.principal;
+    let principal = std::sync::Arc::new(pending.principal);
 
-    loop {
-        let payload = match crate::frame_io::read_frame(&mut reader).await {
-            Ok(payload) => payload,
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
-            Err(e) => return Err(e),
-        };
-        let response = match crate::decode_payload::<OracleRequest>(&payload) {
-            Ok(req) => OracleResponse {
-                id: req.id,
-                result: door.perform(&principal, req.op).await,
-            },
-            // A request this build cannot read is refused by its id and the
-            // connection keeps serving (`transport.md` § Rule 3 in full).
-            Err(_) => match crate::decode_frame_id(&payload) {
-                Some(id) => OracleResponse {
-                    id,
-                    result: Err(OracleRefusal::Unsupported),
-                },
-                None => return Ok(()),
-            },
-        };
-        writer.write_all(&frame(&response)?).await?;
+    // The shared serve loop (`frame_io::serve_split`): one copy of the
+    // hang-up logic, so a client that closes while `perform` is pending
+    // releases the connection, and a request this build cannot read is
+    // refused by its id (`transport.md` § Rule 3 in full).
+    crate::frame_io::serve_split::<_, _, OracleRequest, OracleResponse, (), _, _>(
+        reader,
+        writer,
+        move |req: OracleRequest| {
+            let door = std::sync::Arc::clone(&door);
+            let principal = std::sync::Arc::clone(&principal);
+            async move {
+                OracleResponse {
+                    id: req.id,
+                    result: door.perform(&principal, req.op).await,
+                }
+            }
+        },
+        None,
+    )
+    .await;
+    Ok(())
+}
+
+impl crate::RefuseUndecodedRequest for OracleResponse {
+    fn refuse_undecoded_request(id: u64) -> Self {
+        OracleResponse {
+            id,
+            result: Err(OracleRefusal::Unsupported),
+        }
     }
 }
 
@@ -968,6 +984,64 @@ mod tests {
         let (tx, rx) = tokio::sync::watch::channel(false);
         let server = tokio::spawn(listener.serve(std::sync::Arc::new(Door), rx));
         (tx, server)
+    }
+
+    /// A door whose `perform` never answers: the admitted request wedges.
+    struct WedgedDoor(Door);
+    impl OracleDoor for WedgedDoor {
+        type Principal = Vec<u8>;
+        fn challenge<'a>(&'a self, hello: &'a Hello) -> DoorFuture<'a, ChallengeOutcome<Vec<u8>>> {
+            self.0.challenge(hello)
+        }
+        fn perform<'a>(
+            &'a self,
+            _principal: &'a Vec<u8>,
+            _op: OracleOp,
+        ) -> DoorFuture<'a, Result<OracleReply, OracleRefusal>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// A client that hangs up while its request is still pending releases
+    /// the connection: the served future ends, though `perform` never
+    /// returns (`sync-agent.md` § the local IPC seam — a connection's life
+    /// ends when its client closes it).
+    #[tokio::test]
+    async fn a_client_hanging_up_mid_perform_releases_the_connection() {
+        use tokio::io::AsyncWriteExt;
+        let (client, server_end) = tokio::io::duplex(64 * 1024);
+        let served = tokio::spawn(serve_connection(
+            server_end,
+            std::sync::Arc::new(WedgedDoor(Door)),
+        ));
+        let (mut reader, mut writer) = tokio::io::split(client);
+        let hello = Hello {
+            version: ORACLE_PROTOCOL_VERSION,
+            principal_id: b"p1".to_vec(),
+            actor_id: ACTOR.to_vec(),
+        };
+        writer.write_all(&frame(&hello).unwrap()).await.unwrap();
+        let _challenge: Challenge = read_typed(&mut reader).await.unwrap();
+        let proof = Proof {
+            nonce: vec![7u8; ORACLE_NONCE_LEN],
+        };
+        writer.write_all(&frame(&proof).unwrap()).await.unwrap();
+        let admission: Admission = read_typed(&mut reader).await.unwrap();
+        assert_eq!(admission, Admission::Admitted);
+        let request = OracleRequest {
+            id: 1,
+            op: OracleOp::ListRooms,
+        };
+        writer.write_all(&frame(&request).unwrap()).await.unwrap();
+        // Let the door take the request, then hang up.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        drop(writer);
+        drop(reader);
+        tokio::time::timeout(std::time::Duration::from_secs(5), served)
+            .await
+            .expect("the connection is released once its client has gone")
+            .expect("the serve task does not panic")
+            .expect("a hang-up is a clean end");
     }
 
     /// The door end to end over the platform's real transport — a unix

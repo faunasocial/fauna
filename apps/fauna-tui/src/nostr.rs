@@ -62,7 +62,8 @@ use fauna_client::NestClient;
 use fauna_client_bridges::{
     BridgesClient, NOSTR_LINK_MODE_GENERATE as MODE_GENERATE,
     NOSTR_LINK_MODE_IMPORT as MODE_IMPORT, NOSTR_LINK_MODE_REMOTE as MODE_REMOTE,
-    NOSTR_LINK_MODES as LINK_MODES, RELAY_LIST_KEY, bool_setting, nostr_content_toggle_options,
+    NOSTR_LINK_MODES as LINK_MODES, RELAY_LIST_KEY, add_follow_possibility, bool_setting,
+    connected_apps_possibility, link_possibility, nostr_content_toggle_options,
     nostr_key_source_label, nostr_link_mode_label, relay_list_setting,
 };
 use fauna_client_nostr::NostrBunkerClient;
@@ -150,8 +151,8 @@ pub struct NostrState {
     pub zap_signer_label_input: String,
     /// The Dim-3 courtesy read (`fauna_client_features`) — whether the `zaps`
     /// plane's policy currently admits a *designation*. `None` until the first
-    /// load resolves; see [`designate_gate`] for why an un-hydrated read leaves
-    /// the button live.
+    /// load resolves; see [`designate_gate`] for why an un-hydrated read keeps
+    /// the button blocked.
     #[cfg(feature = "zaps")]
     pub features: Option<Vec<fauna_client_features::FeatureRow>>,
     /// Whether the successor is owed an npub confirmation right now
@@ -198,14 +199,6 @@ impl NostrState {
     /// The stored `signing_mode` the bridge reports, if any.
     pub fn signing_mode(&self) -> Option<&str> {
         self.status.as_ref()?.mode.as_deref()
-    }
-
-    /// Whether the linked account is **custodial** (`generated`/`imported`) —
-    /// the dimension the NIP-46 *Connected apps* section is gated on: a
-    /// `remote`/`nip07` account has no key on the box to sign with, so the
-    /// bunker role is never offered (`nostr.md:50`).
-    pub fn custodial(&self) -> bool {
-        matches!(self.signing_mode(), Some("generated") | Some("imported"))
     }
 
     /// The npub for the pubkey row — it rides `identity.value` on the generic
@@ -456,17 +449,18 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         Action::Link => {
             let nest = st.nest.clone()?;
             let mode = st.effective_link_mode().to_string();
+            // The same shared predicate the Link button is painted from
+            // (`link_elements`), so the submit can never accept what the page
+            // showed as blocked — and refuses with the reason it painted.
+            if app.errors.refuse(
+                Page::Nostr,
+                &link_possibility(&mode, &st.nsec_input, &st.bunker_url_input),
+            ) {
+                return None;
+            }
             let mut params = BTreeMap::new();
             if mode == MODE_IMPORT {
                 let nsec = st.nsec_input.trim().to_string();
-                if nsec.is_empty() {
-                    // A client-glue validation failure — written straight to
-                    // `App::errors`, the page-module contract's rule for an
-                    // error shared Rust never saw.
-                    app.errors
-                        .insert(Page::Nostr, t::link_account::ENTER_NSEC.to_string());
-                    return None;
-                }
                 params.insert("nsec".to_string(), WireValue::String(nsec));
             } else if mode == MODE_REMOTE {
                 params.insert(
@@ -500,27 +494,20 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         }),
         Action::AddRelay => {
             let nest = st.nest.clone()?;
-            // Shared trim/empty rule (matches web/apple/android/linux's
-            // silent no-op on a blank submit — tui and windows previously
-            // fell through unfiltered to the invalid-url error below).
-            let url = fauna_protocol::nostr_relay::trimmed_relay_input(&st.relay_input)?;
-            // The ONE shared predicate and its message — never a hand-rolled
-            // prefix check (`nostr.md` § Where logic lives; lifted 2026-07-19
-            // after four apps each grew their own copy). It refuses a
-            // malformed URL and, per F7, a private-network relay.
-            if let Some(err) = fauna_protocol::nostr_relay::relay_url_error(&url) {
-                app.errors
-                    .insert(Page::Nostr, crate::wizard::localized(&err));
+            let relays = st.relays();
+            // The ONE shared predicate the Add button is painted from: blank,
+            // malformed or private-network (F7), and duplicate each refuse
+            // with their own reason — never a silent drop (`nostr.md`
+            // § Errors & edge cases; `ui/README.md` § Offer only what is
+            // possible, rule 4's form case).
+            if app.errors.refuse(
+                Page::Nostr,
+                &fauna_protocol::nostr_relay::add_relay_possibility(&relays, &st.relay_input),
+            ) {
                 return None;
             }
-            let relays = st.relays();
-            // Shared dedup-then-append rule — every app's identical silent
-            // no-op on an exact-string duplicate (`nostr_relay.rs`).
-            let Some(relays) = fauna_protocol::nostr_relay::relay_list_appending(&relays, &url)
-            else {
-                st.relay_input.clear();
-                return None;
-            };
+            let url = fauna_protocol::nostr_relay::trimmed_relay_input(&st.relay_input)?;
+            let relays = fauna_protocol::nostr_relay::relay_list_appending(&relays, &url)?;
             st.relay_input.clear();
             app.errors.remove(&Page::Nostr);
             Some(Op::SetSettings {
@@ -544,16 +531,20 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         }
         Action::AddFollow => {
             let nest = st.nest.clone()?;
-            let id = st.follow_pubkey_input.trim().to_string();
-            if id.is_empty() {
+            if app.errors.refuse(
+                Page::Nostr,
+                &add_follow_possibility(&st.follow_pubkey_input),
+            ) {
                 return None;
             }
+            let id = st.follow_pubkey_input.trim().to_string();
             let petname = {
                 let p = st.follow_petname_input.trim();
                 (!p.is_empty()).then(|| p.to_string())
             };
             st.follow_pubkey_input.clear();
             st.follow_petname_input.clear();
+            app.errors.remove(&Page::Nostr);
             Some(Op::AddFollow {
                 nest,
                 queue: crate::bridges::offline_queue(&app.account_outbox),
@@ -579,15 +570,13 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         }
         #[cfg(feature = "zaps")]
         Action::AddZapSigner => {
-            let pubkey = st.zap_signer_pubkey_input.trim().to_string();
-            // Client-glue validation, written straight to `App::errors` like the
-            // relay check above: the nest refuses a non-64-hex key anyway, so
-            // this only spares a guaranteed round trip and names the rule.
-            if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
-                app.errors
-                    .insert(Page::Nostr, t::zap_signers::INVALID_PUBKEY.to_string());
+            // The answer the Designate button is painted from — the plane's
+            // gate and the shared draft predicate: the nest refuses either
+            // anyway, so this spares a guaranteed round trip and names the rule.
+            if app.errors.refuse(Page::Nostr, &zap_signer_add_answer(st)) {
                 return None;
             }
+            let pubkey = st.zap_signer_pubkey_input.trim().to_string();
             // Deliberately NOT blocked as a duplicate, unlike the relay list
             // above: `fauna.nostr.zap_signers.add` is idempotent and a re-add
             // REFRESHES the label, so re-entering a designated key is the only
@@ -950,9 +939,9 @@ async fn refresh(nest: Arc<NestClient>, read_gen: u64) -> Outcome {
     // account has no key on the box to sign with, so the nest offers it no
     // bunker role (`nostr.md:50`). Asking anyway would turn a correct refusal
     // into a page error.
-    let custodial_linked = status.as_ref().is_some_and(|s| {
-        s.linked && matches!(s.mode.as_deref(), Some("generated") | Some("imported"))
-    });
+    let custodial_linked = status
+        .as_ref()
+        .is_some_and(|s| s.linked && connected_apps_possibility(s.mode.as_deref()).is_shown());
     let bunker_apps = if custodial_linked {
         match NostrBunkerClient::new(Arc::clone(&nest)).list().await {
             Ok(apps) => apps,
@@ -1183,12 +1172,19 @@ fn link_form_elements(st: &NostrState, out: &mut Vec<Element>) {
             .labelled(t::account::SIGNING_MODE),
         );
     }
-    out.push(Element::gesture_button(
-        ids::NOSTR_LINK_BUTTON,
-        t::link_account::LINK_BUTTON,
-        true,
-        Gesture::Nostr(Action::Link),
-    ));
+    out.push(
+        Element::gesture_button(
+            ids::NOSTR_LINK_BUTTON,
+            t::link_account::LINK_BUTTON,
+            true,
+            Gesture::Nostr(Action::Link),
+        )
+        .possible(link_possibility(
+            st.effective_link_mode(),
+            &st.nsec_input,
+            &st.bunker_url_input,
+        )),
+    );
 }
 
 /// The linked surface: account rows, the 5 content flags, relays, follows.
@@ -1301,12 +1297,18 @@ fn linked_elements(st: &NostrState, out: &mut Vec<Element>) {
         )
         .labelled(t::relays::PLACEHOLDER),
     );
-    out.push(Element::gesture_button(
-        ids::NOSTR_ADD_RELAY,
-        t::relays::ADD,
-        true,
-        Gesture::Nostr(Action::AddRelay),
-    ));
+    out.push(
+        Element::gesture_button(
+            ids::NOSTR_ADD_RELAY,
+            t::relays::ADD,
+            true,
+            Gesture::Nostr(Action::AddRelay),
+        )
+        .possible(fauna_protocol::nostr_relay::add_relay_possibility(
+            &st.relays(),
+            &st.relay_input,
+        )),
+    );
 
     // ── Follows ──
     out.push(Element::chrome(t::follows::TITLE));
@@ -1338,19 +1340,22 @@ fn linked_elements(st: &NostrState, out: &mut Vec<Element>) {
         )
         .labelled(t::follows::PETNAME_PLACEHOLDER),
     );
-    out.push(Element::gesture_button(
-        ids::NOSTR_ADD_FOLLOW,
-        t::follows::ADD,
-        true,
-        Gesture::Nostr(Action::AddFollow),
-    ));
+    out.push(
+        Element::gesture_button(
+            ids::NOSTR_ADD_FOLLOW,
+            t::follows::ADD,
+            true,
+            Gesture::Nostr(Action::AddFollow),
+        )
+        .possible(add_follow_possibility(&st.follow_pubkey_input)),
+    );
 
     // ── Connected apps (NIP-46 bunker) ──
     //
     // Custodial-only: a `remote`/`nip07` account keeps its key outside the box,
     // so there is nothing here for the nest to sign with and the section is not
     // offered at all (`nostr.md:50`).
-    if st.custodial() {
+    if connected_apps_possibility(st.signing_mode()).is_shown() {
         connected_apps_elements(st, out);
     }
 
@@ -1432,19 +1437,27 @@ fn zap_signers_elements(st: &NostrState, out: &mut Vec<Element>) {
     // this call with a typed `fauna.features.denied` / `.over_quota` when the
     // plane says no — so offering a live button guaranteed to fail is exactly
     // the "letting the user hit refusals" the courtesy layer exists to prevent.
-    // The `subscription-claim-redeem-button` precedent, one plane over.
-    let gate = designate_gate(st);
-    out.push(Element::gesture_button(
-        ids::NOSTR_ZAP_SIGNER_ADD_BTN,
-        t::zap_signers::ADD,
-        gate.is_none(),
-        Gesture::Nostr(Action::AddZapSigner),
-    ));
-    // Rule 5 — a disabled control states its reason within eyeshot, and the
-    // reason is the honest why-line the shared crate already composed.
-    if let Some(reason) = gate {
-        out.push(Element::chrome(reason));
-    }
+    // The `subscription-claim-redeem-button` precedent, one plane over. The
+    // element seam paints the reason as the button's own label.
+    out.push(
+        Element::gesture_button(
+            ids::NOSTR_ZAP_SIGNER_ADD_BTN,
+            t::zap_signers::ADD,
+            true,
+            Gesture::Nostr(Action::AddZapSigner),
+        )
+        .possible(zap_signer_add_answer(st)),
+    );
+}
+
+/// `nostr-zap-signer-add-btn`'s whole answer, the one the button is painted
+/// from and [`apply_local`] asks again: the plane's gate first (it is the
+/// person's account, not the draft, that can say no), then the draft.
+#[cfg(feature = "zaps")]
+fn zap_signer_add_answer(st: &NostrState) -> fauna_core::possibility::Possibility {
+    designate_gate(st).and(fauna_client_bridges::zap_signer_add_possibility(
+        &st.zap_signer_pubkey_input,
+    ))
 }
 
 /// A roster row's text: the user's label (or a placeholder) and the signer's
@@ -1453,7 +1466,8 @@ fn zap_signers_elements(st: &NostrState, out: &mut Vec<Element>) {
 #[cfg(feature = "zaps")]
 pub use fauna_client_nostr::zap_signer_row_text;
 
-/// Why `nostr-zap-signer-add-btn` is dead, or `None` when it works.
+/// Whether the `zaps` plane admits a designation now — the shared
+/// `fauna_client_features::gate_possibility` over this page's courtesy read.
 ///
 /// `zaps` is the member that gates designation. Three shapes are load-bearing:
 ///
@@ -1463,20 +1477,19 @@ pub use fauna_client_nostr::zap_signer_row_text;
 ///   surfaces — and for the newness-delta rule. A page composing its own meet
 ///   would report `zaps` available under a `payments` deny the nest refuses,
 ///   which is a silent gate wearing the opposite costume.
-/// * **A `hidden` affordance still disables rather than vanishing.** `zaps` has
-///   no capability token today (absence proves nothing about a plane the nest
-///   does not advertise), so this arm is unreachable in practice — but if it is
-///   ever reached, a button that silently disappears is the silent gate
-///   boundary 4 forbids. The *excision* story is the orthogonal COMPILE-TIME
-///   axis: this crate's `zaps` feature makes the whole section absent from the
-///   artifact, where this one only greys the button in a build that HAS it.
-/// * **An un-hydrated read leaves the button LIVE.** Nothing is painted while
-///   the courtesy read is missing: the nest, not the app, is the enforcement
-///   floor, and a settled refusal with no basis is worse than a blank.
+/// * **A `hidden` affordance is absent** (`docs/goal/ui/README.md` § Offer
+///   only what is possible, rule 2: a feature the nest does not have is not
+///   shown). `zaps` has no capability token today, so this arm is unreachable
+///   in practice. The *excision* story is the orthogonal COMPILE-TIME axis:
+///   this crate's `zaps` feature makes the whole section absent from the
+///   artifact.
+/// * **An un-hydrated read is blocked, still loading** (rule 5: unknown is not
+///   possible). The button is never offered on a guess; the read lands with
+///   the page's own load (`Outcome::Loaded`).
 #[cfg(feature = "zaps")]
-fn designate_gate(st: &NostrState) -> Option<String> {
-    fauna_client_features::gate_reason(
-        st.features.as_deref().unwrap_or(&[]),
+fn designate_gate(st: &NostrState) -> fauna_core::possibility::Possibility {
+    fauna_client_features::gate_possibility(
+        st.features.as_deref(),
         "zaps",
         fauna_i18n::strings::lookup,
     )
@@ -1909,6 +1922,97 @@ mod tests {
         assert!(!app.errors.contains_key(&Page::Nostr));
     }
 
+    /// Blank and duplicate relays are never dropped silently
+    /// (`ui/README.md` § Offer only what is possible, rules 4 and 7): the Add
+    /// button is disabled with the shared reason, and a submit anyway names it
+    /// on `error-message`.
+    #[test]
+    fn blank_and_duplicate_relays_are_blocked_with_their_reason() {
+        let mut app = nostr_app();
+        app.nostr.registered = true;
+        app.nostr.status = Some(status(
+            true,
+            Some("generated"),
+            vec![setting(
+                RELAY_LIST_KEY,
+                WireValue::String(r#"["wss://a.example"]"#.to_string()),
+            )],
+        ));
+        app.nostr.nest = Some(fauna_client::NestClient::new(
+            "http://127.0.0.1:9".to_string(),
+            fauna_core::identity::ActorKeypair::from_secret([4u8; 32]),
+        ));
+        let add = |app: &App| {
+            app.page_elements()
+                .into_iter()
+                .find(|e| e.id == "nostr-add-relay")
+                .unwrap()
+        };
+        for (input, reason) in [
+            ("  ", t::relays::URL_REQUIRED),
+            ("wss://a.example", t::relays::ALREADY_ADDED),
+        ] {
+            app.nostr.relay_input = input.to_string();
+            let button = add(&app);
+            assert!(!button.enabled, "{input:?}");
+            assert_eq!(button.label.as_deref(), Some(reason), "{input:?}");
+            assert!(apply_local(&mut app, Action::AddRelay).is_none());
+            assert_eq!(
+                app.errors.get(&Page::Nostr).map(String::as_str),
+                Some(reason)
+            );
+        }
+        app.nostr.relay_input = "wss://b.example".to_string();
+        assert!(add(&app).enabled);
+    }
+
+    /// Link and follow paint their submits from the shared predicates: import
+    /// with no nsec, remote with no bunker URL and a follow with no pubkey are
+    /// disabled with their reasons, and refuse with them.
+    #[test]
+    fn link_and_follow_need_their_fields() {
+        let mut app = nostr_app();
+        app.nostr.registered = true;
+        app.nostr.status = Some(status(false, None, vec![]));
+        app.connection = fauna_ws_substrate::supervisor::ConnectionState::Connected;
+        app.nostr.nest = Some(fauna_client::NestClient::new(
+            "http://127.0.0.1:9".to_string(),
+            fauna_core::identity::ActorKeypair::from_secret([4u8; 32]),
+        ));
+        let find = |app: &App, id: &str| {
+            app.page_elements()
+                .into_iter()
+                .find(|e| e.id == id)
+                .unwrap()
+        };
+        for (mode, reason) in [
+            (MODE_IMPORT, t::link_account::ENTER_NSEC),
+            (MODE_REMOTE, t::link_account::ENTER_BUNKER_URL),
+        ] {
+            app.nostr.link_mode = mode.to_string();
+            let button = find(&app, "nostr-link-button");
+            assert!(!button.enabled, "{mode}");
+            assert_eq!(button.label.as_deref(), Some(reason), "{mode}");
+            assert!(apply_local(&mut app, Action::Link).is_none());
+            assert_eq!(
+                app.errors.get(&Page::Nostr).map(String::as_str),
+                Some(reason)
+            );
+        }
+        app.nostr.link_mode = MODE_GENERATE.to_string();
+        assert!(find(&app, "nostr-link-button").enabled);
+
+        app.nostr.status = Some(status(true, Some("generated"), vec![]));
+        let button = find(&app, "nostr-add-follow");
+        assert!(!button.enabled);
+        assert_eq!(button.label.as_deref(), Some(t::follows::PUBKEY_REQUIRED));
+        assert!(apply_local(&mut app, Action::AddFollow).is_none());
+        assert_eq!(
+            app.errors.get(&Page::Nostr).map(String::as_str),
+            Some(t::follows::PUBKEY_REQUIRED)
+        );
+    }
+
     /// Relay rows are flat-indexed and each remove carries its own index, so
     /// `click("nostr-remove-relay", index=i)` drops row `i`.
     #[test]
@@ -2248,22 +2352,6 @@ mod tests {
         }
     }
 
-    /// The custodial dimension the NIP-46 *Connected apps* section is gated on:
-    /// a `remote` (bunker) account has no key on the box to sign with.
-    #[test]
-    fn custodial_is_true_only_for_the_two_key_holding_modes() {
-        let mut app = nostr_app();
-        for (mode, want) in [
-            ("generated", true),
-            ("imported", true),
-            ("remote", false),
-            ("nip07", false),
-        ] {
-            app.nostr.status = Some(status(true, Some(mode), vec![]));
-            assert_eq!(app.nostr.custodial(), want, "custodial({mode})");
-        }
-    }
-
     // ── Zap signers (the NIP-57 trust root) ──────────────────────────────────
 
     #[cfg(feature = "zaps")]
@@ -2302,6 +2390,12 @@ mod tests {
             "http://127.0.0.1:9".to_string(),
             fauna_core::identity::ActorKeypair::from_secret([3u8; 32]),
         ));
+        // A linked load reads the features courtesy row with the roster: a
+        // bounded, unspent `zaps` plane unless a test says otherwise.
+        #[cfg(feature = "zaps")]
+        {
+            app.nostr.features = Some(vec![zaps_row(&[])]);
+        }
         app
     }
 
@@ -2462,16 +2556,24 @@ mod tests {
             denied_policy(),
         )])]);
         app.nostr.zap_signers = vec![zap_entry(&"ab".repeat(32), "Alby")];
-        let els = elements(&app);
+        app.connection = fauna_ws_substrate::supervisor::ConnectionState::Connected;
+        app.nostr.zap_signer_pubkey_input = "cd".repeat(32);
+        let els = app.page_elements();
         let add = els
             .iter()
             .find(|e| e.id == ids::NOSTR_ZAP_SIGNER_ADD_BTN)
-            .expect("the designate button always registers");
+            .expect("the designate button registers while the plane is present");
         assert!(!add.enabled, "a guaranteed refusal must not look live");
-        assert!(
-            els.iter()
-                .any(|e| e.text == "Turned off by your nest admin."),
-            "rule 5: the disabled control states its reason within eyeshot"
+        assert_eq!(
+            add.label.as_deref(),
+            Some("Turned off by your nest admin."),
+            "rule 2: the disabled control states its reason within eyeshot"
+        );
+        // The action asks the same answer and refuses with the same reason.
+        assert!(apply_local(&mut app, Action::AddZapSigner).is_none());
+        assert_eq!(
+            app.errors.get(&Page::Nostr).map(String::as_str),
+            Some("Turned off by your nest admin.")
         );
         // Removal is de-escalation and is never gated: a tier that can only
         // tighten must not trap a user in a roster they cannot undo.
@@ -2485,31 +2587,39 @@ mod tests {
         );
     }
 
-    /// An un-hydrated courtesy read leaves the button LIVE: the nest, not the
-    /// app, is the enforcement floor, and a settled refusal with no basis is
-    /// worse than a blank. Same for a merely BOUNDED plane.
+    /// Unknown is not possible (`ui/README.md` § Offer only what is possible,
+    /// rule 5): before the courtesy read answers, designate is blocked with
+    /// the still-loading reason, never offered on a guess. A merely BOUNDED
+    /// plane stays actionable, and a loaded read naming no `zaps` row means
+    /// the nest does not have the plane, so the button is absent (rule 2).
     #[cfg(feature = "zaps")]
     #[test]
-    fn an_unhydrated_or_merely_bounded_read_leaves_designate_live() {
+    fn designate_waits_for_the_read_and_is_absent_without_the_plane() {
         let mut app = linked_zap_app("generated");
+        app.connection = fauna_ws_substrate::supervisor::ConnectionState::Connected;
+        app.nostr.zap_signer_pubkey_input = "cd".repeat(32);
+        let add = |app: &App| {
+            app.page_elements()
+                .into_iter()
+                .find(|e| e.id == ids::NOSTR_ZAP_SIGNER_ADD_BTN)
+        };
         app.nostr.features = None;
-        let els = elements(&app);
-        let add = els
-            .iter()
-            .find(|e| e.id == ids::NOSTR_ZAP_SIGNER_ADD_BTN)
-            .expect("the designate button always registers");
-        assert!(add.enabled, "an un-hydrated read must not settle a refusal");
+        let button = add(&app).expect("blocked, not absent, while loading");
+        assert!(!button.enabled, "an un-hydrated read must not offer it");
+        assert_eq!(
+            button.label.as_deref(),
+            Some(fauna_i18n::strings::common::STILL_LOADING)
+        );
+        assert!(apply_local(&mut app, Action::AddZapSigner).is_none());
 
         app.nostr.features = Some(vec![zaps_row(&[])]);
-        let els = elements(&app);
-        let add = els
-            .iter()
-            .find(|e| e.id == ids::NOSTR_ZAP_SIGNER_ADD_BTN)
-            .unwrap();
         assert!(
-            add.enabled,
+            add(&app).unwrap().enabled,
             "a bounded-but-unspent plane must stay actionable"
         );
+
+        app.nostr.features = Some(Vec::new());
+        assert!(add(&app).is_none(), "no zaps row: the nest has no plane");
     }
 
     /// The offline gate's input — a new gesture must answer the wire question.

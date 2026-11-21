@@ -146,12 +146,11 @@ struct BackupSplitView: View {
                     Image(systemName: "plus")
                 }
                 .help(L.backups.createSnapshot)
-                .disabled(vm.mutationsDisabled)
                 .accessibilityIdentifier(Ids.snapshotCreateButton)
-                .automationActivate(Ids.snapshotCreateButton,
-                                    isEnabled: { !vm.mutationsDisabled }) {
+                .automationActivate(Ids.snapshotCreateButton) {
                     Task { await vm.createSnapshot() }
                 }
+                .faunaPossible(vm.setActionPossibility)
 
                 // The tagged button RUNS the check (§ Snapshot-list shape, *Check*
                 // ruling) — it no longer opens a sheet whose own untagged button
@@ -163,12 +162,11 @@ struct BackupSplitView: View {
                     Image(systemName: "checkmark.shield")
                 }
                 .help(L.backups.checkButton)
-                .disabled(vm.mutationsDisabled)
                 .accessibilityIdentifier(Ids.snapshotCheckButton)
-                .automationActivate(Ids.snapshotCheckButton,
-                                    isEnabled: { !vm.mutationsDisabled }) {
+                .automationActivate(Ids.snapshotCheckButton) {
                     Task { await vm.check() }
                 }
+                .faunaPossible(vm.setActionPossibility)
 
                 // Prune = apply this set's OWN resting retention policy, preview
                 // first (§ Snapshot-list shape, *Prune* ruling). The button starts
@@ -179,12 +177,11 @@ struct BackupSplitView: View {
                     Image(systemName: "scissors")
                 }
                 .help(L.backups.pruneButton)
-                .disabled(vm.mutationsDisabled)
                 .accessibilityIdentifier(Ids.snapshotPruneButton)
-                .automationActivate(Ids.snapshotPruneButton,
-                                    isEnabled: { !vm.mutationsDisabled }) {
+                .automationActivate(Ids.snapshotPruneButton) {
                     Task { await vm.prunePreview() }
                 }
+                .faunaPossible(vm.setActionPossibility)
                 // Preview and execute are one kind with a `dry_run` flag, and
                 // it is `OnlineOnly` for the honest reason that a dry run with
                 // no nest would have nothing to dry-run. Create/delete/undelete
@@ -212,6 +209,10 @@ struct BackupSplitView: View {
                     Text(busyOpText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                } else {
+                    // Idle: the set actions' own reason (no folder selected,
+                    // or none made yet — and where to make one).
+                    FaunaPossibilityReason(vm.setActionPossibility)
                 }
             }
             .padding(.horizontal)

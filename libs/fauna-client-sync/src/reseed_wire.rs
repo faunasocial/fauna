@@ -71,6 +71,15 @@ pub fn state_from_driver(outcome: Result<ReseedOutcome, ReseedError>) -> Custodi
                         CustodianReseedSetOutcome::Materialized { segments, records }
                     }
                     SetOutcome::AlreadyLive => CustodianReseedSetOutcome::AlreadyLive,
+                    SetOutcome::Recovered {
+                        records,
+                        unplaceable,
+                        duties_unfinished,
+                    } => CustodianReseedSetOutcome::Recovered {
+                        records,
+                        unplaceable,
+                        duties_unfinished,
+                    },
                     SetOutcome::Refused { refusal, detail } => CustodianReseedSetOutcome::Refused {
                         code: refusal.code().to_string(),
                         detail,
@@ -125,6 +134,15 @@ pub fn job_from_state(state: CustodianReseedState) -> ReseedJob {
                     SetOutcome::Materialized { segments, records }
                 }
                 CustodianReseedSetOutcome::AlreadyLive => SetOutcome::AlreadyLive,
+                CustodianReseedSetOutcome::Recovered {
+                    records,
+                    unplaceable,
+                    duties_unfinished,
+                } => SetOutcome::Recovered {
+                    records,
+                    unplaceable,
+                    duties_unfinished,
+                },
                 CustodianReseedSetOutcome::Refused { code, detail } => SetOutcome::Refused {
                     refusal: SetRefusal::from_code(&code),
                     detail,
@@ -478,9 +496,10 @@ mod tests {
         let mut photos = set("__folder/ab/cd", SetAxis::Folder);
         photos.folder_display_name = Some("Photos".into());
         let unnamed = set("__folder/ab/ef", SetAxis::Folder);
+        let card = set("__card", SetAxis::Segment);
         let outcome = ReseedOutcome {
             delivered: DeliveredCorpus {
-                sets: vec![mail.clone(), photos.clone(), unnamed.clone()],
+                sets: vec![mail.clone(), photos.clone(), unnamed.clone(), card.clone()],
                 sidecarless_segments: vec![3],
                 folder_paths_without_seal: vec!["p".into()],
                 plaintext_bytes: 42,
@@ -505,12 +524,25 @@ mod tests {
                         detail: "no name".into(),
                     },
                 },
+                // A lived-in set completed by record (rule (1)).
+                SetResult {
+                    set: card,
+                    outcome: SetOutcome::Recovered {
+                        records: 4,
+                        unplaceable: 1,
+                        duties_unfinished: Some("busy".into()),
+                    },
+                },
             ],
         };
         assert_eq!(
             job_from_state(state_from_driver(Ok(outcome.clone()))),
-            ReseedJob::Finished(outcome)
+            ReseedJob::Finished(outcome.clone())
         );
+        // And through the real frame, as the agent's reply travels.
+        let frame = fauna_ipc::encode_frame(&state_from_driver(Ok(outcome.clone()))).unwrap();
+        let decoded: CustodianReseedState = fauna_ipc::decode_payload(&frame[4..]).unwrap();
+        assert_eq!(job_from_state(decoded), ReseedJob::Finished(outcome));
     }
 
     /// A value of `T` a newer agent wrote: a variant this build does not name,

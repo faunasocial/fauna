@@ -18,7 +18,15 @@
   // ui.yaml `admin-bridges-pending` page + `admin-bridges-pending-card` component.
   import { identity } from '#lib/store';
   import { bridgeApprovalMachine } from '#lib/rpc';
-  import { ensureWasm, bridgeDisplayName } from '#lib/wasm';
+  import { ensureWasm, bridgeDisplayName, readPossibility } from '#lib/wasm';
+  import { formGate } from '#lib/form-gate';
+  import {
+    beginConfirmPress,
+    listReadReason,
+    reasonAttr,
+    type Possibility,
+    type ReadWord,
+  } from '#lib/admin-read-gate';
   import { resolveLocalized } from '#lib/i18n/localized';
   import { localTimestamp } from '#lib/value-format';
   import { onMount } from 'svelte';
@@ -66,8 +74,33 @@
 
   const busy = $derived(snap?.status === 'Working');
 
+  // Where the pending / approved list read stands —
+  // `BridgeApprovalMachine::read_state` (admin.md § Errors & edge cases,
+  // *Controls wait for their read*): until it resolves, each section says it
+  // is loading (or that the read failed) — the line under its heading and
+  // the heading's `reason` attr — and only then shows its empty text.
+  let listRead = $state<ReadWord>('pending');
+  const listReason = $derived(listReadReason(readPossibility, listRead));
+  // The open reject / rotate confirm's answer —
+  // `BridgeApprovalMachine::confirm_possibility`: blocked still saving while
+  // its act is on its way, so a second press is refused with that reason.
+  let confirmAnswer = $state<Possibility | null>(null);
+  const confirmGate = $derived(formGate(confirmAnswer));
+
+  function repaint(): void {
+    const m = machine;
+    if (!m) return;
+    listRead = m.readState() as ReadWord;
+    try {
+      confirmAnswer = m.confirmPossibility() as Possibility;
+    } catch {
+      confirmAnswer = null;
+    }
+  }
+
   function applySnapshot(): void {
     if (!machine) return;
+    repaint();
     snap = machine.snapshot() as unknown as BridgeApprovalSnapshot;
     if (snap?.error) error = snap.error;
   }
@@ -99,6 +132,7 @@
       await machine.hydrate();
       applySnapshot();
     } catch (e) {
+      repaint();
       error = e instanceof Error ? e.message : String(e);
     }
   }
@@ -145,7 +179,18 @@
     applySnapshot();
   }
 
+  // The confirm's press: `beginConfirm` marks the armed act in flight in the
+  // click's own frame (the confirm repaints still saving at once); a press it
+  // refuses — a second press while the first is on its way — puts the
+  // confirm's own reason on `error-message`, never the machine's raw
+  // invalid-state error, and dispatches nothing.
   async function confirmArmed(): Promise<void> {
+    const refusal = beginConfirmPress(machine);
+    if (refusal !== null) {
+      if (refusal) error = refusal;
+      return;
+    }
+    applySnapshot();
     await dispatch('Confirm');
   }
 
@@ -166,9 +211,11 @@
 
 <p class="muted small">{t.admin.bridges_pending.description}</p>
 
-<h2 class="section-heading" data-testid={IDS.ADMIN_BRIDGES_PENDING_SECTION}>{t.admin.bridges_pending.pending_section}</h2>
+<h2 class="section-heading" data-testid={IDS.ADMIN_BRIDGES_PENDING_SECTION} data-reason={reasonAttr(listReason)}>{t.admin.bridges_pending.pending_section}</h2>
 <div class="cards">
-  {#if (snap?.pending.length ?? 0) === 0}
+  {#if listReason !== null}
+    <p class="muted small">{listReason}</p>
+  {:else if (snap?.pending.length ?? 0) === 0}
     <p class="muted small">{t.admin.bridges_pending.empty}</p>
   {/if}
   {#each snap?.pending ?? [] as v (v.pubkey_hex)}
@@ -227,7 +274,9 @@
             <button
               class="btn small danger"
               data-testid={IDS.ADMIN_BRIDGES_REJECT_CONFIRM_BUTTON}
-              disabled={busy}
+              disabled={confirmGate.disabled}
+              title={confirmGate.reason}
+              data-reason={reasonAttr(confirmGate)}
               onclick={confirmArmed}
             >
               {t.admin.bridges_reject.confirm}
@@ -239,9 +288,11 @@
   {/each}
 </div>
 
-<h2 class="section-heading" data-testid={IDS.ADMIN_BRIDGES_APPROVED_SECTION}>{t.admin.bridges_pending.approved_section}</h2>
+<h2 class="section-heading" data-testid={IDS.ADMIN_BRIDGES_APPROVED_SECTION} data-reason={reasonAttr(listReason)}>{t.admin.bridges_pending.approved_section}</h2>
 <div class="cards">
-  {#if (snap?.approved.length ?? 0) === 0}
+  {#if listReason !== null}
+    <p class="muted small">{listReason}</p>
+  {:else if (snap?.approved.length ?? 0) === 0}
     <p class="muted small">{t.admin.bridges_pending.approved_empty}</p>
   {/if}
   {#each snap?.approved ?? [] as v (v.pubkey_hex)}
@@ -287,7 +338,9 @@
             <button
               class="btn small danger"
               data-testid={IDS.ADMIN_BRIDGES_ROTATE_CONFIRM_BUTTON}
-              disabled={busy}
+              disabled={confirmGate.disabled}
+              title={confirmGate.reason}
+              data-reason={reasonAttr(confirmGate)}
               onclick={confirmArmed}
             >
               {t.admin.bridges_rotate.confirm}

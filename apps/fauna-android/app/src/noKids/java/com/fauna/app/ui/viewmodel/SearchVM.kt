@@ -56,11 +56,12 @@ class SearchVM @Inject constructor(
     }
 
     /** `search-type-filter` — re-fire the **last fired** query (not any live
-     *  buffer) under a new filter token; a no-op before any search has run. */
+     *  buffer) under a new filter token. Before any search has run the manager
+     *  holds the token for the next search instead of dropping it
+     *  (`search.md` § User actions). */
     fun setTypeFilter(token: String) {
         val m = host.manager() ?: return
         val lastQuery = m.snapshot().query
-        if (lastQuery.isBlank()) return
         viewModelScope.launch { m.runQuery(lastQuery, token) }
     }
 

@@ -34,6 +34,7 @@ reads stale over the binary its old features built (`stamp_text`).
 from __future__ import annotations
 
 import ast
+import functools
 import inspect
 import json
 import sys
@@ -62,6 +63,12 @@ class HelperBin:
     #: `tests/platform/<os>` tree — each pruned off every other OS, so never in
     #: one run or on one box — whose reaches need different shapes.
     host_features: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    #: Packages built beside `package` in the SAME cargo invocation on one host
+    #: OS, as `(sys.platform prefix, packages)` pairs (`entry_packages`): a
+    #: release input whose shipped recipe names several packages in one line
+    #: (`just linux-release`) resolves its features across all of them, so
+    #: built alone it is another binary, and its every unit another compile key.
+    host_packages: tuple[tuple[str, tuple[str, ...]], ...] = ()
     #: Declared write of the build (`--disk-gb`; `common.nest.DISK_GB_CRATE`).
     disk_gb: float = 5
     #: Dotted module names (as tests import them, rooted at tests/e2e-unified)
@@ -70,8 +77,9 @@ class HelperBin:
     modules: tuple[str, ...] = ()
     #: Fixture names whose closure reaches the binary.
     fixtures: tuple[str, ...] = ()
-    #: `"debug"`, or `"release"` (`--release`) for an artifact's INPUTS built in
-    #: the shipped profile.
+    #: `"debug"`, or `"release"` for an artifact's INPUTS built as the shipped
+    #: recipes build them: `--locked --release` under the shipped feature
+    #: resolution (`cargo_env`).
     profile: str = "debug"
     #: Repo-relative crate dirs outside `libs/` the binary is built from: its
     #: own, and any it depends on by path.
@@ -91,6 +99,12 @@ _LINUX_INSTALLER = ("tests.platform.linux.test_installer",)
 #: (`windows_msi_inputs_owed`), so the run's fixture closure alone never does.
 WINDOWS_MSI = "msi_path"
 _WINDOWS_MSI = (WINDOWS_MSI,)
+#: The nest MSI's door (`conftest.py::nest_msi_path`, read by
+#: `test_nest_installer_structure.py`): the Nest, Bridge and Terminal App
+#: features alone, so it stages the four entries below that name both doors and
+#: no app, agent or shell extension (installers/windows.md § Direct download, 1).
+WINDOWS_NEST_MSI = "nest_msi_path"
+_WINDOWS_MSIS = (WINDOWS_MSI, WINDOWS_NEST_MSI)
 _MLS_FIXTURES = ("cross_nest_foreign_actor", "cross_nest_foreign_ephemeral")
 _LAUNCH_AGENT_PROBE = ("tests.real_session.test_sync_agent_launch_agent",)
 
@@ -143,15 +157,21 @@ REGISTRY: dict[str, HelperBin] = {
         ),
         # The linux installer's release-profile INPUTS (`test_installer.py`'s
         # `desktop_binary` / `agent_binary` / `nest_binary` fixtures): the
-        # packager's prerequisites, not its subject, so they are built here.
+        # packager's prerequisites, not its subject, so they are built here —
+        # by the shipped recipes' own cargo lines (`just linux-release`: the app
+        # and the agent in ONE invocation; `just nest`: its three features),
+        # so the shared compile cache serves the units a release rehearsal
+        # compiled (build-compile-cache-linux.md, its 2026-11-16 status entry).
         HelperBin(
             "fauna-desktop", "fauna-linux", "bin", profile="release", disk_gb=10,
+            host_packages=(("linux", ("fauna-sync-agent",)),),
             modules=_LINUX_INSTALLER, sources=("apps/fauna-linux",),
         ),
-        # Both installers ship the agent, and each entry here is one cargo
-        # invocation of one package: naming a second package beside it would
-        # unify their features. linux packages the binary release.yml ships.
-        # The windows MSI is the e2e flavour — its app is published
+        # Both installers ship the agent. linux packages the binary release.yml
+        # ships, built beside the app as `just linux-release` builds it; on
+        # windows it is one invocation of its one package, as the MSI's own
+        # build makes it — naming a second package there would unify their
+        # features. The windows MSI is the e2e flavour — its app is published
         # `-p:FaunaE2eAgent=true` over the release test-helpers ffi — and the
         # agent that app spawns carries the same surface: `e2e-agent` compiles
         # in the credential redirect the harness hands both halves
@@ -162,23 +182,25 @@ REGISTRY: dict[str, HelperBin] = {
         HelperBin(
             "fauna-sync-agent", "fauna-sync-agent", "bin", profile="release",
             host_features=(("win32", ("e2e-agent",)),),
+            host_packages=(("linux", ("fauna-linux",)),),
             disk_gb=10, modules=_LINUX_INSTALLER, fixtures=_WINDOWS_MSI,
             sources=("bins/fauna-sync-agent",),
         ),
         HelperBin(
             "fauna-nest", "fauna-nest", "bin", profile="release", disk_gb=10,
+            features=("bluesky", "nostr", "activitypub"),
             modules=_LINUX_INSTALLER, sources=("bins/fauna-nest",),
         ),
         # The windows MSI's release-profile INPUTS (`helpers/windows_installer.py`'s
         # `build_msi` stages each from here).
         HelperBin(
             "fauna-nest-svc", "fauna-nest-service", "bin", profile="release",
-            disk_gb=10, fixtures=_WINDOWS_MSI,
+            disk_gb=10, fixtures=_WINDOWS_MSIS,
             sources=("apps/fauna-windows/fauna-nest-service", "bins/fauna-nest"),
         ),
         HelperBin(
             "fauna-bridge-svc", "fauna-bridge-service", "bin", profile="release",
-            disk_gb=10, fixtures=_WINDOWS_MSI,
+            disk_gb=10, fixtures=_WINDOWS_MSIS,
             sources=("apps/fauna-windows/fauna-bridge-service",),
         ),
         # The crate overrides `[lib] name = "fauna_shell"`, so the artifact is
@@ -191,11 +213,11 @@ REGISTRY: dict[str, HelperBin] = {
         # terminal app and the cli app's device shell beside the agent.
         HelperBin(
             "fauna-tui", "fauna-tui", "bin", profile="release", disk_gb=10,
-            fixtures=_WINDOWS_MSI, sources=("apps/fauna-tui",),
+            fixtures=_WINDOWS_MSIS, sources=("apps/fauna-tui",),
         ),
         HelperBin(
             "fauna-cli", "fauna-cli-device", "bin", profile="release", disk_gb=10,
-            fixtures=_WINDOWS_MSI, sources=("apps/fauna-cli",),
+            fixtures=_WINDOWS_MSIS, sources=("apps/fauna-cli",),
         ),
         # The macOS launchd probe's subject is the round trip through launchd, not
         # the compile: the crate's lib unit-test binary is built here and the test
@@ -282,7 +304,10 @@ def helper_bin(name: str) -> Path:
             "declares no module or fixture this run's items import or request — "
             "add the reaching module to its `modules` (or the fixture to its "
             "`fixtures`). A test never builds a binary itself "
-            "(e2e-conventions.md convention 9)."
+            "(e2e-conventions.md convention 9). A tier_1-only run builds none at "
+            "all: a tier_1 test runs no external process (testing.md § The "
+            "four-tier taxonomy), so a test that runs a helper binary is tier_2 "
+            "or above."
         )
     kind, value = state
     if kind == "ok":
@@ -308,18 +333,57 @@ def _dotted(path: Path) -> str | None:
     return ".".join(parts)
 
 
+@functools.cache
 def _module_file(name: str) -> Path | None:
+    """The tree's own file for module `name`, resolved, or None. Cached per
+    process: the import walk asks it for every name of every collected file's
+    imports — two stats and a resolve each, and a resolve is a
+    `GetFinalPathNameByHandle` on Windows (64 s of one whole-directory walk,
+    measured 2026-11-18) — and the answer moves only when the tree's file set
+    does."""
     base = _E2E_DIR.joinpath(*name.split("."))
     for candidate in (base.with_suffix(".py"), base / "__init__.py"):
         if candidate.is_file():
-            return candidate
+            return candidate.resolve()
     return None
 
 
-def _direct_imports(path: Path) -> set[str]:
+#: `_direct_imports`' answers, per file for the life of the process, like
+#: `_REACH_MEMO` beside it. `modules_reached` walks every collected file's
+#: imports transitively, so without it a helper imported by N test modules was
+#: parsed N times at collection — 44,893 parses of 1,928 files in one
+#: whole-directory walk, most of the 34–40 min Windows's gate run spent between
+#: its `collect` and `prebuild` phase lines (2026-11-17/18; merge-gate-catalog.md,
+#: the 28th gate's win arm).
+_IMPORTS_MEMO: dict[str, frozenset[str]] = {}
+
+
+def _direct_imports(path: Path) -> frozenset[str]:
     """Every module name `path` imports, at any depth of its body (a test
     importing a helper inside its function counts) — `from X import a` yields
-    both `X` and `X.a`, since `a` may be a submodule or a name."""
+    both `X` and `X.a`, since `a` may be a submodule or a name. Each file is
+    parsed once per process (`_IMPORTS_MEMO`)."""
+    key = str(path)
+    if key not in _IMPORTS_MEMO:
+        _IMPORTS_MEMO[key] = frozenset(_parse_imports(path))
+    return _IMPORTS_MEMO[key]
+
+
+def _statements(body):
+    """Every statement at any depth under `body` — the only places an import can
+    stand — without visiting a single expression node (`ast.walk` visits all of
+    them, about half of one whole-directory walk's time)."""
+    stack = list(body)
+    while stack:
+        node = stack.pop()
+        yield node
+        for field in ("body", "orelse", "finalbody", "handlers", "cases"):
+            child = getattr(node, field, None)
+            if isinstance(child, list):
+                stack.extend(child)
+
+
+def _parse_imports(path: Path) -> set[str]:
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (OSError, SyntaxError, ValueError):
@@ -327,7 +391,7 @@ def _direct_imports(path: Path) -> set[str]:
     own = _dotted(path) or ""
     package = own.rsplit(".", 1)[0] if path.name != "__init__.py" else own
     names: set[str] = set()
-    for node in ast.walk(tree):
+    for node in _statements(tree.body):
         if isinstance(node, ast.Import):
             names.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
@@ -368,7 +432,7 @@ def modules_reached(path: Path) -> frozenset[str]:
             target = _module_file(name)
             if target is None:
                 continue
-            target_key = str(target.resolve())
+            target_key = str(target)  # `_module_file` resolves it
             if target_key not in seen_files:
                 seen_files.add(target_key)
                 pending.append(target)
@@ -405,14 +469,28 @@ def windows_msi_inputs_owed(items) -> bool:
     return windows_installer.msi_build_owed(str(get_repo_root()), items)
 
 
+def windows_nest_msi_inputs_owed(items) -> bool:
+    """Whether a run collecting `items` will build the nest MSI
+    (`windows_msi_inputs_owed`'s gate, for its own door)."""
+    from helpers import windows_installer
+
+    if not any(windows_installer.reads_nest_msi(item) for item in items):
+        return False
+    from common.nest import get_repo_root
+
+    return windows_installer.nest_msi_build_owed(str(get_repo_root()), items)
+
+
 def reached_entries(items, requested: set) -> list[HelperBin]:
     """The registry entries a run's `items` reach — by a fixture in `requested`
     (the run's real fixture closure) or by a module an item's file imports —
-    in registry order. Pure over the items' files, but for the windows MSI's
-    gate (`windows_msi_inputs_owed`)."""
+    in registry order. Pure over the items' files, but for the windows MSIs'
+    gates (`windows_msi_inputs_owed`, `windows_nest_msi_inputs_owed`)."""
     reached_modules = _reached_modules(items)
     if WINDOWS_MSI in requested and not windows_msi_inputs_owed(items):
         requested = requested - {WINDOWS_MSI}
+    if WINDOWS_NEST_MSI in requested and not windows_nest_msi_inputs_owed(items):
+        requested = requested - {WINDOWS_NEST_MSI}
     return [
         entry
         for entry in REGISTRY.values()
@@ -491,23 +569,54 @@ def all_features(entry: HelperBin) -> tuple[str, ...]:
     return (*entry.features, *(f for _host, features in entry.host_features for f in features))
 
 
+def entry_packages(entry: HelperBin, platform: str = sys.platform) -> tuple[str, ...]:
+    """The packages one cargo invocation names to build `entry` on `platform`:
+    its own, then the ones that host's shipped recipe builds beside it."""
+    extra = tuple(
+        package
+        for host, packages in entry.host_packages
+        if platform.startswith(host)
+        for package in packages
+    )
+    return (entry.package, *extra)
+
+
+#: The feature resolution every shipped recipe builds under — each names
+#: `CARGO_RESOLVER_FEATURE_UNIFICATION=selected` on its cargo line, reverting
+#: the repository's `workspace` resolution (`.cargo/config.toml`) for that one
+#: invocation, so a release binary carries its own packages' features alone.
+SHIPPED_RESOLUTION = {"CARGO_RESOLVER_FEATURE_UNIFICATION": "selected"}
+
+
+def cargo_env(entry: HelperBin) -> dict[str, str]:
+    """The environment `entry`'s cargo runs under: a release entry — a shipped
+    artifact's input — resolves as the shipped recipes do; a debug helper as
+    every other dev build, so it shares their compiled units."""
+    return dict(SHIPPED_RESOLUTION) if entry.profile == "release" else {}
+
+
 def cargo_args(entry: HelperBin, platform: str = sys.platform) -> list[str]:
     """The cargo arguments that build `entry`'s one shape on `platform`."""
     features = entry_features(entry, platform)
+    release = ["--release", "--locked"] if entry.profile == "release" else []
+    packages = [a for package in entry_packages(entry, platform) for a in ("-p", package)]
     if entry.target == "test":
-        args = ["test", "-p", entry.package, "--lib", "--no-run", "--message-format=json"]
-        if entry.profile == "release":
-            args.append("--release")
+        args = ["test", *packages, "--lib", "--no-run", "--message-format=json", *release]
         if features:
             args += ["--features", ",".join(features)]
         return args
     selector = ["--lib"] if entry.target == "lib" else [f"--{entry.target}", entry.name]
-    args = ["build", "-p", entry.package, *selector]
-    if entry.profile == "release":
-        args.append("--release")
+    args = ["build", *packages, *selector, *release]
     if features:
         args += ["--features", ",".join(features)]
     return args
+
+
+def stamp_args(entry: HelperBin, platform: str = sys.platform) -> list[str]:
+    """What the stamp records of the build's shape: its resolution, then its
+    arguments — the same arguments resolved another way build other units."""
+    return [*(f"{k}={v}" for k, v in sorted(cargo_env(entry).items())),
+            *cargo_args(entry, platform)]
 
 
 _BINARY_MTIME_PREFIX = "binary-mtime-ns: "
@@ -516,31 +625,46 @@ _CARGO_ARGS_PREFIX = "cargo-args: "
 
 def stamp_text(entry: HelperBin, binary: Path) -> str:
     """The freshness stamp of `binary`, just built as `entry`: the binary's own
-    mtime (a binary another cargo run rewrote reads stale) and the cargo
-    arguments it was built under (a stamp left by other features reads stale)."""
+    mtime (a binary another cargo run rewrote reads stale) and the shape it was
+    built under (a stamp left by other features or resolution reads stale)."""
     return (
         f"{entry.name} e2e freshness stamp; mtime = build start (slot grant)\n"
         f"{_BINARY_MTIME_PREFIX}{binary.stat().st_mtime_ns}\n"
-        f"{_CARGO_ARGS_PREFIX}{' '.join(cargo_args(entry))}\n"
+        f"{_CARGO_ARGS_PREFIX}{' '.join(stamp_args(entry))}\n"
         + (f"{BINARY_PATH_PREFIX}{binary}\n" if entry.target == "test" else "")
     )
 
 
 def _stamp_is_fresh(binary: Path, stamp: Path, newest_source_mtime, args: list[str]) -> bool:
-    if not binary.exists() or not stamp.exists():
-        return False
+    reason = _stamp_stale_reason(binary, stamp, newest_source_mtime, args)
+    if reason is not None:
+        from common.nest import _load_build_if_stale
+
+        _load_build_if_stale().note_rebuild(stamp.name, reason)
+    return reason is None
+
+
+def _stamp_stale_reason(binary: Path, stamp: Path, newest_source_mtime,
+                        args: list[str]) -> str | None:
+    """Why `_stamp_is_fresh` would build — `None` when it would not — one
+    reason per check, in the gate's own words (build-if-stale's `note_rebuild`)."""
+    for path in (binary, stamp):
+        if not path.exists():
+            return f"missing {path}"
     lines = stamp.read_text(encoding="utf-8", errors="replace").splitlines()
 
     def recorded(prefix: str) -> list[str]:
         return [line[len(prefix):] for line in lines if line.startswith(prefix)]
 
     if recorded(_BINARY_MTIME_PREFIX) != [str(binary.stat().st_mtime_ns)]:
-        return False
+        return "stale (the binary changed since its stamp)"
     # The binary's mtime alone cannot tell an entry whose features changed: no
     # cargo ran, so the old shape's binary is still the one on disk.
     if recorded(_CARGO_ARGS_PREFIX) != [" ".join(args)]:
-        return False
-    return newest_source_mtime() <= stamp.stat().st_mtime
+        return f"stale (other cargo arguments: now {' '.join(args)})"
+    if newest_source_mtime() > stamp.stat().st_mtime:
+        return "stale (a source newer than the stamp)"
+    return None
 
 
 def _newest_source_mtime(entry: HelperBin, repo: Path) -> float:
@@ -576,11 +700,14 @@ def build(entry: HelperBin) -> str:
     repo = get_repo_root()
     binary, stamp = binary_paths(entry, _cargo_target_dir(repo))
     cmd = cargo_args(entry)
-    if _stamp_is_fresh(binary, stamp, lambda: _newest_source_mtime(entry, repo), cmd):
+    if _stamp_is_fresh(binary, stamp, lambda: _newest_source_mtime(entry, repo), stamp_args(entry)):
         return str(binary)
 
+    import os
+
     result, instant = _run_slot_build(
-        _build_slot_cmd(repo, entry.disk_gb) + _cargo_cmd(repo) + cmd, cwd=repo
+        _build_slot_cmd(repo, entry.disk_gb) + _cargo_cmd(repo) + cmd, cwd=repo,
+        env={**os.environ, **cargo_env(entry)},
     )
     # cargo's exit code can lie on win-arm64, so there a non-zero exit is
     # forgiven only when the exe was (re)written at or after the build start

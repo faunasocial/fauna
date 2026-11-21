@@ -45,6 +45,8 @@ pub fn description() -> Vec<String> {
 pub fn elements(w: &Wizard) -> Vec<Element> {
     let phrase = w.field(WizardField::RecoveryPhrase);
     let account = w.field(WizardField::RecoveryAccount);
+    let answer =
+        fauna_onboarding_machine::recovery_entry_possibility(phrase.clone(), account.clone());
     vec![
         // Both labelled — an unlabelled input prompts with its raw element id
         // (`apps/tui.md` § Rendering → *Control vocabulary*: every input MUST
@@ -63,17 +65,18 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
             Field::Wizard(WizardField::RecoveryAccount),
         )
         .labelled(common::HANDLE),
-        // Enabled unconditionally: every way the input can be wrong is an
-        // answer the ceremony gives on `error-message` (an unparseable phrase
-        // and a missing account are refused locally, before anything is sent).
-        // A disabled submit would make "why can't I click this?" the user's
-        // problem instead of telling them.
+        // Painted from the shared draft predicate (`ui/README.md` § Offer only
+        // what is possible, rule 4's form case): an unparseable phrase, a
+        // missing or malformed account disable it with the very line the
+        // restore refuses with, painted beside it — so "why can't I click
+        // this?" is answered on the button, not left to the person.
         Element::button(
             ids::RECOVERY_ENTRY_SUBMIT_BUTTON,
             t::SUBMIT,
             true,
             Action::SubmitRecoveryEntry,
-        ),
+        )
+        .possible(answer),
         Element::button(
             ids::RECOVERY_ENTRY_BACK_BUTTON,
             common::BACK,

@@ -4,6 +4,7 @@ import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.printToString
 import androidx.compose.ui.test.performClick
@@ -83,12 +84,23 @@ class NestRetireScreenTest {
         composeTestRule.onNodeWithTag("vps-provider-row[hetzner]").performClick()
         composeTestRule.onNodeWithTag("vps-credentials-form-api-token").assertExists()
         composeTestRule.onNodeWithTag("vps-verify-button").assertExists().assertIsNotEnabled()
+        // Blocked, verify paints the shared answer's reason beneath it
+        // (`verify_possibility`): once the announced inputs land, the empty
+        // required field.
+        val ctx = androidx.test.core.app.ApplicationProvider
+            .getApplicationContext<android.content.Context>()
+        val fillRequired = ctx.getString(com.fauna.app.R.string.provisioning_fill_required_fields)
+        composeTestRule.waitUntil(timeoutMillis = 15_000) {
+            composeTestRule.onAllNodes(androidx.compose.ui.test.hasText(fillRequired))
+                .fetchSemanticsNodes().isNotEmpty()
+        }
 
         composeTestRule.onNodeWithTag("vps-credentials-form-api-token").performTextInput("tok")
         // Enabled once the announced inputs (the held-DNS read) have landed.
         composeTestRule.waitUntil(timeoutMillis = 15_000) {
             runCatching { composeTestRule.onNodeWithTag("vps-verify-button").assertIsEnabled() }.isSuccess
         }
+        composeTestRule.onNodeWithText(fillRequired).assertDoesNotExist()
 
         // Below the fold of the scrolling page in a test window.
         composeTestRule.onNodeWithTag("retire-back-button").performScrollTo().performClick()

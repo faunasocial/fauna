@@ -1668,6 +1668,7 @@ mod tests {
                     crate::views::launch::LaunchPhase::Launching,
                 )),
                 settle_stolen: std::rc::Rc::new(|_| {}),
+                first_setup: std::cell::RefCell::new(None),
             };
             let view_holder = std::rc::Rc::new(std::cell::RefCell::new(Some(view)));
 

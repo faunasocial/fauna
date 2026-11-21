@@ -28,8 +28,11 @@ self-invalidation guard ``test_conv_rail_push_wakes_web`` uses:
 single-rail push wakes, so growth there means some other arm ran and the
 attribution to the push arm would be unearned.
 
-Runs on the direct-Rust clients (linux + tui), apple and windows, whose real
-rail opens at launch under ``real_conversations`` — web is out of scope here;
+Runs on the direct-Rust clients (linux + tui), apple, windows and android,
+whose real rail opens at launch under ``real_conversations`` — on android the
+phone plays bob, the seat under test, and alice signs in on a tui seat of her
+own (``_phone_as_second_real_seat``, which relaunches the phone with bob's
+muted ticker) — web is out of scope here;
 its own leg of this same property is ``test_conv_rail_push_wakes_web``. windows
 needs no arm of its own: its ``fauna-ffi`` factory hands the same
 ``conv_push_source`` to ``ConversationsSession`` that linux's in-process wiring
@@ -63,12 +66,13 @@ pytestmark = pytest.mark.tier_3
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.windows
+@pytest.mark.android
 @pytest.mark.real_conversations
 @pytest.mark.feature("conversations")
 def test_conv_rail_push_wakes_native(
     real_faunamls_app, second_real_faunamls_app_push_only, nest_instance
 ):
-    alice = real_faunamls_app
+    alice = second_real_faunamls_app_push_only.owner_app
     bob_app, bob = second_real_faunamls_app_push_only
     port = nest_instance["port"]
     body = "hi native via push"

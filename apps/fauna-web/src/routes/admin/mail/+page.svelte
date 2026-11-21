@@ -12,10 +12,10 @@
   // (libs/fauna-client-mail-settings::admin_policy, WASM twin WasmMailPolicyMachine):
   // build over the singleton WS-RPC client → hydrate() (via the Admin read twin
   // `fauna.bridges.get_mail_config`) → render snapshot() → dispatch(action) →
-  // re-render. No policy logic in the SPA (priority #2). Lifts the linux lead +
-  // its prior art (apps/fauna-linux/src/settings/admin_mail.rs): full-PUT saves
-  // start from the persisted snapshot so a blank/unparseable integer falls back to
-  // the persisted value, never silently zeroing a knob.
+  // re-render. No policy logic in the SPA (priority #2). Full-PUT saves start
+  // from the persisted snapshot for the fields with no control; a group whose
+  // number does not parse (blank included) is refused with the shared reason,
+  // never sent with the stored value (admin.md § Errors & edge cases).
   //
   // Read + write are both LIVE. nest rejects an out-of-order spam-threshold write
   // (`fauna.protocol.malformed`); the machine surfaces it via `MailPolicySnapshot::
@@ -27,6 +27,8 @@
     ensureWasm,
     parseCount,
     parseCountU64,
+    mailKnobsDraftPossibility,
+    mailMicrosoftDraftPossibility,
     fcrdnsModeOptions,
     dmarcForensicModeOptions,
     dmarcForensicRetentionWarns,
@@ -36,11 +38,15 @@
   } from '#lib/wasm';
   import { resolveLocalized } from '#lib/i18n/localized';
   import { mailHealthCheckStateLabel, secretRotationText } from '#lib/wasm';
+  import { mailEnableTogglePossibility, readPossibility } from '#lib/wasm';
   import { localDate, mailHealthHeartbeatText, mailHealthStatusText } from '#lib/value-format';
-  import { onMount } from 'svelte';
+  import { readOnEntryAndReconnect } from '#lib/admin-reread';
   import MessageBanner from '#lib/components/MessageBanner.svelte';
   import { t } from '#lib/i18n/strings';
   import { IDS } from '#lib/generated/uiIds';
+  import { afterGate, askPossibility, formGate, formRefusal } from '#lib/form-gate';
+  import { dispatchPainted, machineAnswer, reasonAttr, type ReadWord } from '#lib/admin-read-gate';
+  import type { Possibility } from '#lib/possibility';
 
   // Shapes mirror the shared serde JSON (snake_case across the serde_wasm_bindgen
   // boundary; numbers-as-numbers via json_compatible; the status enum serializes
@@ -202,8 +208,8 @@
   let error = $state('');
 
   // ── Editable form state (seeded from the snapshot on each render). Integer
-  // fields are strings so partial/blank edits round-trip and parse on Save with a
-  // fallback to the persisted value (linux `parse_u32`). The mail-enable toggle
+  // fields are strings so partial/blank edits round-trip; a group's save is live
+  // only while every one of its numbers parses (`groupAnswer`). The mail-enable toggle
   // dispatches on change, so it is rendered one-way (`checked={mailEnabled}`) — a
   // programmatic re-seed updates the checkbox without firing its change handler. ──
   let mailEnabled = $state(false);
@@ -222,7 +228,7 @@
   // The two raw-value picker catalogs, read from shared Rust after the wasm
   // module loads (`fauna_client_mail_settings::admin_policy`) rather than
   // spelled as <option> literals here — tui and linux read the same table, and
-  // the Go MTA is pinned against the same tokens. Empty until onMount's
+  // the Go MTA is pinned against the same tokens. Empty until the policy read's
   // `ensureWasm()`, so the selects render no options for one frame; the bound
   // values are the wire defaults, which is what a hydrate would set anyway.
   let fcrdnsOptions = $state<ReachPolicyOption[]>([]);
@@ -284,19 +290,137 @@
 
   const busy = $derived(snap?.status === 'Working' || snap?.status === 'Loading');
 
-  // Each integer knob parses through the shared `parse_count` / `parse_count_u64`
-  // (wasm), falling back to the persisted `prev` on a blank/unparseable edit — the
-  // no-silent-zeroing contract of the full-PUT save (value-formatting.md § Mail-knob
-  // validation). web stops hand-rolling the `^\d+$` + range rule (priority #2); the
-  // canonical rule now accepts a leading `+`, which web's `^\d+$` rejected (#4
-  // convergence). `parseU64` is the one knob (IMAP storage-bytes) whose range can
-  // exceed u32; byte ceilings stay within Number.MAX_SAFE_INTEGER.
-  function parseU32(text: string, prev: number): number {
-    return parseCount(text) ?? prev;
+  /** The page's write answer — `MailPolicyMachine::write_possibility` over
+   *  wasm (admin.md § Errors & edge cases, *Controls wait for their read*):
+   *  still loading before the policy read, failed to load after a failed one,
+   *  still saving while a change is on its way. It paints the mail-enable,
+   *  new-user auto-enable and baseline-standing toggles, the rotate and
+   *  publish confirms, and folds BEFORE every group's draft answer, so a save
+   *  never sends defaults over a policy the page has not shown. */
+  let writeAnswer = $state<Possibility | null>(null);
+  const writeGate = $derived(formGate(writeAnswer));
+  /** Whether the policy read ever resolved: until then a toggle's state is a
+   *  guess and is not painted as `on`/`off`. */
+  let policyRead = $state(false);
+
+  /** The read that builds the machine: failed once its connect or first
+   *  read threw, so every write control says failed to load, never nothing. */
+  let machineBuild: ReadWord = 'pending';
+
+  function repaint(): void {
+    writeAnswer = machineAnswer(
+      machine,
+      (m) => m.writePossibility() as Possibility,
+      machineBuild,
+      readPossibility,
+    );
   }
 
-  function parseU64(text: string, prev: number): number {
-    return parseCountU64(text) ?? prev;
+  /** Ask the write answer again at a press; refused, its reason goes on
+   *  `error-message` and nothing is sent. */
+  function admitWrite(): boolean {
+    repaint();
+    return admit(writeAnswer);
+  }
+
+  /** Dispatch a policy action, painting still saving while it is on its
+   *  way; the snapshot carries any error. */
+  async function run(action: unknown): Promise<void> {
+    const m = machine;
+    if (!m) return;
+    try {
+      await dispatchPainted(() => m.dispatch(action), repaint);
+    } catch {
+      /* the snapshot carries the error */
+    }
+    applySnapshot();
+  }
+
+  // A group's save answer (admin.md § Errors & edge cases → *A form's submit
+  // is live only for a draft the nest would accept*; value-formatting.md
+  // § Mail-knob validation): the policy read first (unreadable before the
+  // snapshot), then the shared `mailKnobsDraftPossibility` over the group's
+  // `u32` drafts, `u64` drafts and one-number-per-line lists — tui's
+  // `save_draft_possibility`. One answer paints the save and refuses at its
+  // press; a blank or malformed number is never replaced by the stored value.
+  type Group = 'spam' | 'auth' | 'submission' | 'imap' | 'outbound' | 'alias' | 'dmarc';
+  function groupDrafts(group: Group): [string[], string[], string[]] {
+    switch (group) {
+      case 'spam':
+        return [
+          [
+            junk, reject, greylistDelay, maxConnPerMin, maxMessageBytes, bayesianWeight,
+            bayesianMinSamples, bayesianFullConfidenceSamples, trainingHistoryRetention,
+            unlistedRecipientPenalty,
+          ],
+          [],
+          [],
+        ];
+      case 'auth':
+        return [[maxFailures, maxConnPerIp], [], []];
+      case 'submission':
+        return [[subMaxPerDay, subMaxRecipients], [], []];
+      case 'imap':
+        return [
+          [imapIdleTimeout, imapTombstoneRetention, imapBodystructureCache, imapMessageCount],
+          [imapStorageBytes],
+          [],
+        ];
+      case 'outbound':
+        return [[outPermfailTimeout, outDelayWarning, outNdrRateLimit], [], [outRetrySchedule]];
+      case 'alias':
+        return [[aliasExactMax], [], []];
+      case 'dmarc':
+        return [[dmarcAggregateRetention, dmarcForensicRetention], [], []];
+    }
+  }
+  function groupAnswer(group: Group): Possibility | null {
+    const [counts, countsU64, lists] = groupDrafts(group);
+    return afterGate(writeAnswer, () => mailKnobsDraftPossibility(counts, countsU64, lists));
+  }
+  const spamAnswer = $derived(groupAnswer('spam'));
+  const authAnswer = $derived(groupAnswer('auth'));
+  const submissionAnswer = $derived(groupAnswer('submission'));
+  const imapAnswer = $derived(groupAnswer('imap'));
+  const outboundAnswer = $derived(groupAnswer('outbound'));
+  const aliasAnswer = $derived(groupAnswer('alias'));
+  const dmarcAnswer = $derived(groupAnswer('dmarc'));
+  /** The Microsoft save: the write answer first, then the pair check the
+   *  nest runs (`mailMicrosoftDraftPossibility`). */
+  const microsoftAnswer = $derived(
+    afterGate(writeAnswer, () => mailMicrosoftDraftPossibility(msClientId, msTenant)),
+  );
+
+  /** Refuse a press on the page's `error-message` with the painted reason;
+   *  `true` when the save may go on. */
+  function admit(answer: Possibility | null): boolean {
+    const refusal = formRefusal(answer);
+    if (refusal === null) return true;
+    if (refusal) error = refusal;
+    return false;
+  }
+
+  // Each integer knob parses through the shared `parse_count` /
+  // `parse_count_u64` (wasm) — read only once the group's answer is possible,
+  // so every number parses and nothing falls back to a stored value.
+  // `knobU64` is the one knob (IMAP storage-bytes) whose range can exceed u32;
+  // byte ceilings stay within Number.MAX_SAFE_INTEGER.
+  function knob(text: string): number {
+    return parseCount(text) as number;
+  }
+
+  function knobU64(text: string): number {
+    return parseCountU64(text) as number;
+  }
+
+  /** A one-number-per-line list (blank lines dropped), each line through
+   *  `parse_count_u64` — the shared `parse_knob_u64_lines` rule. */
+  function knobLines(text: string): number[] {
+    return text
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0)
+      .map((l) => parseCountU64(l) as number);
   }
 
   // Newline-separated text ↔ string list (the list-field convention, per the i18n
@@ -307,18 +431,10 @@
       .map((l) => l.trim())
       .filter((l) => l.length > 0);
   }
-  // Newline-separated text → u64 list, dropping blank/non-digit lines.
-  function linesToU64List(text: string): number[] {
-    return text
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => /^\d+$/.test(l))
-      .map((l) => Number(l))
-      .filter((n) => Number.isSafeInteger(n));
-  }
 
   function applySnapshot(): void {
     if (!machine) return;
+    repaint();
     snap = machine.snapshot() as unknown as MailPolicySnapshot;
     error = snap?.error ?? '';
     if (!snap) return;
@@ -387,52 +503,61 @@
     msIsDefault = ms.is_default;
   }
 
-  onMount(async () => {
+  /** The policy read: build the machine (once) and hydrate it. Every write
+   *  control is painted from the moment the wasm core is up — still loading
+   *  while the machine is built and hydrated, failed to load after — never
+   *  disabled with nothing beside it. */
+  async function readPolicy(): Promise<void> {
     const id = $identity;
     if (!id?.secretHex) return;
     try {
       await ensureWasm();
+      repaint();
       fcrdnsOptions = fcrdnsModeOptions();
       dmarcFoOptions = dmarcForensicModeOptions();
       imapDeleteOptions = imapDeleteNonemptyOptions();
-      machine = await mailPolicyMachine(id.secretHex);
+      if (!machine) machine = await mailPolicyMachine(id.secretHex);
+      repaint();
       await machine.hydrate();
+      policyRead = true;
       applySnapshot();
     } catch (e) {
+      if (!machine) machineBuild = 'failed';
+      repaint();
       error = e instanceof Error ? e.message : String(e);
     }
+  }
+
+  // Read on every entry (a `goto()` of this route does not remount it) and,
+  // while the policy is unread, again when the nest comes back.
+  readOnEntryAndReconnect(readPolicy, async () => {
+    if (!policyRead) await readPolicy();
   });
 
-  // Full-PUT the whole Spam sub-struct: start from the persisted snapshot so
-  // unparsed/blank integer fields fall back to the persisted value.
+  // Full-PUT the whole Spam sub-struct (asked only once `spamAnswer` is
+  // possible); the persisted snapshot supplies only the field with no control.
   function buildSpam(): SpamPolicyView {
     const base = snap!.spam;
     return {
-      max_score_before_spam_folder: parseU32(junk, base.max_score_before_spam_folder),
-      max_score_before_reject: parseU32(reject, base.max_score_before_reject),
+      max_score_before_spam_folder: knob(junk),
+      max_score_before_reject: knob(reject),
       dnsbl_servers: dnsbl
         .split('\n')
         .map((l) => l.trim())
         .filter((l) => l.length > 0),
       reject_no_rdns: rejectNoRdns,
       greylist_enabled: greylistEnabled,
-      greylist_delay_secs: parseU32(greylistDelay, base.greylist_delay_secs),
-      max_conn_per_min: parseU32(maxConnPerMin, base.max_conn_per_min),
+      greylist_delay_secs: knob(greylistDelay),
+      max_conn_per_min: knob(maxConnPerMin),
       fcrdns_mode: fcrdnsMode,
       helo_identity_required: heloIdentityRequired,
       reject_fcrdns_fail: rejectFcrdnsFail,
-      max_message_bytes: parseU32(maxMessageBytes, base.max_message_bytes),
-      bayesian_weight_milli: parseU32(bayesianWeight, base.bayesian_weight_milli),
-      bayesian_min_samples: parseU32(bayesianMinSamples, base.bayesian_min_samples),
-      bayesian_full_confidence_samples: parseU32(
-        bayesianFullConfidenceSamples,
-        base.bayesian_full_confidence_samples,
-      ),
-      training_history_retention_days: parseU32(
-        trainingHistoryRetention,
-        base.training_history_retention_days,
-      ),
-      unlisted_recipient_penalty: parseU32(unlistedRecipientPenalty, base.unlisted_recipient_penalty),
+      max_message_bytes: knob(maxMessageBytes),
+      bayesian_weight_milli: knob(bayesianWeight),
+      bayesian_min_samples: knob(bayesianMinSamples),
+      bayesian_full_confidence_samples: knob(bayesianFullConfidenceSamples),
+      training_history_retention_days: knob(trainingHistoryRetention),
+      unlisted_recipient_penalty: knob(unlistedRecipientPenalty),
       // Not rendered yet: carried through so a save never turns the standing
       // baseline publish off (which withdraws the deployment's baseline).
       baseline_standing_publish: base.baseline_standing_publish,
@@ -440,66 +565,82 @@
   }
 
   function buildAuth(): AuthPolicyView {
-    const base = snap!.auth;
     return {
       enforce_dmarc: enforceDmarc,
       enforce_dmarc_quarantine: enforceDmarcQuarantine,
       enforce_spf_hardfail: enforceSpfHardfail,
       enforce_dkim: enforceDkim,
       log_only: logOnly,
-      max_auth_failures_per_minute: parseU32(maxFailures, base.max_auth_failures_per_minute),
-      max_conn_per_ip: parseU32(maxConnPerIp, base.max_conn_per_ip),
+      max_auth_failures_per_minute: knob(maxFailures),
+      max_conn_per_ip: knob(maxConnPerIp),
     };
   }
 
   // A box that cannot enable mail keeps the master toggle disabled; one where
   // mail is already on stays live so it can still be turned off.
-  const unavailable = $derived(!mailEnabled && Boolean(snap?.mail_unavailable_here));
+  /** The enable toggle's shared answer (`enable_toggle_possibility`;
+   *  `admin.md` § Errors & edge cases): blocked by the unavailable notice only
+   *  for a turn-on on a box that cannot enable mail. */
+  const availabilityGate = $derived(
+    formGate(
+      askPossibility(() =>
+        mailEnableTogglePossibility(mailEnabled, Boolean(snap?.mail_unavailable_here)),
+      ),
+    ),
+  );
+  const unavailable = $derived(policyRead && availabilityGate.disabled);
+  /** The toggle's whole answer: the write answer first (a page still loading
+   *  says so first), then the availability answer above. */
+  const enableAnswer = $derived(
+    afterGate(writeAnswer, () =>
+      mailEnableTogglePossibility(mailEnabled, Boolean(snap?.mail_unavailable_here)),
+    ),
+  );
+  const enableGate = $derived(formGate(enableAnswer));
 
   async function handleToggleEnabled(e: Event): Promise<void> {
-    if (!machine) return;
-    const enabled = (e.currentTarget as HTMLInputElement).checked;
-    try {
-      await machine.dispatch({ SetMailEnabled: { enabled } });
-    } catch {
-      /* the snapshot carries the error */
+    const input = e.currentTarget as HTMLInputElement;
+    const enabled = input.checked;
+    // The press asks the painted answer again — the write answer, then for a
+    // turn-on the availability answer; refused, it says why on
+    // `error-message` and puts the switch back.
+    repaint();
+    const refusal = formRefusal(enabled ? enableAnswer : writeAnswer);
+    if (refusal !== null) {
+      if (refusal) error = refusal;
+      input.checked = !enabled;
+      return;
     }
-    applySnapshot();
+    await run({ SetMailEnabled: { enabled } });
   }
 
   async function handleToggleAutoEnableNewUsers(e: Event): Promise<void> {
-    if (!machine) return;
-    const enabled = (e.currentTarget as HTMLInputElement).checked;
-    try {
-      await machine.dispatch({ SetAutoEnableMailForNewUsers: { enabled } });
-    } catch {
-      /* the snapshot carries the error */
+    const input = e.currentTarget as HTMLInputElement;
+    const enabled = input.checked;
+    if (!admitWrite()) {
+      input.checked = !enabled;
+      return;
     }
-    applySnapshot();
+    await run({ SetAutoEnableMailForNewUsers: { enabled } });
   }
 
   async function handleRecheckHealth(): Promise<void> {
     if (!machine) return;
-    try {
-      await machine.dispatch('RecheckHealth');
-    } catch {
-      /* the snapshot carries the error */
-    }
-    applySnapshot();
+    await run('RecheckHealth');
   }
 
   // The same-button two-click confirms (warm-up reset, the two secret rotations,
   // the baseline publish) are one shared `Press`: the machine arms on a first
   // press and acts on a second press of the same button, and the snapshot's
   // `armed` relabels the button.
+  //
+  // The rotate and publish confirms write what the policy read decides, so
+  // their press asks the write answer first (admin.md § Errors & edge cases,
+  // *Controls wait for their read*); the warm-up reset reads the health
+  // readout instead and keeps its own gate.
   async function press(button: MailConfirm): Promise<void> {
-    if (!machine) return;
-    try {
-      await machine.dispatch({ Press: { button } });
-    } catch {
-      /* the snapshot carries the error */
-    }
-    applySnapshot();
+    if (button !== 'ResetWarmup' && !admitWrite()) return;
+    await run({ Press: { button } });
   }
 
   function openDelist(url: string): void {
@@ -507,52 +648,41 @@
   }
 
   async function handleSaveSpam(): Promise<void> {
-    if (!machine || !snap) return;
-    try {
-      await machine.dispatch({ SaveSpam: { policy: buildSpam() } });
-    } catch {
-      /* the snapshot carries the error */
-    }
-    applySnapshot();
+    repaint();
+    if (!admit(spamAnswer) || !machine || !snap) return;
+    await run({ SaveSpam: { policy: buildSpam() } });
   }
 
   async function handleSaveAuth(): Promise<void> {
-    if (!machine || !snap) return;
-    try {
-      await machine.dispatch({ SaveAuth: { policy: buildAuth() } });
-    } catch {
-      /* the snapshot carries the error */
-    }
-    applySnapshot();
+    repaint();
+    if (!admit(authAnswer) || !machine || !snap) return;
+    await run({ SaveAuth: { policy: buildAuth() } });
   }
 
   function buildSubmission(): SubmissionPolicyView {
-    const base = snap!.submission;
     return {
-      max_per_day: parseU32(subMaxPerDay, base.max_per_day),
-      max_recipients_per_message: parseU32(subMaxRecipients, base.max_recipients_per_message),
+      max_per_day: knob(subMaxPerDay),
+      max_recipients_per_message: knob(subMaxRecipients),
     };
   }
 
   function buildImap(): ImapPolicyView {
-    const base = snap!.imap;
     return {
-      idle_timeout_secs: parseU32(imapIdleTimeout, base.idle_timeout_secs),
-      tombstone_retention_days: parseU32(imapTombstoneRetention, base.tombstone_retention_days),
+      idle_timeout_secs: knob(imapIdleTimeout),
+      tombstone_retention_days: knob(imapTombstoneRetention),
       delete_nonempty: imapDeleteNonempty,
-      bodystructure_cache_max: parseU32(imapBodystructureCache, base.bodystructure_cache_max),
-      storage_bytes_default: parseU64(imapStorageBytes, base.storage_bytes_default),
-      message_count_default: parseU32(imapMessageCount, base.message_count_default),
+      bodystructure_cache_max: knob(imapBodystructureCache),
+      storage_bytes_default: knobU64(imapStorageBytes),
+      message_count_default: knob(imapMessageCount),
     };
   }
 
   function buildOutbound(): OutboundPolicyView {
-    const base = snap!.outbound;
     return {
-      retry_schedule_seconds: linesToU64List(outRetrySchedule),
-      permanent_failure_timeout_hours: parseU32(outPermfailTimeout, base.permanent_failure_timeout_hours),
-      delay_warning_at_hours: parseU32(outDelayWarning, base.delay_warning_at_hours),
-      ndr_rate_limit_days: parseU32(outNdrRateLimit, base.ndr_rate_limit_days),
+      retry_schedule_seconds: knobLines(outRetrySchedule),
+      permanent_failure_timeout_hours: knob(outPermfailTimeout),
+      delay_warning_at_hours: knob(outDelayWarning),
+      ndr_rate_limit_days: knob(outNdrRateLimit),
       suppress_ndr_spf_hardfail: outSuppressNdrSpf,
       suppress_ndr_dmarc_reject: outSuppressNdrDmarc,
       postmaster_cc_bounces: outPostmasterCc, // read-only; echoes the persisted value
@@ -563,9 +693,8 @@
   }
 
   function buildAlias(): AliasPolicyView {
-    const base = snap!.alias;
     return {
-      exact_aliases_max: parseU32(aliasExactMax, base.exact_aliases_max),
+      exact_aliases_max: knob(aliasExactMax),
       reserved_local_parts: linesToList(aliasReserved),
       subaddressing_enabled: aliasSubaddressing,
       wildcard_prefix_enabled: aliasWildcardPrefix,
@@ -573,33 +702,21 @@
   }
 
   async function handleSaveSubmission(): Promise<void> {
-    if (!machine || !snap) return;
-    try {
-      await machine.dispatch({ SaveSubmission: { policy: buildSubmission() } });
-    } catch {
-      /* the snapshot carries the error */
-    }
-    applySnapshot();
+    repaint();
+    if (!admit(submissionAnswer) || !machine || !snap) return;
+    await run({ SaveSubmission: { policy: buildSubmission() } });
   }
 
   async function handleSaveImap(): Promise<void> {
-    if (!machine || !snap) return;
-    try {
-      await machine.dispatch({ SaveImap: { policy: buildImap() } });
-    } catch {
-      /* the snapshot carries the error */
-    }
-    applySnapshot();
+    repaint();
+    if (!admit(imapAnswer) || !machine || !snap) return;
+    await run({ SaveImap: { policy: buildImap() } });
   }
 
   async function handleSaveOutbound(): Promise<void> {
-    if (!machine || !snap) return;
-    try {
-      await machine.dispatch({ SaveOutbound: { policy: buildOutbound() } });
-    } catch {
-      /* the snapshot carries the error */
-    }
-    applySnapshot();
+    repaint();
+    if (!admit(outboundAnswer) || !machine || !snap) return;
+    await run({ SaveOutbound: { policy: buildOutbound() } });
   }
 
   // The four edited fields over the persisted catalog; a retention past its
@@ -610,8 +727,8 @@
       ...base,
       ruf_publish: dmarcRufPublish,
       fo_mode: dmarcFoMode,
-      aggregate_retention_days: parseU32(dmarcAggregateRetention, base.aggregate_retention_days),
-      forensic_retention_days: parseU32(dmarcForensicRetention, base.forensic_retention_days),
+      aggregate_retention_days: knob(dmarcAggregateRetention),
+      forensic_retention_days: knob(dmarcForensicRetention),
       outbound_aggregate_enabled: dmarcOutboundAggregate,
     };
   }
@@ -622,51 +739,38 @@
   });
 
   async function handleSaveDmarc(): Promise<void> {
-    if (!machine || !snap) return;
-    try {
-      await machine.dispatch({ SaveDmarc: { policy: buildDmarc() } });
-    } catch {
-      /* the snapshot carries the error */
-    }
-    applySnapshot();
+    repaint();
+    if (!admit(dmarcAnswer) || !machine || !snap) return;
+    await run({ SaveDmarc: { policy: buildDmarc() } });
   }
 
-  // The two drafts go out as typed; the shared machine checks them and refuses
-  // a bad pair onto `error-message` before any round trip.
+  // The two drafts go out as typed once the shared pair check passes; a bad
+  // pair is refused onto `error-message` at the press, before any round trip.
   async function handleSaveMicrosoft(): Promise<void> {
-    if (!machine || !snap) return;
-    try {
-      await machine.dispatch({
+    repaint();
+    if (!admit(microsoftAnswer) || !machine || !snap) return;
+    await run({
         SetMicrosoftRegistration: { client_id: msClientId, tenant: msTenant },
       });
-    } catch {
-      /* the snapshot carries the error */
-    }
-    applySnapshot();
   }
 
   async function handleSaveAlias(): Promise<void> {
-    if (!machine || !snap) return;
-    try {
-      await machine.dispatch({ SaveAlias: { policy: buildAlias() } });
-    } catch {
-      /* the snapshot carries the error */
-    }
-    applySnapshot();
+    repaint();
+    if (!admit(aliasAnswer) || !machine || !snap) return;
+    await run({ SaveAlias: { policy: buildAlias() } });
   }
 
   // Standing publish is its own gesture (`SetBaselineStandingPublish`, dispatched
   // immediately off the PERSISTED spam group), never a Spam-group draft.
-  async function handleToggleBaselineStanding(): Promise<void> {
-    if (!machine || !snap) return;
-    try {
-      await machine.dispatch({
+  async function handleToggleBaselineStanding(e: Event): Promise<void> {
+    const input = e.currentTarget as HTMLInputElement;
+    if (!admitWrite() || !snap) {
+      input.checked = !input.checked;
+      return;
+    }
+    await run({
         SetBaselineStandingPublish: { enabled: !snap.spam.baseline_standing_publish },
       });
-    } catch {
-      /* the snapshot carries the error */
-    }
-    applySnapshot();
   }
 
   // The `admin-mail-spam-baseline-state` text: published / none, then the
@@ -703,9 +807,11 @@
     <input
       type="checkbox"
       data-testid={IDS.ADMIN_MAIL_ENABLED_TOGGLE}
-      data-state={mailEnabled ? 'on' : unavailable ? 'unavailable' : 'off'}
-      checked={mailEnabled}
-      disabled={unavailable}
+      data-state={policyRead ? (mailEnabled ? 'on' : unavailable ? 'unavailable' : 'off') : undefined}
+      checked={policyRead && mailEnabled}
+      disabled={enableGate.disabled}
+      title={enableGate.reason}
+      data-reason={reasonAttr(enableGate)}
       onchange={handleToggleEnabled}
     />
   </label>
@@ -720,7 +826,10 @@
     <input
       type="checkbox"
       data-testid={IDS.ADMIN_MAIL_AUTO_ENABLE_NEW_USERS_TOGGLE}
-      checked={autoEnableNewUsers}
+      checked={policyRead && autoEnableNewUsers}
+      disabled={writeGate.disabled}
+      title={writeGate.reason}
+      data-reason={reasonAttr(writeGate)}
       onchange={handleToggleAutoEnableNewUsers}
     />
   </label>
@@ -884,7 +993,9 @@
   <button
     class="btn primary"
     data-testid={IDS.ADMIN_MAIL_SPAM_SAVE_BUTTON}
-    disabled={busy || !snap}
+    disabled={busy || formGate(spamAnswer).disabled}
+    title={formGate(spamAnswer).reason}
+    data-reason={reasonAttr(formGate(spamAnswer))}
     onclick={handleSaveSpam}
   >
     {t.admin.mail_page.spam_save}
@@ -894,7 +1005,9 @@
   <button
     class="btn"
     data-testid={IDS.ADMIN_MAIL_PUBLISH_SPAM_BASELINE_BUTTON}
-    disabled={busy || !snap}
+    disabled={writeGate.disabled}
+    title={writeGate.reason}
+    data-reason={reasonAttr(writeGate)}
     onclick={() => press('PublishSpamBaseline')}
   >
     {snap?.armed === 'PublishSpamBaseline'
@@ -929,8 +1042,10 @@
     <input
       type="checkbox"
       data-testid={IDS.ADMIN_MAIL_SPAM_BASELINE_STANDING_TOGGLE}
-      checked={snap?.spam.baseline_standing_publish ?? false}
-      disabled={busy || !snap}
+      checked={policyRead && (snap?.spam.baseline_standing_publish ?? false)}
+      disabled={writeGate.disabled}
+      title={writeGate.reason}
+      data-reason={reasonAttr(writeGate)}
       onchange={handleToggleBaselineStanding}
     />
   </label>
@@ -976,7 +1091,9 @@
   <button
     class="btn primary"
     data-testid={IDS.ADMIN_MAIL_AUTH_SAVE_BUTTON}
-    disabled={busy || !snap}
+    disabled={busy || formGate(authAnswer).disabled}
+    title={formGate(authAnswer).reason}
+    data-reason={reasonAttr(formGate(authAnswer))}
     onclick={handleSaveAuth}
   >
     {t.admin.mail_page.auth_save}
@@ -999,7 +1116,7 @@
     <input class="input" type="text" inputmode="numeric" data-testid={IDS.ADMIN_MAIL_SUBMISSION_MAX_RECIPIENTS_INPUT} bind:value={subMaxRecipients} />
   </label>
 
-  <button class="btn primary" data-testid={IDS.ADMIN_MAIL_SUBMISSION_SAVE_BUTTON} disabled={busy || !snap} onclick={handleSaveSubmission}>
+  <button class="btn primary" data-testid={IDS.ADMIN_MAIL_SUBMISSION_SAVE_BUTTON} disabled={busy || formGate(submissionAnswer).disabled} title={formGate(submissionAnswer).reason} data-reason={reasonAttr(formGate(submissionAnswer))} onclick={handleSaveSubmission}>
     {t.admin.mail_page.submission_save}
   </button>
 </section>
@@ -1043,7 +1160,7 @@
     <input class="input" type="text" inputmode="numeric" data-testid={IDS.ADMIN_MAIL_IMAP_MESSAGE_COUNT_INPUT} bind:value={imapMessageCount} />
   </label>
 
-  <button class="btn primary" data-testid={IDS.ADMIN_MAIL_IMAP_SAVE_BUTTON} disabled={busy || !snap} onclick={handleSaveImap}>
+  <button class="btn primary" data-testid={IDS.ADMIN_MAIL_IMAP_SAVE_BUTTON} disabled={busy || formGate(imapAnswer).disabled} title={formGate(imapAnswer).reason} data-reason={reasonAttr(formGate(imapAnswer))} onclick={handleSaveImap}>
     {t.admin.mail_page.imap_save}
   </button>
 </section>
@@ -1102,7 +1219,7 @@
     <textarea class="input" rows="3" data-testid={IDS.ADMIN_MAIL_OUTBOUND_TREAT_5XX_TRANSIENT} bind:value={outTreat5xx}></textarea>
   </label>
 
-  <button class="btn primary" data-testid={IDS.ADMIN_MAIL_OUTBOUND_SAVE_BUTTON} disabled={busy || !snap} onclick={handleSaveOutbound}>
+  <button class="btn primary" data-testid={IDS.ADMIN_MAIL_OUTBOUND_SAVE_BUTTON} disabled={busy || formGate(outboundAnswer).disabled} title={formGate(outboundAnswer).reason} data-reason={reasonAttr(formGate(outboundAnswer))} onclick={handleSaveOutbound}>
     {t.admin.mail_page.outbound_save}
   </button>
 </section>
@@ -1131,7 +1248,7 @@
     <input type="checkbox" data-testid={IDS.ADMIN_MAIL_ALIAS_WILDCARD_PREFIX_TOGGLE} bind:checked={aliasWildcardPrefix} />
   </label>
 
-  <button class="btn primary" data-testid={IDS.ADMIN_MAIL_ALIAS_SAVE_BUTTON} disabled={busy || !snap} onclick={handleSaveAlias}>
+  <button class="btn primary" data-testid={IDS.ADMIN_MAIL_ALIAS_SAVE_BUTTON} disabled={busy || formGate(aliasAnswer).disabled} title={formGate(aliasAnswer).reason} data-reason={reasonAttr(formGate(aliasAnswer))} onclick={handleSaveAlias}>
     {t.admin.mail_page.alias_save}
   </button>
 </section>
@@ -1170,7 +1287,7 @@
     <input type="checkbox" data-testid={IDS.ADMIN_MAIL_DMARC_OUTBOUND_AGGREGATE_TOGGLE} bind:checked={dmarcOutboundAggregate} />
   </label>
 
-  <button class="btn primary" data-testid={IDS.ADMIN_MAIL_DMARC_SAVE_BUTTON} disabled={busy || !snap} onclick={handleSaveDmarc}>
+  <button class="btn primary" data-testid={IDS.ADMIN_MAIL_DMARC_SAVE_BUTTON} disabled={busy || formGate(dmarcAnswer).disabled} title={formGate(dmarcAnswer).reason} data-reason={reasonAttr(formGate(dmarcAnswer))} onclick={handleSaveDmarc}>
     {t.admin.mail_page.dmarc_save}
   </button>
 </section>
@@ -1192,7 +1309,7 @@
     <input class="input" type="text" data-testid={IDS.ADMIN_MAIL_MICROSOFT_TENANT_INPUT} bind:value={msTenant} />
   </label>
 
-  <button class="btn primary" data-testid={IDS.ADMIN_MAIL_MICROSOFT_SAVE_BUTTON} disabled={busy || !snap} onclick={handleSaveMicrosoft}>
+  <button class="btn primary" data-testid={IDS.ADMIN_MAIL_MICROSOFT_SAVE_BUTTON} disabled={busy || formGate(microsoftAnswer).disabled} title={formGate(microsoftAnswer).reason} data-reason={reasonAttr(formGate(microsoftAnswer))} onclick={handleSaveMicrosoft}>
     {t.admin.mail_page.microsoft_save}
   </button>
 </section>
@@ -1205,7 +1322,9 @@
   <button
     class="btn"
     data-testid={IDS.ADMIN_MAIL_LIST_UNSUBSCRIBE_SECRET_ROTATE_BUTTON}
-    disabled={busy || !snap}
+    disabled={writeGate.disabled}
+    title={writeGate.reason}
+    data-reason={reasonAttr(writeGate)}
     onclick={() => press('RotateListUnsubscribeSecret')}
   >
     {snap?.armed === 'RotateListUnsubscribeSecret'
@@ -1215,7 +1334,9 @@
   <button
     class="btn"
     data-testid={IDS.ADMIN_MAIL_FORWARD_SRS_SECRET_ROTATE_BUTTON}
-    disabled={busy || !snap}
+    disabled={writeGate.disabled}
+    title={writeGate.reason}
+    data-reason={reasonAttr(writeGate)}
     onclick={() => press('RotateSrsSecret')}
   >
     {snap?.armed === 'RotateSrsSecret'

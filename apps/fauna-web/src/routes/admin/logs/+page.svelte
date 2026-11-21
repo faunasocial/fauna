@@ -7,7 +7,9 @@
   import { resolveLocalized } from '#lib/i18n/localized';
   import { localTimestamp } from '#lib/value-format';
   import LogsView from '#lib/components/LogsView.svelte';
+  import { ADMIN_LOGS_EMPTY_KEY } from '#lib/ring-actions';
   import { IDS } from '#lib/generated/uiIds';
+  import { askPossibility, formGate, formRefusal } from '#lib/form-gate';
 
   // Admin view of the NEST's `fauna-log` ring (observability.md § Surfaces),
   // fetched once over the admin-scoped `fauna.admin.logs` WS-RPC and rendered
@@ -29,6 +31,21 @@
   let auditBusy = $state(false);
 
   const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+  /** `admin-audit-more-button`: the held log's shared `morePossibility` —
+   *  blocked, saying so, once the whole record is shown; unreadable before the
+   *  first page. Reads `audit` so a new view repaints it. */
+  function moreAnswer() {
+    if (!audit || !auditLog) return null;
+    const log = auditLog;
+    return askPossibility(() => log.morePossibility());
+  }
+
+  function auditMore() {
+    if (formRefusal(moreAnswer()) !== null || !auditLog) return;
+    const log = auditLog;
+    void auditRead(() => log.more());
+  }
 
   async function auditRead(read: () => Promise<AuditLogView>) {
     auditBusy = true;
@@ -69,7 +86,7 @@
 
 <p class="muted">{t.admin.logs_page.description}</p>
 
-<LogsView {entries} />
+<LogsView {entries} emptyKey={ADMIN_LOGS_EMPTY_KEY} bind:error />
 
 <section data-testid={IDS.ADMIN_AUDIT_SECTION}>
   <h2>{t.admin.logs_page.audit_title}</h2>
@@ -83,8 +100,9 @@
   {/if}
   <button
     data-testid={IDS.ADMIN_AUDIT_MORE_BUTTON}
-    disabled={auditBusy || !auditLog || audit?.more_before_id == null}
-    onclick={() => auditLog && auditRead(() => auditLog!.more())}
+    disabled={auditBusy || formGate(moreAnswer()).disabled}
+    title={formGate(moreAnswer()).reason}
+    onclick={auditMore}
   >{t.admin.logs_page.audit_more}</button>
 </section>
 

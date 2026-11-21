@@ -23,6 +23,7 @@ import org.junit.runner.RunWith
 import com.fauna.app.testing.FaunaRobolectricTestRunner
 import org.robolectric.annotation.Config
 import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
 
 /**
  * Compose-level coverage for the stateless [AdminUsersContent] (the admin-users
@@ -129,6 +130,7 @@ class AdminUsersContentTest {
         allUsers: List<FfiAdminUser> = users,
         userTotal: Long = users.size.toLong(),
         userOffset: Long = 0L,
+        tierNames: List<String> = tiers,
         codes: List<FfiAdminInviteCode> = listOf(code("ABC123")),
         requests: List<FfiAdminInviteRequest> = listOf(request("bob")),
         pendingActions: List<FfiAdminPendingAction> = emptyList(),
@@ -136,6 +138,8 @@ class AdminUsersContentTest {
         onCancelPendingAction: (FfiAdminPendingAction) -> Unit = {},
         mintedCode: String? = null,
         actionError: String? = null,
+        // A clipboard whose writes throw, for the copy-failure path.
+        failingClipboard: Boolean = false,
         // Section 2 — Registration. Defaults: a KNOWN posture (`closed`, the
         // fresh-nest default per admin.rs) with no ceiling, so the existing
         // (pre-Registration) tests below keep rendering the editable branch
@@ -175,8 +179,41 @@ class AdminUsersContentTest {
         guardianOption: (FfiAdminUser) -> String = {
             it.handle?.takeIf { h -> h.isNotEmpty() } ?: HexUtil.bytesToHex(it.actorId)
         },
+        // FFI-free stubs of the users page's shared answers (admin.md § 2 ->
+        // What a row offers): remove-admin blocked on the last superadmin
+        // (shown-ness stays `rowControls.removeAdmin`), approve absent on the
+        // viewer's own action (the viewer here is actor 0x07...), and the band
+        // blocked until a guardian is picked. The rules themselves are
+        // unit-tested in `fauna-client-admin`.
+        answers: AdminUsersAnswers = AdminUsersAnswers(
+            removeAdmin = {
+                if (it.lastSuperadmin) blocked("admin.users_page.remove_admin_last_superadmin")
+                else Possibility.Possible
+            },
+            pendingApprove = {
+                if (!it.isPending || it.actorId.contentEquals(ByteArray(32) { 7 })) Possibility.Absent
+                else Possibility.Possible
+            },
+            ageBand = { if (it) Possibility.Possible else blocked("admin.users_page.age_band_needs_guardian") },
+            tierPick = { if (it.isEmpty()) blocked("admin.users_page.no_tier") else Possibility.Possible },
+            pageStep = { offset, total, size, forward ->
+                when {
+                    forward && offset + size >= total -> blocked("admin.users_page.no_page_after")
+                    !forward && offset <= 0 -> blocked("admin.users_page.no_page_before")
+                    else -> Possibility.Possible
+                }
+            },
+            registrationCeiling = AdminDraftFakes.registrationCeiling,
+            admitActor = AdminDraftFakes.admitActor,
+            rowControl = AdminDraftFakes.rowControl,
+        ),
     ) {
         composeTestRule.setContent {
+          androidx.compose.runtime.CompositionLocalProvider(
+            androidx.compose.ui.platform.LocalClipboardManager provides
+                if (failingClipboard) com.fauna.app.ui.FailingClipboard("denied")
+                else androidx.compose.ui.platform.LocalClipboardManager.current,
+          ) {
             AdminUsersContent(
                 pendingRequests = requests,
                 pendingActions = pendingActions,
@@ -190,7 +227,7 @@ class AdminUsersContentTest {
                 allUsers = allUsers,
                 userTotal = userTotal,
                 userOffset = userOffset,
-                tiers = tiers,
+                tiers = tierNames,
                 mintedCode = mintedCode,
                 actionError = actionError,
                 registrationMode = registrationMode,
@@ -235,8 +272,32 @@ class AdminUsersContentTest {
                 claimedAgeBandOption = claimedAgeBandOptionStub,
                 ageClaimLabel = ageClaimLabelStub,
                 ageBandLabel = ageBandLabelStub,
+                answers = answers,
             )
+          }
         }
+    }
+
+    private fun blocked(key: String) = Possibility.Blocked(LocalizedText(key, emptyMap()))
+
+    /** `admin.md` § 2, *What a row offers*: with no tier to pick, admit and
+     *  the invite opener are blocked by the shared answer, and a press does
+     *  nothing. */
+    @Test
+    fun admitAndInviteWaitForATier() {
+        var admitted = 0
+        render(tierNames = emptyList(), onAdmitUser = { _, _, _, _, _ -> admitted++ })
+        composeTestRule.onNodeWithTag("admin-users-admit-button").performScrollTo().assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("create-invite-code-btn").performScrollTo().assertIsNotEnabled()
+        assertEquals(0, admitted)
+    }
+
+    /** The pager's bounds are the shared answer: page 1 of 1 blocks both. */
+    @Test
+    fun pagerStepsAreBlockedAtTheirBounds() {
+        render()
+        composeTestRule.onNodeWithTag("admin-users-prev-page").performScrollTo().assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("admin-users-next-page").performScrollTo().assertIsNotEnabled()
     }
 
     @Test
@@ -268,6 +329,36 @@ class AdminUsersContentTest {
         requiresQuorum = 2,
         approvals = listOf("aa"),
     )
+
+    @Test
+    fun theViewersOwnPendingActionOffersNoApprove() {
+        // The nest refuses self-approval, so the shared answer is absent on
+        // the viewer's own scheduled action (admin.md § 2 -> What a row offers).
+        render(pendingActions = listOf(pendingAction(3).copy(actorId = ByteArray(32) { 7 })))
+        composeTestRule.onNodeWithTag("admin-pending-action-item").performScrollTo().assertExists()
+        composeTestRule.onNodeWithTag("admin-pending-action-approve-button", useUnmergedTree = true)
+            .assertDoesNotExist()
+        composeTestRule.onNodeWithTag("admin-pending-action-cancel-button", useUnmergedTree = true)
+            .assertExists()
+    }
+
+    @Test
+    fun removeAdminIsBlockedWithItsReasonOnTheLastSuperadmin() {
+        var removed: FfiAdminUser? = null
+        render(
+            users = listOf(user("Root", "free").copy(isAdmin = true, lastSuperadmin = true)),
+            rowControls = { FfiAdminUserRowControls(`suspend` = false, evict = false, restore = false, makeAdmin = false, removeAdmin = true) },
+            onRemoveAdmin = { removed = it },
+        )
+        composeTestRule.onNodeWithTag("admin-users-remove-admin-button")
+            .performScrollTo()
+            .assertIsNotEnabled()
+        composeTestRule.onNodeWithText(
+            ApplicationProvider.getApplicationContext<Context>()
+                .getString(R.string.admin_users_page_remove_admin_last_superadmin),
+        ).assertExists()
+        assertEquals(null, removed)
+    }
 
     @Test
     fun pendingSectionAnswersTheEmptyStateWhenNothingIsPending() {
@@ -323,8 +414,8 @@ class AdminUsersContentTest {
             .performScrollTo().performTextInput("newperson")
         composeTestRule.onNodeWithTag("admin-users-admit-button")
             .performScrollTo().performClick()
-        // Default tier is the first option — the screen passes through
-        // whatever was typed; format validation is a VM concern.
+        // Default tier is the first option; the typed key passed the shared
+        // `admit_actor_possibility`, so it goes out as typed.
         assertEquals(Triple(actorHex, "newperson", "free"), admitted)
         // The guardian picker defaults to "None" — an ordinary admission.
         assertEquals(null, guardian)
@@ -715,6 +806,30 @@ class AdminUsersContentTest {
         assertEquals("MINT99", currentClipboardText())
     }
 
+    @Test
+    fun aMintedCodeCopyIsConfirmed() {
+        render(mintedCode = "MINT99")
+        composeTestRule.onNodeWithTag("admin-users-invite-code-copy-btn")
+            .performScrollTo().performClick()
+        // "Copied!" beside the code, the code as the button's `copied` attr —
+        // the `account-actor-id-copy-btn` contract.
+        composeTestRule.onNodeWithTag("admin-users-invite-code-copy-btn")
+            .assert(androidx.compose.ui.test.hasText("Copied!"))
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "MINT99"))
+        composeTestRule.onNodeWithTag("admin-users-action-error").assertDoesNotExist()
+    }
+
+    @Test
+    fun aFailedMintedCodeCopySaysSoOnTheActionError() {
+        render(mintedCode = "MINT99", failingClipboard = true)
+        composeTestRule.onNodeWithTag("admin-users-invite-code-copy-btn")
+            .performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("admin-users-action-error")
+            .assert(androidx.compose.ui.test.hasText("Could not copy to the clipboard: denied"))
+        composeTestRule.onAllNodes(androidx.compose.ui.test.hasText("Copied!"))
+            .fetchSemanticsNodes().let { assertEquals(0, it.size) }
+    }
+
     // ── Age-band surfaces (family-safety.md § App surface → *Age-band surfaces*) ─
 
     private fun hasToken(token: String) =
@@ -836,6 +951,62 @@ class AdminUsersContentTest {
         render(ageVerificationRequired = true)
         composeTestRule.onNodeWithTag("admin-users-registration-age-verification-toggle")
             .assert(hasToken("on")).assertIsOn()
+    }
+
+    // ── Draft validity (admin.md § Errors & edge cases, the form bullet) ──
+
+    private fun string(id: Int) = ApplicationProvider.getApplicationContext<Context>().getString(id)
+
+    @Test
+    fun aMalformedAccountKeyBlocksAdmitWithTheSharedReason() {
+        var admitted = 0
+        render(onAdmitUser = { _, _, _, _, _ -> admitted++ })
+        composeTestRule.onNodeWithTag("admin-users-admit-actor-input")
+            .performScrollTo().performTextInput("abc")
+        composeTestRule.onNodeWithTag("admin-users-admit-button")
+            .performScrollTo().assertIsNotEnabled().performClick()
+        composeTestRule.onNodeWithText(string(R.string.admin_users_page_admit_actor_hint)).assertExists()
+        assertEquals(0, admitted)
+        // The draft stays editable and a full key makes admit live.
+        composeTestRule.onNodeWithTag("admin-users-admit-actor-input")
+            .performScrollTo().performTextReplacement("d".repeat(64))
+        composeTestRule.onNodeWithTag("admin-users-admit-button").performScrollTo().assertIsEnabled().performClick()
+        assertEquals(1, admitted)
+    }
+
+    @Test
+    fun theTierGateSpeaksBeforeTheAccountKeyDraft() {
+        render(tierNames = emptyList())
+        composeTestRule.onNodeWithText(string(R.string.admin_users_page_admit_actor_hint)).assertDoesNotExist()
+    }
+
+    @Test
+    fun aCeilingThatIsNotAWholeNumberBlocksTheRegistrationSave() {
+        var saved = false
+        render(
+            registrationMode = FfiRegistrationMode.OPEN,
+            maxFreeUsers = "",
+            onSaveRegistration = { _, _, _ -> saved = true },
+        )
+        // Digits only reach the field, so the malformed case is one past u64.
+        composeTestRule.onNodeWithTag("admin-users-max-free-users-input")
+            .performScrollTo().performTextInput("99999999999999999999999")
+        composeTestRule.onNodeWithTag("admin-users-registration-save-button")
+            .performScrollTo().assertIsNotEnabled().performClick()
+        composeTestRule.onNodeWithText(string(R.string.admin_users_page_max_free_users_invalid)).assertExists()
+        assertEquals(false, saved)
+    }
+
+    @Test
+    fun aBlankCeilingStaysSaveable() {
+        var saved: String? = null
+        render(
+            registrationMode = FfiRegistrationMode.OPEN,
+            maxFreeUsers = "",
+            onSaveRegistration = { _, cap, _ -> saved = cap },
+        )
+        composeTestRule.onNodeWithTag("admin-users-registration-save-button").performScrollTo().performClick()
+        assertEquals("", saved)
     }
 
     @Test

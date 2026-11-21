@@ -54,6 +54,11 @@ class WebSettingsVM @Inject constructor(
      *  not claim "no published posts" about a list nobody asked for. */
     val hydrated = MutableStateFlow(false)
 
+    /** `true` once the page's read failed: the toggle then says load-failed
+     *  rather than "still loading" (`docs/goal/ui/README.md` § Offer only what
+     *  is possible, rule 5). */
+    val readFailed = MutableStateFlow(false)
+
     /** The nest blanked the caller's rendered pages and has not restored them
      *  yet (`fauna.web.publish.list`'s `rendered_pages_down`) — painted as
      *  `web-settings-render-status`, information only. */
@@ -114,9 +119,13 @@ class WebSettingsVM @Inject constructor(
                 // the actor this read was computed for.
                 webPublishStore.landWebPage(mine, domainRows, enabled, handle, domain)
                 render(enabled)
-            } catch (_: Exception) {
+            } catch (e: Exception) {
                 // One attempt: the transport already waits out a socket that
-                // has not landed yet (NestClient::request_inner).
+                // has not landed yet (NestClient::request_inner). A failure is
+                // never silent (rule 7): the toggle reads load-failed and the
+                // reason reaches `error-message`.
+                readFailed.value = true
+                errorMessage.value = e.message
             }
         }
     }

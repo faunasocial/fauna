@@ -34,6 +34,11 @@ import kotlinx.coroutines.launch
 import social.fauna.generated.Ids
 import uniffi.fauna_core.UnsentChange
 import uniffi.fauna_core.UnsentState
+import com.fauna.app.ui.controls.AlertDialog
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.TextButton
 
 @Composable
 fun AccountSettingsScreen(
@@ -151,28 +156,12 @@ fun AccountSettingsScreen(
         accountLabel = vm::accountLabel,
         onSwitch = { targetActorId ->
             // Stage 2 gate: a require-confirm account demands a native
-            // re-auth BEFORE the switch seam (mutation-first invariant
-            // holds — nothing is torn down until the confirmed switch).
-            // Declining is a pure no-op. An unflagged account switches
-            // straight through (long-term-store.md § Per-account re-auth).
-            // Each arm is one `activationGesture`: its completion is counted
-            // whatever the gate decided — the decline arm's only observable.
-            if (vm.requiresConfirm(targetActorId)) {
-                scope.launch {
-                    AccountReauth.activationGesture {
-                        val approved = AccountReauth.confirmActivation(
-                            reauthActivity, reauthTitle, reauthSubtitle,
-                        )
-                        if (approved) {
-                            vm.switchAccount(targetActorId, confirmed = true, onAccountSwitched)
-                        }
-                    }
-                }
-            } else {
-                AccountReauth.activationGesture {
-                    vm.switchAccount(targetActorId, confirmed = false, onAccountSwitched)
-                }
-            }
+            // re-auth BEFORE the switch seam; declining is a pure no-op — the
+            // one gate `launch_retry`'s switcher runs too.
+            AccountReauth.gatedSwitch(
+                scope, vm.requiresConfirm(targetActorId),
+                reauthActivity, reauthTitle, reauthSubtitle,
+            ) { confirmed -> vm.switchAccount(targetActorId, confirmed, onAccountSwitched) }
         },
         onRemove = vm::removeAccount,
         onRequireConfirmToggle = { toggledActorId, require -> vm.setRequireConfirm(toggledActorId, require) },
@@ -221,7 +210,9 @@ fun AccountSettingsScreen(
             // store. Mirrors the root Settings screen's prior wiring
             // (`accountVm.signOut { appState.isOnboarding = true }` in
             // FaunaNavHost, before this button lived here).
-            vm.signOut(onSignOut)
+            // A sign-out that throws or is refused stays on this page and
+            // says so (`ui/README.md` § Offer only what is possible, rule 7).
+            vm.signOut(onError = { showPageError(it.render(context)) }, onComplete = onSignOut)
         },
         recoveryKitSection = {
             RecoveryKitSection(
@@ -484,15 +475,20 @@ fun AccountSettingsContent(
             // Unsent changes (account-offline-mutation.md § The unsent-changes
             // surface, point 1) — STANDING, right after its sibling pending
             // actions and in its shape. Mirrors tui's unsent_changes_elements.
-            UnsentChangesCard(
-                unsentChanges = unsentChanges,
-                discardArmed = unsentDiscardArmed,
-                onRetry = onRetryUnsentChange,
-                onDiscard = onDiscardUnsentChange,
-                onConfirmDiscard = onConfirmDiscardUnsentChange,
-                describe = describeUnsentChange,
-                status = unsentChangeStatus,
-            )
+            // Not composed in Fauna Kids, whose `fauna-ffi` flavor excises the
+            // outbox list with `feed-manager` (`UnsentOutbox`'s twin; the iOS
+            // twin's `#if !FAUNA_KIDS`).
+            if (!com.fauna.app.BuildConfig.KIDS) {
+                UnsentChangesCard(
+                    unsentChanges = unsentChanges,
+                    discardArmed = unsentDiscardArmed,
+                    onRetry = onRetryUnsentChange,
+                    onDiscard = onDiscardUnsentChange,
+                    onConfirmDiscard = onConfirmDiscardUnsentChange,
+                    describe = describeUnsentChange,
+                    status = unsentChangeStatus,
+                )
+            }
         }
     }
 
@@ -670,8 +666,8 @@ fun unsentDescriber(): (UnsentChange) -> String {
 fun unsentStatusLine(): (UnsentChange) -> String {
     val context = LocalContext.current
     return { row ->
-        val state = resolveLocalized(context, com.fauna.ffi.unsentChangeStateText(row)).orEmpty()
-        val reason = resolveLocalized(context, com.fauna.ffi.unsentChangeReasonText(row))
+        val state = resolveLocalized(context, com.fauna.app.core.UnsentOutbox.stateText(row)).orEmpty()
+        val reason = resolveLocalized(context, com.fauna.app.core.UnsentOutbox.reasonText(row))
         if (reason == null) state
         else context.getString(R.string.settings_unsent_changes_status_with_reason)
             .replace("{state}", state)

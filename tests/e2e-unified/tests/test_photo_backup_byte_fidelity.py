@@ -69,7 +69,12 @@ The shared strip's own guarantees are pinned a layer down, in
 say is whether the app still calls it**, which is this file's whole job: a
 unit-tested lossless function nothing invokes leaves the outcome false.
 
-**Why this module is iOS-only** — macOS runs the same engine against the
+**Android runs the same assertion unchanged.** Its engine strips through the same
+shared face (`ExifStripper.strip` → `stripMediaMetadata`) before the same sealed
+`host.ingestFile`, so the stored `manifest_hash` and `size_bytes` mean exactly what
+they mean on iOS; nothing here reads a funnel field android omits.
+
+**Why macOS is not marked here** — macOS runs the same engine against the
 machine-global host Photos library, out of reach of an ordinary launch under
 convention 10; the macOS column runs this very function from
 `tests/real_session/test_photo_backup_macos.py` (convention 12's macOS arm).
@@ -99,6 +104,7 @@ from helpers.waiting import wait_until
 pytestmark = [
     pytest.mark.tier_3,
     pytest.mark.ios,
+    pytest.mark.android,
 ]
 
 

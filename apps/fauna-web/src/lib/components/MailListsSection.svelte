@@ -29,7 +29,18 @@
   // it via `error` and stays at empty lists/members until the nest track lands.
   import { identity } from '#lib/store';
   import { mailListsMachine, mailListMembersMachine } from '#lib/rpc';
-  import { ensureWasm, memberStatusLabel, archiveUrlNeedsConfirm } from '#lib/wasm';
+  import {
+    ensureWasm,
+    memberStatusLabel,
+    archiveUrlNeedsConfirm,
+    readPossibility,
+    mailUsableUnbuilt,
+    mailListSubmitPossibility,
+    mailListMemberAddPossibility,
+    mailListMemberImportPossibility,
+  } from '#lib/wasm';
+  import { blockedReason, paintAnswer, refusal } from '#lib/mail-affordances';
+  import type { Possibility } from '#lib/possibility';
   import { resolveLocalized } from '#lib/i18n/localized';
   import { afterNavigate } from '$app/navigation';
   import { onMount } from 'svelte';
@@ -120,7 +131,53 @@
   // after 4s — matches the aliases revoke/delete idiom).
   let armedDelete = $state<string | null>(null);
 
-  const hasDomain = $derived((snap?.local_domains.length ?? 0) > 0);
+  // The list add paints from the shared `MailListsSnapshot::create_possibility`
+  // over the machine's LIVE snapshot — a list is created on one of the user's
+  // own domains, blocked with `mail_lists.no_domain` without one
+  // (`mail-settings.md` § Errors & edge cases, *The in-page predicates*;
+  // `ui/README.md` § Offer only what is possible, rules 2 and 6), never an
+  // app-side domain test. Before the first snapshot: blocked, waiting
+  // (`Possibility::once_read(false)`, rule 5); `null` only while the wasm core
+  // itself is still loading.
+  let unread = $state<Possibility | null>(null);
+  const createAnswer = $derived.by(() =>
+    snap && machine ? (machine.createPossibility() as Possibility) : unread,
+  );
+  const create = $derived(paintAnswer(createAnswer));
+
+  // The sheets' submits paint from their shared draft answers
+  // (`list_submit_possibility`, `member_add_possibility`,
+  // `member_import_possibility`; `mail-settings.md` § Errors & edge cases,
+  // *The in-page predicates*) and each press asks the same answer again,
+  // refusing with its reason on `error-message` (rules 4, 6 and 7). `null`
+  // while the wasm core is still loading (`unread` is set once it is ready).
+  function submitAnswerNow(): Possibility | null {
+    if (unread === null) return null;
+    return mailListSubmitPossibility(editingId != null, localPartInput, domainInput, perSendInput);
+  }
+  function addMemberAnswerNow(): Possibility | null {
+    return unread === null ? null : mailListMemberAddPossibility(addMemberInput);
+  }
+  function importAnswerNow(): Possibility | null {
+    return unread === null ? null : mailListMemberImportPossibility(importInput);
+  }
+  const submitPaint = $derived(paintAnswer(submitAnswerNow()));
+  const addMemberPaint = $derived(paintAnswer(addMemberAnswerNow()));
+  const importPaint = $derived(paintAnswer(importAnswerNow()));
+
+  /** Ask a submit's answer again at the press; a refusal writes its reason on
+   *  `error-message`. True when it refused. */
+  function refused(answer: Possibility | null): boolean {
+    const verdict = refusal(answer);
+    if (verdict.refused && verdict.reason) error = resolveLocalized(verdict.reason);
+    return verdict.refused;
+  }
+
+  // A gesture whose machine is missing refuses with the shared unbuilt reason
+  // on the page's `error-message`, never silently (rule 7).
+  function refuseUnbuilt(): void {
+    error = resolveLocalized(blockedReason(mailUsableUnbuilt()));
+  }
   const busy = $derived(snap?.status === 'Working');
 
   // ── members drill-down (in-section reveal) ──────────────────────────
@@ -173,6 +230,7 @@
     if (!id?.secretHex) return;
     try {
       await ensureWasm();
+      unread = readPossibility('pending');
       machine = await mailListsMachine(id.secretHex);
       await machine.hydrate();
       applySnapshot();
@@ -197,6 +255,16 @@
   }
 
   function openAdd(): void {
+    // The press asks the same answer again (rule 6).
+    if (!machine) {
+      refuseUnbuilt();
+      return;
+    }
+    const verdict = refusal(machine.createPossibility() as Possibility);
+    if (verdict.refused) {
+      if (verdict.reason) error = resolveLocalized(verdict.reason);
+      return;
+    }
     editingId = null;
     nameInput = '';
     localPartInput = '';
@@ -239,8 +307,12 @@
   }
 
   async function submitSheet(): Promise<void> {
-    if (!machine) return;
+    if (!machine) {
+      refuseUnbuilt();
+      return;
+    }
     error = '';
+    if (refused(submitAnswerNow())) return;
     const draft = buildDraft();
     // First press on an off-server archive link saves nothing and arms; a second
     // press on the same URL goes through.
@@ -273,7 +345,10 @@
   }
 
   async function dispatch(action: unknown): Promise<void> {
-    if (!machine) return;
+    if (!machine) {
+      refuseUnbuilt();
+      return;
+    }
     try {
       await machine.dispatch(action);
       applySnapshot();
@@ -328,7 +403,10 @@
   }
 
   async function membersDispatch(action: unknown): Promise<void> {
-    if (!membersMachine) return;
+    if (!membersMachine) {
+      refuseUnbuilt();
+      return;
+    }
     try {
       await membersMachine.dispatch(action);
       applyMembersSnapshot();
@@ -339,8 +417,8 @@
   }
 
   async function submitAddMember(): Promise<void> {
+    if (refused(addMemberAnswerNow())) return;
     const address = addMemberInput.trim();
-    if (!address) return;
     await membersDispatch({ AddMember: { address } });
     if (!membersSnap?.error) {
       addMemberInput = '';
@@ -349,8 +427,8 @@
   }
 
   async function submitImport(): Promise<void> {
+    if (refused(importAnswerNow())) return;
     const addresses = importInput;
-    if (!addresses.trim()) return;
     await membersDispatch({ BatchImport: { addresses } });
     if (!membersSnap?.error) {
       importInput = '';
@@ -374,13 +452,13 @@
     <p class="muted small">{t.mail_lists.description}</p>
 
     <div class="actions">
-      <button class="btn" data-testid={IDS.MAIL_LISTS_ADD_BUTTON} disabled={!hasDomain} onclick={openAdd}>
+      <button class="btn" data-testid={IDS.MAIL_LISTS_ADD_BUTTON} disabled={create.disabled} onclick={openAdd}>
         {t.mail_lists.add_button}
       </button>
     </div>
 
-    {#if !hasDomain}
-      <p class="muted small">{t.mail_lists.no_domain}</p>
+    {#if create.reason}
+      <p class="muted small">{resolveLocalized(create.reason)}</p>
     {/if}
 
     <!-- Add/edit inline sheet. -->
@@ -434,13 +512,16 @@
           bind:value={perSendInput}
         />
         <div class="form-actions">
-          <button class="btn primary" data-testid={IDS.MAIL_LISTS_ADD_SHEET_SUBMIT_BUTTON} disabled={busy} onclick={submitSheet}>
+          <button class="btn primary" data-testid={IDS.MAIL_LISTS_ADD_SHEET_SUBMIT_BUTTON} disabled={busy || submitPaint.disabled} onclick={submitSheet}>
             {archiveConfirmArmed ? t.mail_lists.archive_off_server_confirm : t.mail_lists.submit}
           </button>
           <button class="btn" data-testid={IDS.MAIL_LISTS_ADD_SHEET_CANCEL_BUTTON} onclick={cancelSheet}>
             {t.mail_lists.cancel}
           </button>
         </div>
+        {#if submitPaint.reason}
+          <p class="muted small">{resolveLocalized(submitPaint.reason)}</p>
+        {/if}
       </div>
     {/if}
 
@@ -513,13 +594,16 @@
           bind:value={addMemberInput}
         />
         <div class="form-actions">
-          <button class="btn primary" data-testid={IDS.MAIL_LIST_MEMBERS_ADD_SHEET_SUBMIT_BUTTON} onclick={submitAddMember}>
+          <button class="btn primary" data-testid={IDS.MAIL_LIST_MEMBERS_ADD_SHEET_SUBMIT_BUTTON} disabled={addMemberPaint.disabled} onclick={submitAddMember}>
             {t.mail_lists.add_member_submit}
           </button>
           <button class="btn" data-testid={IDS.MAIL_LIST_MEMBERS_ADD_SHEET_CANCEL_BUTTON} onclick={() => { memberSheetOpen = false; }}>
             {t.mail_lists.add_member_cancel}
           </button>
         </div>
+        {#if addMemberPaint.reason}
+          <p class="muted small">{resolveLocalized(addMemberPaint.reason)}</p>
+        {/if}
       </div>
     {/if}
 
@@ -533,13 +617,16 @@
           bind:value={importInput}
         ></textarea>
         <div class="form-actions">
-          <button class="btn primary" data-testid={IDS.MAIL_LIST_MEMBERS_IMPORT_SHEET_SUBMIT_BUTTON} onclick={submitImport}>
+          <button class="btn primary" data-testid={IDS.MAIL_LIST_MEMBERS_IMPORT_SHEET_SUBMIT_BUTTON} disabled={importPaint.disabled} onclick={submitImport}>
             {t.mail_lists.import_submit}
           </button>
           <button class="btn" data-testid={IDS.MAIL_LIST_MEMBERS_IMPORT_SHEET_CANCEL_BUTTON} onclick={() => { importSheetOpen = false; }}>
             {t.mail_lists.import_cancel}
           </button>
         </div>
+        {#if importPaint.reason}
+          <p class="muted small">{resolveLocalized(importPaint.reason)}</p>
+        {/if}
       </div>
     {/if}
 

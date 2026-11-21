@@ -239,6 +239,21 @@ pub mod capability {
     /// advertisement. Never a human knob.
     pub const SUBSCRIPTION_PERIOD_ROTATE: &str = "subscription-period-rotate";
 
+    /// The nest stores and walks **paged manifests** (`file-sync.md` § Paged
+    /// manifests): it accepts pages at `POST /api/v1/manifest-pages`, admits a
+    /// root only once its pages are at rest, and every reader of a manifest's
+    /// chunk list — garbage collection first — reads a root through the one
+    /// manifest walk, so a root's pages and the chunks they name are kept.
+    ///
+    /// **Load-bearing version gate:** an engine writes a paged manifest ONLY to
+    /// a nest advertising this token. A nest that predates it does not walk
+    /// pages, so its garbage collector would read a root as naming no chunks
+    /// and reclaim every chunk of the file — user-data loss. Against any other
+    /// nest a file over the inline bound is refused before any chunk is sent.
+    /// Always-on from the build whose every walk reads pages. Never a human
+    /// knob.
+    pub const PAGED_MANIFESTS: &str = "paged-manifests";
+
     /// Whether `token` is advertised in a nest's `NestInfoReply.capabilities`.
     ///
     /// The degrade contract: a token the nest does **not** advertise (including an

@@ -64,7 +64,7 @@ class ProfileOffersVMPaymentLinkTest {
     fun thePaymentLinkSubscribesAtTheHomeThenOpensTheComposedCheckout() {
         val opened = mutableListOf<String>()
         val api = api { SubscribeCheckout(FfiSubscribeReply.Queued(requestId = 7L), composed) }
-        val vm = ProfileOffersVM(api)
+        val vm = ProfileOffersVM(api, mock(android.content.Context::class.java))
 
         vm.payTo(author, "gold", raw, remote) { opened += it }
 
@@ -81,7 +81,7 @@ class ProfileOffersVMPaymentLinkTest {
     fun anApprovedReplyReReadsTheRowLikeTheSubscribeButton() {
         val opened = mutableListOf<String>()
         val api = api { SubscribeCheckout(FfiSubscribeReply.Approved(tier = "gold", expiresAt = null), composed) }
-        val vm = ProfileOffersVM(api)
+        val vm = ProfileOffersVM(api, mock(android.content.Context::class.java))
 
         vm.payTo(author, "gold", raw, remote) { opened += it }
 
@@ -93,7 +93,7 @@ class ProfileOffersVMPaymentLinkTest {
     @Test
     fun nothingToOpenOpensNothing() {
         val opened = mutableListOf<String>()
-        val vm = ProfileOffersVM(api { null })
+        val vm = ProfileOffersVM(api { null }, mock(android.content.Context::class.java))
 
         vm.payTo(author, "gold", raw, remote) { opened += it }
 
@@ -104,7 +104,7 @@ class ProfileOffersVMPaymentLinkTest {
     @Test
     fun aRefusedSubscribeIsThePageErrorAndOpensNothing() {
         val opened = mutableListOf<String>()
-        val vm = ProfileOffersVM(api { throw RuntimeException("subscribe refused") })
+        val vm = ProfileOffersVM(api { throw RuntimeException("subscribe refused") }, mock(android.content.Context::class.java))
 
         vm.payTo(author, "gold", raw, remote) { opened += it }
 
@@ -120,7 +120,7 @@ class ProfileOffersVMPaymentLinkTest {
             whenever(api.subscriptionSubscribe(anyString(), anyString(), anyString()))
                 .thenReturn(FfiSubscribeReply.Queued(requestId = 1L))
         }
-        val vm = ProfileOffersVM(api)
+        val vm = ProfileOffersVM(api, mock(android.content.Context::class.java))
 
         vm.subscribe(author, "gold", remote)
 

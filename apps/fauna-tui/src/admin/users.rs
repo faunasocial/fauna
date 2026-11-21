@@ -32,7 +32,7 @@ use fauna_ui_ids as ids;
 
 use super::{
     Action, AdminField, AdminState, GUARDIAN_NONE_VALUE, USERS_PAGE_SIZE, UsersSnapshot,
-    UsersState, guardian_draft_names_someone, next_users_offset, prev_users_offset,
+    UsersState, guardian_draft_names_someone,
 };
 use crate::element::{Element, Field, Gesture, SelectTarget};
 use crate::pages::Page;
@@ -71,7 +71,7 @@ pub(super) fn users_elements(state: &AdminState) -> Vec<Element> {
     els.extend(admit_section(users, snapshot));
     els.extend(invite_section(users, snapshot));
     els.extend(user_list_section(users, snapshot));
-    els.extend(pending_section(snapshot));
+    els.extend(pending_section(snapshot, &users.viewer_actor));
     els
 }
 
@@ -84,7 +84,7 @@ pub(super) fn users_elements(state: &AdminState) -> Vec<Element> {
 /// and its approvals readout; approve and cancel are one click each. Row
 /// children ride the `.within(row, i)` idiom of the settings section so both
 /// flat and scoped queries resolve.
-fn pending_section(snapshot: &UsersSnapshot) -> Vec<Element> {
+fn pending_section(snapshot: &UsersSnapshot, viewer: &[u8]) -> Vec<Element> {
     let rows: Vec<_> = snapshot
         .pending_actions
         .iter()
@@ -136,6 +136,8 @@ fn pending_section(snapshot: &UsersSnapshot) -> Vec<Element> {
             )
             .within(ids::ADMIN_PENDING_ACTION_ITEM, i),
         );
+        // Approve from the shared answer: absent on the viewer's own
+        // scheduled action, which the nest refuses as self-approval.
         els.push(
             Element::gesture_button(
                 ids::ADMIN_PENDING_ACTION_APPROVE_BUTTON,
@@ -143,6 +145,9 @@ fn pending_section(snapshot: &UsersSnapshot) -> Vec<Element> {
                 true,
                 Gesture::Admin(Action::ApprovePending { id: action.id }),
             )
+            .possible(fauna_client_admin::pending_approve_possibility(
+                action, viewer,
+            ))
             .within(ids::ADMIN_PENDING_ACTION_ITEM, i),
         );
         els.push(
@@ -438,13 +443,30 @@ fn invite_section(state: &UsersState, snapshot: &UsersSnapshot) -> Vec<Element> 
     // survives the reseed, so the button stays until Cancel). The token itself lists
     // as an `invite-code-value` row below (the re-read), so the button only needs to
     // exist + copy from state (its label names the minted code so a human sees it).
+    // A copy that reached the terminal is confirmed: "Copied!" after the code's
+    // own label, the code as the `copied` attr (the `account-actor-id-copy-btn`
+    // contract — OSC 52 is otherwise fire-and-forget).
     if let Some(code) = state.minted_code.as_deref() {
-        els.push(Element::gesture_button(
+        let label = if state.minted_code_copied {
+            format!(
+                "{} · {}",
+                t::users_page::minted_code(code),
+                fauna_i18n::strings::common::COPIED
+            )
+        } else {
+            t::users_page::minted_code(code)
+        };
+        let button = Element::gesture_button(
             ids::ADMIN_USERS_INVITE_CODE_COPY_BTN,
-            t::users_page::minted_code(code),
+            label,
             true,
             Gesture::Admin(Action::CopyMintedCode),
-        ));
+        );
+        els.push(if state.minted_code_copied {
+            button.attr("copied", code.to_string())
+        } else {
+            button
+        });
     }
 
     // The existing codes — indexed `invite-code-item` anchor + `invite-code-value` +
@@ -511,10 +533,11 @@ fn guardian_picker(
 /// An age-band picker (`family-safety.md` § App surface → *Age-band surfaces*)
 /// — the shared `age_band_options` catalog by VALUE (`not-set` + the four wire
 /// tokens, `AgeBand::ORDER`), so no app spells the vocabulary or its order;
-/// `actions/admin.py` drives it with the value. **Enabled only while a guardian
-/// is selected** (`guardian_selected`): the nest refuses a band without a
-/// guardian designation, and the picker gates the same way client-side — a
-/// disabled select still paints its (not-set) value, so the driver can read it.
+/// `actions/admin.py` drives it with the value. **Blocked, with its reason,
+/// until a guardian is selected** (`guardian_selected`; the shared
+/// `age_band_possibility`): the nest refuses a band without a guardian
+/// designation — a disabled select still paints its (not-set) value, so the
+/// driver can read it.
 fn age_band_picker(
     id: &str,
     draft: &str,
@@ -522,9 +545,18 @@ fn age_band_picker(
     guardian_selected: bool,
 ) -> Element {
     let options: Vec<String> = age_band_options().into_iter().map(|o| o.value).collect();
+    let answer = fauna_client_admin::age_band_possibility(guardian_selected);
+    // While blocked the select's own prompt carries the reason (the seam never
+    // overwrites a page's label, and "Age band" alone would leave the reason
+    // painted nowhere — `ui/README.md` § Offer only what is possible, rule 2).
+    let label = answer.reason().map_or_else(
+        || fauna_i18n::strings::family::age_band::LABEL.to_string(),
+        |reason| reason.resolve(fauna_i18n::strings::lookup),
+    );
     Element::select(id, draft.to_string(), target, options)
-        .labelled(fauna_i18n::strings::family::age_band::LABEL)
+        .labelled(label)
         .enabled(guardian_selected)
+        .possible(answer)
 }
 
 /// Section 4 — the user list (`admin.md` § 2 → Section 4): one row per user with a
@@ -635,6 +667,12 @@ fn user_list_section(state: &UsersState, snapshot: &UsersSnapshot) -> Vec<Elemen
             );
         }
         if controls.remove_admin {
+            // Disabled with its reason on the nest's last superadmin. Declared
+            // enabled: the possibility seam disables it AND paints the reason
+            // as its label; a page-side disable skips the seam, leaving the
+            // reason painted nowhere (`ui/README.md` § Offer only what is
+            // possible, rule 2).
+            let answer = fauna_client_admin::remove_admin_possibility(user);
             els.push(
                 Element::gesture_button(
                     ids::ADMIN_USERS_REMOVE_ADMIN_BUTTON,
@@ -642,6 +680,7 @@ fn user_list_section(state: &UsersState, snapshot: &UsersSnapshot) -> Vec<Elemen
                     true,
                     Gesture::Admin(Action::RemoveAdmin { row: i }),
                 )
+                .possible(answer)
                 .within(ids::USER_ROW, i),
             );
         }
@@ -707,9 +746,10 @@ fn user_list_section(state: &UsersState, snapshot: &UsersSnapshot) -> Vec<Elemen
     }
 
     // Pagination — always present (`view` anchor → a page-indicator label; the e2e
-    // gates on `count("admin-users-pagination") > 0`). Prev/next paint DISABLED at
-    // the bounds (admin.md § Users pagination; linux's `set_sensitive`), read off
-    // the same steppers `apply_local` guards the click with, so the two never part.
+    // gates on `count("admin-users-pagination") > 0`). Prev/next are blocked at
+    // the bounds, with the reason saying so, by the shared
+    // `users_page_step_possibility` the read gates fold on — the answer
+    // `apply_local` asks again before stepping, so the two never part.
     let pages = fauna_core::format::total_pages(snapshot.total, USERS_PAGE_SIZE);
     let current = fauna_core::format::current_page(state.offset, USERS_PAGE_SIZE);
     els.push(Element::label(
@@ -719,13 +759,13 @@ fn user_list_section(state: &UsersState, snapshot: &UsersSnapshot) -> Vec<Elemen
     els.push(Element::gesture_button(
         ids::ADMIN_USERS_PREV_PAGE,
         t::users_page::PREV_PAGE,
-        prev_users_offset(state).is_some(),
+        true,
         Gesture::Admin(Action::UsersPrevPage),
     ));
     els.push(Element::gesture_button(
         ids::ADMIN_USERS_NEXT_PAGE,
         t::users_page::NEXT_PAGE,
-        next_users_offset(state).is_some(),
+        true,
         Gesture::Admin(Action::UsersNextPage),
     ));
 
@@ -818,6 +858,48 @@ mod tests {
         app.admin.sub = AdminPage::Users;
         apply_outcome(&mut app, Outcome::UsersLoaded(Box::new(snapshot)));
         app
+    }
+
+    /// `admin.md` § 2, *What a row offers*: the admit and invite buttons are
+    /// never enabled beside an empty tier select — blocked with the reason
+    /// naming the Tiers page, and a press refuses on `error-message`.
+    #[test]
+    fn admit_and_invite_wait_for_a_tier() {
+        let mut empty = snapshot(vec![user(0x11, "free", "alice")], 1);
+        empty.tiers.clear();
+        let mut app = app_on_users(empty);
+        app.admin.users.invite_form_open = true;
+        let els = super::super::elements(&app);
+        for id in [
+            ids::ADMIN_USERS_ADMIT_BUTTON,
+            ids::CREATE_INVITE_CONFIRM_BTN,
+        ] {
+            let answer = els
+                .iter()
+                .find(|e| e.id == id)
+                .and_then(|e| e.possibility.clone())
+                .unwrap_or_else(|| panic!("{id} answered"));
+            assert_eq!(
+                answer.reason().map(|r| r.key.as_str()),
+                Some("admin.users_page.no_tier"),
+                "{id}"
+            );
+        }
+        assert!(apply_local(&mut app, Action::AdmitUser).is_none());
+        assert!(
+            app.admin.users.action_error.is_some(),
+            "a users-page refusal lands on the users page's own error line"
+        );
+
+        let mut app = app_on_users(snapshot(vec![user(0x11, "free", "alice")], 1));
+        // A well-formed account key (built at run time, out of the publish
+        // secret scan), so the draft half answers too.
+        app.admin.users.admit_actor_input = "ab".repeat(32);
+        assert!(
+            super::super::action_possibility(&app.admin, &Action::AdmitUser)
+                .expect("admit answered")
+                .is_possible()
+        );
     }
 
     /// Both guardian pickers offer every account on the nest, not the Users page
@@ -1175,14 +1257,25 @@ mod tests {
         // 120 → three pages: [0,50), [50,100), [100,120)) — and the controls paint
         // that bound as their enabled state (admin.md § Users pagination: the e2e
         // asserts `prev` disabled at offset 0 rather than clicking through it).
-        let enabled = |app: &crate::app::App, id: &str| {
-            users_elements(&app.admin)
-                .iter()
+        // The bound is the shared `users_page_step_possibility` the read gates
+        // fold on (the seam then desensitizes the control and paints the reason).
+        let answer = |app: &crate::app::App, id: &str| {
+            super::super::elements(app)
+                .into_iter()
                 .find(|e| e.id == id)
                 .unwrap_or_else(|| panic!("{id} rendered"))
-                .enabled
+                .possibility
+                .unwrap_or_else(|| panic!("{id} carries the shared answer"))
         };
+        let enabled = |app: &crate::app::App, id: &str| answer(app, id).is_possible();
         assert_eq!(app.admin.users.offset, 0);
+        assert_eq!(
+            answer(&app, ids::ADMIN_USERS_PREV_PAGE)
+                .reason()
+                .map(|r| r.key.as_str()),
+            Some("admin.users_page.no_page_before"),
+            "prev at page 1 says why"
+        );
         assert!(
             !enabled(&app, ids::ADMIN_USERS_PREV_PAGE),
             "prev disabled on page 1"
@@ -1218,6 +1311,25 @@ mod tests {
         assert_eq!(app.admin.users.offset, 0);
         apply_local(&mut app, Action::UsersPrevPage); // page 1
         assert_eq!(app.admin.users.offset, 0, "prev at page 1 is a no-op");
+    }
+
+    /// A row action the shared answer refuses sends nothing, and its reason
+    /// reads on `admin-users-action-error`, never the app-wide line: remove
+    /// admin on the nest's last superadmin, and an absent control (evict on
+    /// an admin row) refused with no reason to paint.
+    #[test]
+    fn a_refused_row_action_reads_on_the_users_error_line() {
+        let mut last = user(0x11, "free", "alice");
+        last.is_admin = true;
+        last.last_superadmin = true;
+        let mut app = app_on_users(snapshot(vec![last], 1));
+        assert!(apply_local(&mut app, Action::RemoveAdmin { row: 0 }).is_none());
+        assert_eq!(
+            app.admin.users.action_error.as_deref(),
+            Some(fauna_i18n::strings::admin::users_page::REMOVE_ADMIN_LAST_SUPERADMIN)
+        );
+        assert!(!app.errors.contains_key(&Page::Admin));
+        assert!(apply_local(&mut app, Action::EvictUser { row: 0 }).is_none());
     }
 
     /// A failed mutation folds onto the page-scoped `admin-users-action-error`, NOT
@@ -1283,7 +1395,7 @@ mod tests {
         assert!(op.is_none(), "a bad ceiling dispatches nothing");
         assert_eq!(
             app.admin.users.action_error.as_deref(),
-            Some(t::users_page::MAX_FREE_USERS_HINT)
+            Some(t::users_page::MAX_FREE_USERS_INVALID)
         );
 
         // An unrecognized posture renders read-only — the picker is absent, the

@@ -209,7 +209,7 @@ def test_native_peer_reaction_shows_pill_on_senders_copy(
     red here that names the pill, with bob's reaction sent, is a product bug in
     the fold or the render, not a test to soften.
     """
-    alice = real_faunamls_app
+    alice = second_real_faunamls_app.owner_app
     bob_app, bob = second_real_faunamls_app
     body = "react to me natively"
 

@@ -135,6 +135,23 @@ class AdminUsersVM @Inject constructor(
     private val _actionError = MutableStateFlow<String?>(null)
     val actionError: StateFlow<String?> = _actionError
 
+    /** Whether the users list has answered once — the page's own read, which
+     *  a later failed re-read never takes back (tui's `users.snapshot`). */
+    private var usersRead = false
+
+    init {
+        // A read that has not answered is read again when the nest connection
+        // comes back (`docs/goal/behavior/admin.md` § Errors & edge cases,
+        // *Controls wait for their read*; tui's `reconnect_reread_op`): only
+        // while the users list is unread, so a draft over an answered page
+        // survives. The entry read is the screen's `LaunchedEffect`.
+        viewModelScope.rereadOnReconnect(
+            api.reconnectTick,
+            answered = { usersRead },
+            reread = ::refresh,
+        )
+    }
+
     fun refresh() {
         viewModelScope.launch {
             _isLoading.value = true
@@ -374,11 +391,10 @@ class AdminUsersVM @Inject constructor(
     /**
      * Admit a known actor id directly via `fauna.admin.users.create` — the
      * third account-creation path (`admin-users-admit-*`; public-mode.md §
-     * Registration & Identity). [actorHex] must be exactly 64 hex chars — a
-     * malformed id is a user error, never dispatched (the nest would refuse
-     * it anyway; failing local keeps the message actionable), surfaced via
-     * [invalidActorHint] on `admin-users-action-error` (mirrors tui's
-     * `admit_mutation` / linux's admit-button handler). [handle] blank ⇒
+     * Registration & Identity). [actorHex] is a draft the page's shared
+     * `admit_actor_possibility` already admitted (64 hex); the screen refuses a
+     * malformed one on `admin-users-action-error` before calling this, so it is
+     * only decoded here. [handle] blank ⇒
      * `null`, the deliberate handle-less admission (public-mode.md § A
      * handle-less account). The form is never cleared here on success or
      * failure — the new row in the Users-section refetch is the feedback.
@@ -389,15 +405,8 @@ class AdminUsersVM @Inject constructor(
         tier: String,
         guardianActor: ByteArray?,
         ageBand: String?,
-        invalidActorHint: String,
     ) {
         val trimmed = actorHex.trim()
-        val isHex = trimmed.length == 64 &&
-            trimmed.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' }
-        if (!isHex) {
-            _actionError.value = invalidActorHint
-            return
-        }
         action {
             api.adminUsersCreate(
                 HexUtil.hexToBytes(trimmed),
@@ -435,6 +444,7 @@ class AdminUsersVM @Inject constructor(
         val reply = api.adminUsersList(limit = PAGE_SIZE, offset = _userOffset.value)
         _users.value = reply.users
         _userTotal.value = reply.total
+        usersRead = true
         reloadAllUsers()
     }
 

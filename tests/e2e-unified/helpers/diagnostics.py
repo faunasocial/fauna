@@ -328,6 +328,10 @@ _LAUNCH_LOG_MARKERS = (
     "sign-out",
     "signOut",
     "[pageerror]",
+    # A session patch the app refused or half-applied: the one line that tells
+    # a declined account switch from a stale read of the live identity.
+    "session patch",
+    "not fully recognized",
 )
 
 

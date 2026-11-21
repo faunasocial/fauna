@@ -13,29 +13,34 @@ The resolution, every step of which either answers or REFUSES with its reason
 (never a guess, never the tip, never the pin):
 
 1. The image's commit. For a drive that is about to BUY a box, the registry's
-   revision label on the channel's tag (`image_commit`, read with
-   `docker buildx imagetools inspect`, every platform agreeing — the shape of
-   `scripts/_store_review.py::image_version`). For a box already serving, the
+   revision label on the channel's tag (`image_commit`, read anonymously over
+   the OCI distribution API with the standard library — pull token, the tag's
+   manifest or index, each platform's config blob — every platform agreeing;
+   no Docker, so it answers on every dev machine). For a box already serving, the
    `commit` its `/api/v1/health` reports — a plain HTTPS probe, which the
    before-a-complex-connection rule leaves free (`health_commit`).
 2. The private commit (`private_commit_for`). A private `:dev` build's label is
    the private commit itself, so a revision this repository has is taken as
    is. A public build's label is a public commit, paired to its private source
    by the `Sync-Point:` trailer the publish tool writes
-   (`helpers/feature_ledger.py::sync_point_of`, read in the standing mirror),
+   (`helpers/feature_ledger.py::sync_point_of`, read in the standing mirror;
+   a commit the local clone lacks — macOS and Windows keep a clone nothing
+   fetches — is read from the public repository's API, `public_sync_point`),
    resolved here to the full sha and cross-checked against the release table's
    row whose `public_commit` it is, when one exists (`release-table.md`
    § Tag gate and release table, *Promotion copies the tested digest*).
 3. The build: `helpers/prev_build.py`'s commit-keyed cache, client alone
    (`nest=False`), so one release costs one build. The pin is not consulted.
 
-Every string a box returns (the health JSON) is untrusted data: only a hex
-commit is taken from it, validated before use.
+Every string a box or the registry returns (the health JSON, the image labels)
+is untrusted data: only a hex commit and a dotted-numeric version are taken
+from it, validated before use.
 
 CLI (what the justfile recipes and the conftest prebuild call):
 
     release_app.py resolve --image <ref>              print the private commit
     release_app.py resolve --box <host>
+    release_app.py resolve --version <x.y.z|stable|test|dev>
     release_app.py path    (--image <ref>|--box <host>|--commit <sha>) --client <c>
     release_app.py build   (--image <ref>|--box <host>|--commit <sha>) --client <c>
 
@@ -79,6 +84,7 @@ class Resolution:
     revision: str          # what the image (or the box) names — public or private
     version: str | None    # the image's version label, when read off the registry
     via: str               # "private" (the revision is ours) or "sync-point"
+    image: str | None = None  # the image ref it was read off, when one was
 
     def describe(self) -> str:
         how = ("the revision is a private commit" if self.via == "private"
@@ -87,39 +93,116 @@ class Resolution:
         return f"{self.commit[:12]}{ver} — {how}"
 
 
-def _run(argv: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(argv, capture_output=True, text=True, timeout=120, check=False)
+_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_VERSION = re.compile(r"^\d+\.\d+\.\d+$")
+#: The manifest kinds a tag may name: an index (one manifest per platform) or a
+#: single platform's manifest, in their OCI and Docker spellings.
+_ACCEPT = ", ".join((
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+))
+#: The most a registry reply is read — a manifest or config is a few KB.
+_MAX_BODY = 4 * 1024 * 1024
 
 
-def image_commit(image_ref: str, run=_run) -> tuple[str, str | None]:
+def _fetch(url: str, headers: dict[str, str]) -> bytes:
+    """GET `url` (https only) — the registry seam; an HTTP error raises."""
+    if not url.startswith("https://"):
+        raise ReleaseAppRefused(f"refusing a non-https registry read: {url[:64]!r}")
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read(_MAX_BODY)
+
+
+def _split_ref(image_ref: str) -> tuple[str, str, str]:
+    """`(registry, repository, tag)` of `<registry>/<repository>:<tag>`."""
+    name, _, tag = image_ref.rpartition(":")
+    registry, _, repository = name.partition("/")
+    if not (registry and repository and tag) or "." not in registry or "/" in tag:
+        raise ReleaseAppRefused(
+            f"not a <registry>/<repository>:<tag> reference: {image_ref[:80]!r}")
+    return registry, repository, tag
+
+
+def _image_labels(image_ref: str, fetch) -> list[dict]:
+    """Every platform's config `Labels` of `image_ref`, read anonymously over
+    the OCI distribution API — the reads a box's unauthenticated pull makes:
+    the pull token, the tag's manifest (an index steps to each platform's
+    manifest, buildx's attestation entries skipped), each manifest's config
+    blob. One path on every machine: no Docker (mac and win have none)."""
+    registry, repository, tag = _split_ref(image_ref)
+    base = f"https://{registry}/v2/{repository}"
+    token = json.loads(fetch(
+        f"https://{registry}/token?scope=repository:{repository}:pull&service={registry}",
+        {}))["token"]
+    auth = {"Authorization": f"Bearer {token}"}
+
+    def get_json(url: str, accept: str | None = None) -> dict:
+        headers = dict(auth, **({"Accept": accept} if accept else {}))
+        doc = json.loads(fetch(url, headers))
+        if not isinstance(doc, dict):
+            raise ValueError("the reply is not a JSON object")
+        return doc
+
+    def digest_of(node) -> str:
+        digest = node.get("digest") if isinstance(node, dict) else None
+        if not isinstance(digest, str) or not _DIGEST.match(digest):
+            raise ValueError(f"not a sha256 digest: {str(digest)[:80]!r}")
+        return digest
+
+    top = get_json(f"{base}/manifests/{tag}", _ACCEPT)
+    if "manifests" in top:  # an index: one manifest per platform
+        manifests = []
+        for entry in top["manifests"]:
+            plat = (entry.get("platform") or {}) if isinstance(entry, dict) else {}
+            if "unknown" in (plat.get("os"), plat.get("architecture")):
+                continue  # an attestation manifest — it carries no image config
+            manifests.append(get_json(f"{base}/manifests/{digest_of(entry)}", _ACCEPT))
+    else:
+        manifests = [top]
+    labels = []
+    for manifest in manifests:
+        config = get_json(f"{base}/blobs/{digest_of(manifest.get('config'))}")
+        found = (config.get("config") or {}).get("Labels") or {}
+        if not isinstance(found, dict):
+            raise ValueError("the image config's Labels is not a map")
+        labels.append(found)
+    return labels
+
+
+def image_commit(image_ref: str, fetch=_fetch) -> tuple[str, str | None]:
     """`(revision, version)` — the labels `image_ref` carries on the registry.
 
-    `run(argv)` returns a CompletedProcess (captured text). Every platform of a
-    multi-platform image must agree on the revision; a missing image, an
-    unreadable or missing label, or a disagreement is a refusal."""
-    out = run(["docker", "buildx", "imagetools", "inspect", image_ref,
-               "--format", "{{json .Image}}"])
-    if out.returncode != 0:
-        raise ReleaseAppRefused(
-            f"cannot read {image_ref} off the registry: {(out.stderr or '').strip()}")
+    `fetch(url, headers)` returns a reply's body and raises on an HTTP error.
+    Every platform of a multi-platform image must agree on the revision; a
+    missing image, an unreachable registry, an unreadable or missing label, or
+    a disagreement is a refusal, never a traceback. The registry's text is
+    untrusted data: only a hex revision and a dotted-numeric version are taken
+    from it (any other version label reads as none)."""
     try:
-        images = json.loads(out.stdout)
-        # A single-platform image answers with the image itself, a multi-platform
-        # one with a {platform: image} map.
-        if isinstance(images, dict) and "config" in images:
-            images = {"": images}
-        labels = [img["config"]["Labels"] or {} for img in images.values()]
-    except (json.JSONDecodeError, AttributeError, KeyError, TypeError) as exc:
-        raise ReleaseAppRefused(f"{image_ref}: unreadable image config ({exc})") from None
-    revisions = {lab.get(REVISION_LABEL) for lab in labels}
-    if not labels or None in revisions or "" in revisions:
+        labels = _image_labels(image_ref, fetch)
+    except ReleaseAppRefused:
+        raise
+    except Exception as exc:  # network, HTTP, JSON, shape — all one answer
+        raise ReleaseAppRefused(
+            f"cannot read {image_ref} off the registry "
+            f"({type(exc).__name__}: {str(exc)[:160]})") from None
+    revisions = {str(lab.get(REVISION_LABEL) or "").strip().lower() for lab in labels}
+    if not labels or "" in revisions:
         raise ReleaseAppRefused(f"{image_ref} carries no {REVISION_LABEL} label")
     if len(revisions) != 1:
         raise ReleaseAppRefused(
-            f"{image_ref}'s platforms disagree on {REVISION_LABEL}: {sorted(revisions)}")
-    versions = {lab.get(VERSION_LABEL) for lab in labels}
+            f"{image_ref}'s platforms disagree on {REVISION_LABEL}: "
+            f"{sorted(r[:16] for r in revisions)}")
+    revision = revisions.pop()
+    if not _HEX.match(revision):
+        raise ReleaseAppRefused(
+            f"{image_ref}'s {REVISION_LABEL} is not a commit ({revision[:16]!r})")
+    versions = {str(lab.get(VERSION_LABEL) or "").strip() for lab in labels}
     version = versions.pop() if len(versions) == 1 else None
-    return revisions.pop().lower(), version
+    return revision, (version if version and _VERSION.match(version) else None)
 
 
 def health_commit(host: str, fetch=None) -> str:
@@ -153,10 +236,46 @@ def _full_sha(rev: str, repo: Path) -> str | None:
     return out.stdout.strip() if out.returncode == 0 and out.stdout.strip() else None
 
 
+PUBLIC_REPO = "faunasocial/fauna"
+
+
+def public_sync_point(public_commit: str, public_clone: Path | None = None,
+                      repo: Path = REPO, *, read_clone=None,
+                      fetch=None) -> tuple:
+    """`(private short sha, reason)` — the `Sync-Point:` trailer of a public commit.
+
+    Read first in the public clone (`feature_ledger.sync_point_of`; on Linux the
+    standing mirror holds every public commit, since it pushes them). The clone
+    on macOS and Windows is a transform-written build fixture nothing fetches, so a
+    commit it lacks is read from the public repository itself: the commit's
+    message over GitHub's REST API, anonymously. Nothing is written to the clone
+    (`publish-gates.md` § The standing mirror: only `fauna-publish` writes it).
+    The trailer stays the authority either way; the reply is untrusted data, of
+    which only the echoed sha and the trailer's hex are taken."""
+    read_clone = read_clone or feature_ledger.sync_point_of
+    short, why = read_clone(public_commit, public_clone=public_clone, repo=repo)
+    if short is not None:
+        return short, ""
+    fetch = fetch or _fetch
+    url = f"https://api.github.com/repos/{PUBLIC_REPO}/commits/{public_commit}"
+    try:
+        reply = json.loads(fetch(url, {"Accept": "application/vnd.github+json",
+                                       "User-Agent": "fauna-release-app"}))
+        sha = str(reply.get("sha") or "").lower()
+        message = str((reply.get("commit") or {}).get("message") or "")
+    except Exception as exc:  # noqa: BLE001 — any failure is a stated refusal
+        return None, (f"{why}; reading it from {PUBLIC_REPO} failed too "
+                      f"({type(exc).__name__}: {str(exc)[:120]})")
+    if not (_HEX.match(sha) and sha.startswith(public_commit.lower())):
+        return None, (f"{why}; {PUBLIC_REPO} answered for another commit "
+                      f"({sha[:12] or '?'})")
+    return feature_ledger.sync_point_in_message(public_commit, message)
+
+
 def private_commit_for(revision: str, *, repo: Path = REPO,
                        public_clone: Path | None = None,
                        releases: list | None = None,
-                       sync_point_of=feature_ledger.sync_point_of) -> tuple[str, str]:
+                       sync_point_of=public_sync_point) -> tuple[str, str]:
     """`(full private sha, via)` for the commit an image or a box names.
 
     `via` is ``"private"`` when this repository has the revision itself (a
@@ -192,11 +311,60 @@ def private_commit_for(revision: str, *, repo: Path = REPO,
     return full, "sync-point"
 
 
-def resolve_image(image_ref: str, *, run=_run, **kw) -> Resolution:
+def resolve_image(image_ref: str, *, fetch=_fetch, **kw) -> Resolution:
     """The release app's commit for a box about to be built on `image_ref`."""
-    revision, version = image_commit(image_ref, run=run)
+    revision, version = image_commit(image_ref, fetch=fetch)
     commit, via = private_commit_for(revision, **kw)
-    return Resolution(commit=commit, revision=revision, version=version, via=via)
+    return Resolution(commit=commit, revision=revision, version=version, via=via,
+                      image=image_ref)
+
+
+IMAGE_REPO = "ghcr.io/faunasocial/nest"
+# The update channels a box is built on (`image-pipeline.md` § Image tags &
+# channels), each to its moving tag; the order is the search order for a version
+# no `:<version>` tag carries yet (a release candidate rides `:test` first).
+CHANNEL_TAGS = {"stable": "latest", "test": "test", "dev": "dev"}
+
+
+def resolve_version(name: str, *, fetch=_fetch, **kw) -> Resolution:
+    """The private commit of a product VERSION (`0.1.7`) or a CHANNEL (`test`).
+
+    A channel reads its moving tag. A version reads its own `:<version>` tag —
+    which the promote writes only at release — and, while that is absent, the
+    channel whose image's version label is that version. Never the tip: a name
+    nothing on the registry carries is a refusal naming what each channel serves.
+    """
+    if name in CHANNEL_TAGS:
+        return resolve_image(f"{IMAGE_REPO}:{CHANNEL_TAGS[name]}", fetch=fetch, **kw)
+    if not _VERSION.match(name or ""):
+        raise ReleaseAppRefused(
+            f"{name[:32]!r} is neither a version (like 0.1.7) nor a channel "
+            f"({', '.join(CHANNEL_TAGS)})")
+    try:
+        revision, version = image_commit(f"{IMAGE_REPO}:{name}", fetch=fetch)
+    except ReleaseAppRefused:
+        revision = None
+    if revision is not None:
+        if version != name:
+            raise ReleaseAppRefused(
+                f"{IMAGE_REPO}:{name} is labelled version {version!r}, not {name}")
+        commit, via = private_commit_for(revision, **kw)
+        return Resolution(commit=commit, revision=revision, version=version, via=via,
+                          image=f"{IMAGE_REPO}:{name}")
+    served = []
+    for channel, tag in CHANNEL_TAGS.items():
+        try:
+            revision, version = image_commit(f"{IMAGE_REPO}:{tag}", fetch=fetch)
+        except ReleaseAppRefused:
+            continue
+        if version == name:
+            commit, via = private_commit_for(revision, **kw)
+            return Resolution(commit=commit, revision=revision, version=version, via=via,
+                              image=f"{IMAGE_REPO}:{tag}")
+        served.append(f"{channel} {version or '(unlabelled)'}")
+    raise ReleaseAppRefused(
+        f"no image carries version {name} — the channels serve: "
+        f"{', '.join(served) or 'nothing readable'}")
 
 
 def resolve_box(host: str, *, fetch=None, **kw) -> Resolution:
@@ -327,8 +495,10 @@ def _target(args: list[str]) -> Resolution:
         return resolve_image(args[args.index("--image") + 1])
     if "--box" in args:
         return resolve_box(args[args.index("--box") + 1])
-    raise SystemExit("release_app.py: name the target — --image <ref>, --box <host> "
-                     "or --commit <sha>")
+    if "--version" in args:
+        return resolve_version(args[args.index("--version") + 1])
+    raise SystemExit("release_app.py: name the target — --image <ref>, --box <host>, "
+                     "--version <x.y.z|stable|test|dev> or --commit <sha>")
 
 
 def main(argv: list[str] | None = None) -> int:

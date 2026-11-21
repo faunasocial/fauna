@@ -4206,6 +4206,96 @@ type FfiDestroyerOfferStatus struct{}
 func (_ FfiDestroyerOfferStatus) Destroy(value OfferStatus) {
 }
 
+// Whether an affordance can succeed **now**, and if not, why.
+//
+// The serde form is `{"state": "possible"}`, `{"state": "blocked", "reason":
+// {…}}` or `{"state": "absent"}`, the shape the web SPA reads. It is
+// serialize-only on purpose: an answer is computed where it is shown and
+// never decoded off a wire or out of storage, so it owes no forward-compat
+// catch-all (`transport.md` § Schema and forward-compat discipline, rule 3).
+type Possibility interface {
+	Destroy()
+}
+
+// Offer it, enabled.
+type PossibilityPossible struct {
+}
+
+func (e PossibilityPossible) Destroy() {
+}
+
+// Show it disabled, with `reason` painted on the same surface. The person
+// can make the precondition true from this app (or it becomes true by
+// waiting: the connection returning, a read resolving).
+type PossibilityBlocked struct {
+	Reason LocalizedText
+}
+
+func (e PossibilityBlocked) Destroy() {
+	FfiDestroyerLocalizedText{}.Destroy(e.Reason)
+}
+
+// Do not show it. This person cannot make the precondition true on this
+// app at all: a role or grant they lack, a platform absence, a feature
+// the nest does not have.
+type PossibilityAbsent struct {
+}
+
+func (e PossibilityAbsent) Destroy() {
+}
+
+type FfiConverterPossibility struct{}
+
+var FfiConverterPossibilityINSTANCE = FfiConverterPossibility{}
+
+func (c FfiConverterPossibility) Lift(rb RustBufferI) Possibility {
+	return LiftFromRustBuffer[Possibility](c, rb)
+}
+
+func (c FfiConverterPossibility) Lower(value Possibility) C.RustBuffer {
+	return LowerIntoRustBuffer[Possibility](c, value)
+}
+
+func (c FfiConverterPossibility) LowerExternal(value Possibility) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[Possibility](c, value))
+}
+func (FfiConverterPossibility) Read(reader io.Reader) Possibility {
+	id := readInt32(reader)
+	switch id {
+	case 1:
+		return PossibilityPossible{}
+	case 2:
+		return PossibilityBlocked{
+			FfiConverterLocalizedTextINSTANCE.Read(reader),
+		}
+	case 3:
+		return PossibilityAbsent{}
+	default:
+		panic(fmt.Sprintf("invalid enum value %v in FfiConverterPossibility.Read()", id))
+	}
+}
+
+func (FfiConverterPossibility) Write(writer io.Writer, value Possibility) {
+	switch variant_value := value.(type) {
+	case PossibilityPossible:
+		writeInt32(writer, 1)
+	case PossibilityBlocked:
+		writeInt32(writer, 2)
+		FfiConverterLocalizedTextINSTANCE.Write(writer, variant_value.Reason)
+	case PossibilityAbsent:
+		writeInt32(writer, 3)
+	default:
+		_ = variant_value
+		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterPossibility.Write", value))
+	}
+}
+
+type FfiDestroyerPossibility struct{}
+
+func (_ FfiDestroyerPossibility) Destroy(value Possibility) {
+	value.Destroy()
+}
+
 // Resolution state of a link-preview embed. Defined now as the leaf the model names;
 // the `LinkPreview` block that carries it is a P4 feature (render-model.md § D4), where
 // the manager resolves metadata off-thread and re-emits with `Resolved`.
@@ -4304,6 +4394,54 @@ type FfiDestroyerPreviewState struct{}
 
 func (_ FfiDestroyerPreviewState) Destroy(value PreviewState) {
 	value.Destroy()
+}
+
+// Where the read that decides an affordance stands (`docs/goal/ui/README.md`
+// § Offer only what is possible, rule 5: unknown is not possible).
+//
+// A page whose affordance waits on a read hands the read's state to
+// [`Possibility::from_read`], which gives the one answer every app paints
+// from: a pre-read control is never enabled on a guess, and never disabled
+// without its reason.
+type ReadState uint
+
+const (
+	// Not yet answered: what the read decides is not known.
+	ReadStatePending ReadState = 1
+	// The read came back with an error: the answer is still not known, and
+	// the person is told the read failed rather than that it is loading.
+	ReadStateFailed ReadState = 2
+	// The read resolved: the page decides from what it holds.
+	ReadStateResolved ReadState = 3
+)
+
+type FfiConverterReadState struct{}
+
+var FfiConverterReadStateINSTANCE = FfiConverterReadState{}
+
+func (c FfiConverterReadState) Lift(rb RustBufferI) ReadState {
+	return LiftFromRustBuffer[ReadState](c, rb)
+}
+
+func (c FfiConverterReadState) Lower(value ReadState) C.RustBuffer {
+	return LowerIntoRustBuffer[ReadState](c, value)
+}
+
+func (c FfiConverterReadState) LowerExternal(value ReadState) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[ReadState](c, value))
+}
+func (FfiConverterReadState) Read(reader io.Reader) ReadState {
+	id := readInt32(reader)
+	return ReadState(id)
+}
+
+func (FfiConverterReadState) Write(writer io.Writer, value ReadState) {
+	writeInt32(writer, int32(value))
+}
+
+type FfiDestroyerReadState struct{}
+
+func (_ FfiDestroyerReadState) Destroy(value ReadState) {
 }
 
 // Uniform relative-time buckets. Thresholds are fixed by

@@ -32,7 +32,7 @@ Served over CalDAV and CardDAV, so Apple Calendar, Thunderbird and your phone sy
 
 *Illustration: mouse*
 
-A photo library and folder sync across your machines — at home in Finder, in Explorer, and in the Files app on your phone.
+A photo library and folder sync across your machines — at home in Explorer and in the Files app on your phone.
 
 ## Backups that answer to you
 
@@ -50,7 +50,7 @@ Flip a switch and publish at your own domain, from a folder you sync and the pos
 
 *Illustration: owl*
 
-On-device content scanning blocks content transparently. Parents can set rules for their children, and a region's authority will be able to publish rules for its region — always visibly, with the rule named.
+On-device content scanning blocks content transparently. Parents can set rules for their children, and a region's authority can publish rules for its region — no region has one today. Every block of a post or message is visible and names its rule or reason.
 
 ## What works where, today
 
@@ -67,8 +67,8 @@ app, marked from the tests that actually ran, blanks and all.
 | The Fauna software     | Free                                    |
 | A server hosted online | Roughly the price of a coffee per month |
 | A server at home       | The hardware you already have           |
-| Your own domain        | A few euros a year                      |
+| Your own domain        | Roughly 10 to 15 euros a year           |
 
-> Fauna is in <strong>closed alpha</strong>. The first downloads, for Mac, Windows, Linux and the terminal, are on the [apps](/apps) page, and every Fauna server serves the web app itself by default; the Android app is in Google Play's invitation-only testing, and the iPhone app is on its way. The source code is published at {repo}.
+> Fauna is in <strong>closed alpha</strong>. The first downloads, for Mac, Windows, Linux and the terminal, are on the [apps](/apps) page, and a Fauna server run from Fauna's container image serves the web app itself; the Android app is in Google Play's invitation-only testing. The source code is published at {repo}.
 >
 > Curious, want in early or want to contribute? Send an email to {email}

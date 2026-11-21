@@ -141,11 +141,15 @@ apps/fauna-android/app/src/foss/java/com/fauna/ffi/
 apps/fauna-android/app/src/foss/java/uniffi/
 # The kids build type (Fauna Kids — installers/android.md § Goal) stages its
 # own `kids-safe,kids-floor` flavor via `just android-ffi-kids`. Its
-# hand-written twin lives beside it under `src/kids/java/com/fauna/app/` and IS
-# tracked.
+# hand-written twin lives in `src/kidsTwin/` (tracked), shared with `kidsDebug`.
 apps/fauna-android/app/src/kids/jniLibs/
 apps/fauna-android/app/src/kids/java/com/fauna/ffi/
 apps/fauna-android/app/src/kids/java/uniffi/
+# The drivable kidsDebug build type (`--app android-kids`) stages the kids
+# flavor plus `test-helpers` via `just android-ffi-kids-test`.
+apps/fauna-android/app/src/kidsDebug/jniLibs/
+apps/fauna-android/app/src/kidsDebug/java/com/fauna/ffi/
+apps/fauna-android/app/src/kidsDebug/java/uniffi/
 apps/fauna-android/app/src/main/jniLibs/
 apps/fauna-android/app/src/main/java/com/fauna/ffi/
 apps/fauna-android/app/src/main/java/uniffi/
@@ -158,6 +162,9 @@ tests/e2e-unified/screenshots/
 # checkout (`helpers/frame_invariants.py::DEFAULT_CORPUS_NAME`), read by grep,
 # never committed: it is one session's own evidence and dies with the checkout.
 tests/e2e-unified/.frame-invariants.log
+# The possibility sweep's corpus (`tests/walk/test_ui_walk_actuation.py`) —
+# the same one-session, never-committed evidence as the frame corpus above.
+tests/e2e-unified/.walk-actuation.log
 # Convention 10's windows focus axis: which tests took the desktop's foreground
 # through a bridge fallback (`helpers/foreground_takes.py::CORPUS_NAME`).
 tests/e2e-unified/.foreground-takes.log
@@ -194,6 +201,9 @@ apps/fauna-apple/.ffi-cache.stamp
 # Records which flavor (full release / host-only debug) the local xcframework was
 # built for, so apple-ffi ↔ apple-ffi-host guard the shared-path host↔full switch.
 apps/fauna-apple/.ffi-flavor
+# Records the debug link shape (dylib | static) the host flavour last staged, so
+# `mac-debug`'s freshness gate relinks on a shape switch.
+apps/fauna-apple/.ffi-link
 # Windows twin: records which cargo profile (dev / release / dist) staged the
 # shared runtimes/ fauna_ffi.dll, so `windows-ffi` guards the same flavor switch.
 apps/fauna-windows/.ffi-flavor
@@ -226,11 +236,6 @@ apps/fauna-apple/Fauna-iOS/*.xcodeproj/xcuserdata/
 
 scratchpad.md
 
-
-# The derived (test-flavoured) Flatpak manifest — written by
-# tests/e2e-unified/helpers/flatpak_manifest.py, never committed: the shipped
-# manifest stays the single source of truth.
-apps/fauna-linux/packaging/flatpak/social.fauna.fauna.e2e-derived.yml
 
 # Scratch file for `git commit -F` messages. On Windows /tmp resolves to %TEMP%
 # rather than the repository, so the message file is written here instead — where

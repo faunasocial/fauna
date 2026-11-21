@@ -345,9 +345,9 @@ struct RenderCtx {
     /// (today: the followed browse scopes, whose value is opaque). Shared with
     /// `build_filter_dropdown`'s label expression; rebuilt each render.
     filter_labels: FilterLabels,
-    /// `file-upload` + browse + `upload-button`, hidden as a unit while a
-    /// followed browse scope is active — that scope is structurally read-only.
-    upload_row: gtk::Box,
+    /// `file-upload` + browse + `upload-button`, painted from the machine's
+    /// one upload answer ([`paint_upload`]).
+    upload: UploadControls,
     items_flow: gtk::FlowBox,
     items_scroll: gtk::ScrolledWindow,
     empty_status: adw::StatusPage,
@@ -363,6 +363,30 @@ struct RenderCtx {
     /// tokio handle it runs the shared `MediaMachine::fetch_thumbnail` on.
     backup_key: Vec<u8>,
     runtime: tokio::runtime::Handle,
+}
+
+/// The upload affordance: the row holding `file-upload`, the browse button and
+/// `upload-button`, painted as one from [`MediaMachine::upload_possibility`].
+struct UploadControls {
+    row: gtk::Box,
+    entry: gtk::Entry,
+    browse: gtk::Button,
+    button: gtk::Button,
+}
+
+/// Paint the upload affordance from the machine's one answer
+/// (`ui/media.md` § Errors & edge cases → *What this person may write*;
+/// `ui/README.md` § Offer only what is possible, rule 6): absent inside a
+/// followed browse scope — the row leaves the mapped tree, so AT-SPI loses it
+/// too — disabled with its reason before the first read resolves and on a
+/// reader's or a metadata-only target, else live. The page derives none of it;
+/// `upload_selected` refuses on the same readings.
+fn paint_upload(machine: &MediaMachine, upload: &UploadControls) {
+    let answer = machine.upload_possibility();
+    upload.row.set_visible(answer.is_shown());
+    upload.browse.set_sensitive(answer.is_possible());
+    crate::possible::paint(&upload.entry, None, answer.clone());
+    crate::possible::paint(&upload.button, None, answer);
 }
 
 /// Build the Media explorer page. Returns the page widget (added to the main
@@ -517,6 +541,12 @@ pub fn build_media_view(fauna_client: &Rc<FaunaClient>) -> (gtk::Box, MediaHandl
         observer,
         Some(resolver),
     );
+    // The first folder's maker (`media.md` § Errors & edge cases → *No folder
+    // to upload into*) — tui parity (`apps/fauna-tui/src/media/mod.rs::init`).
+    machine.set_folder_maker(fauna_folders_machine::build_first_folder_maker(
+        Arc::clone(fauna_client.nest_rpc()),
+        Some(crate::account_runtime::folder_key_store()),
+    ));
     // The B3 member-row join-filter, the same seam and the same answer the
     // Folders page wires: unwired, every shared set's row is dropped
     // (fail-safe) and a shared set is offered only as an item-only option by
@@ -671,7 +701,12 @@ pub fn build_media_view(fauna_client: &Rc<FaunaClient>) -> (gtk::Box, MediaHandl
         sort_direction_dropdown,
         filter_dropdown,
         filter_labels,
-        upload_row,
+        upload: UploadControls {
+            row: upload_row,
+            entry: file_entry.clone(),
+            browse: browse_btn.clone(),
+            button: upload_btn.clone(),
+        },
         items_flow,
         items_scroll,
         empty_status,
@@ -759,7 +794,8 @@ pub fn build_media_view(fauna_client: &Rc<FaunaClient>) -> (gtk::Box, MediaHandl
 
     // Refresh off WS-RPC whenever the page becomes visible (`connect_map` fires
     // on a real nav to Media — Feed is the stack's initial child, so this never
-    // fires spuriously at construction).
+    // fires spuriously at construction). A map is a new visit, so the read is
+    // `refresh_on_visit`: a press answer held from the last visit stops standing.
     {
         let machine = Arc::clone(&machine);
         let handle = fauna_client.runtime_handle();
@@ -767,7 +803,7 @@ pub fn build_media_view(fauna_client: &Rc<FaunaClient>) -> (gtk::Box, MediaHandl
         content.connect_map(move |_| {
             let machine = Arc::clone(&machine);
             let backup_key = ctx.backup_key.clone();
-            handle.spawn(async move { machine.refresh(Some(backup_key)).await });
+            handle.spawn(async move { machine.refresh_on_visit(Some(backup_key)).await });
         });
     }
 
@@ -842,13 +878,10 @@ fn render_page(machine: &Arc<MediaMachine>, ctx: &Rc<RenderCtx>) {
     let active_filter = snap.filter.as_deref().unwrap_or(FILTER_ALL_VALUE);
     select_dropdown_value(&ctx.filter_dropdown, active_filter);
 
-    // A followed browse scope is READ-ONLY, structurally: the upload affordance
-    // is ABSENT rather than painted-but-inert, because a follow never enters
-    // `known_folders` and so can never be an upload target (`ui/media.md`
-    // § Followed public folders — the same gating tui applies to its own upload
-    // gesture).
-    let followed_scope_active = snap.followed_scope.is_some();
-    ctx.upload_row.set_visible(!followed_scope_active);
+    // The upload affordance paints from the machine's one answer — absent in
+    // a followed browse scope (structurally read-only), blocked with its
+    // reason before the first read and on a reader's or metadata-only target.
+    paint_upload(machine, &ctx.upload);
 
     ctx.updating.set(false);
 
@@ -1062,6 +1095,49 @@ mod tests {
                     "missing widget id {id:?}; have {names:?}",
                 );
             }
+        });
+    }
+
+    /// Rule 5 of `ui/README.md` § Offer only what is possible: before the
+    /// first read the upload controls are shown but insensitive with the
+    /// machine's "still loading" reason; once read, live — the painting is the
+    /// machine's `upload_possibility`, never a page-side gate.
+    #[test]
+    fn the_upload_paints_from_the_machines_answer() {
+        use fauna_media_machine::FakeMediaNestApi;
+        use fauna_media_machine::observer::NullObserver;
+        crate::testid::run_on_gtk_thread(|| {
+            let api = Arc::new(FakeMediaNestApi::new());
+            let machine = MediaMachine::new(Arc::new(NullObserver), api, None, None, None);
+            let upload = UploadControls {
+                row: gtk::Box::new(gtk::Orientation::Horizontal, 8),
+                entry: gtk::Entry::new(),
+                browse: gtk::Button::new(),
+                button: gtk::Button::new(),
+            };
+            paint_upload(&machine, &upload);
+            assert!(upload.row.is_visible());
+            for widget in [
+                upload.entry.upcast_ref::<gtk::Widget>(),
+                upload.browse.upcast_ref(),
+                upload.button.upcast_ref(),
+            ] {
+                assert!(!widget.is_sensitive(), "blocked before the first read");
+            }
+            assert!(
+                upload.button.tooltip_text().is_some_and(|t| !t.is_empty()),
+                "the reason rides the button",
+            );
+
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(machine.refresh(Some(vec![0u8; 32])));
+            paint_upload(&machine, &upload);
+            assert!(upload.row.is_visible());
+            assert!(upload.button.is_sensitive() && upload.entry.is_sensitive());
+            assert!(upload.button.tooltip_text().is_none());
         });
     }
 }

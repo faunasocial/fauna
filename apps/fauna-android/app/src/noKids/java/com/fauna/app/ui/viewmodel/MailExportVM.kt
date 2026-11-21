@@ -111,7 +111,12 @@ class MailExportVM @Inject constructor(
     fun download() = dispatch(MailExportAction.Download)
 
     private fun dispatch(action: MailExportAction) {
-        val m = machine ?: return
+        // Rule 7 (ui/README.md § Offer only what is possible): a gesture whose
+        // machine was never built says so on `error-message`, never silently.
+        val m = machine ?: run {
+            errorMessage.value = api.mailUnbuiltRefusal()
+            return
+        }
         val wantsRun = action is MailExportAction.Start || action is MailExportAction.Resume
         val isDownload = action is MailExportAction.Download
         viewModelScope.launch {

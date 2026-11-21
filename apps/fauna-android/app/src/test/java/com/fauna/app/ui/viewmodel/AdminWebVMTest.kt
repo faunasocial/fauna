@@ -2,6 +2,7 @@ package com.fauna.app.ui.viewmodel
 
 import com.fauna.app.core.ApiClient
 import com.fauna.ffi.FfiWebClient
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -46,6 +47,7 @@ class AdminWebVMTest {
     @Test
     fun hydrateReadsEveryAccountNeverASinglePage() = runTest {
         val api = mock(ApiClient::class.java)
+        whenever(api.reconnectTick).thenReturn(MutableSharedFlow())
         val web = mock(FfiWebClient::class.java)
         whenever(api.webClient()).thenReturn(web)
         whenever(api.adminUsersListAll()).thenReturn(emptyList())

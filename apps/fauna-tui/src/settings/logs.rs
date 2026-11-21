@@ -40,6 +40,37 @@ pub(super) fn filtered_log_entries(filter: u32) -> Vec<fauna_log::LogEntry> {
     fauna_log::snapshot_filtered(filter)
 }
 
+/// Whether `log-copy-button` / `log-clear-button` can do anything with
+/// `shown` entries painted: blocked by the page's own empty line
+/// (`logs.empty`) when none are — the shared
+/// [`fauna_log::format::ring_action_possibility`]. The buttons and both
+/// actions read this one answer.
+pub(crate) fn ring_action_possibility(shown: usize) -> fauna_core::possibility::Possibility {
+    fauna_log::format::ring_action_possibility(shown, "logs.empty")
+}
+
+/// Record a copy's outcome on the page: a write that reached the terminal
+/// confirms on `log-copy-button` ("Copied!" + its `copied` attr) and clears a
+/// prior failure; one that failed says so on `error-message`
+/// (`docs/goal/ui/README.md` § Offer only what is possible, rule 7).
+pub(super) fn record_copy_outcome(
+    state: &mut SettingsState,
+    outcome: std::io::Result<()>,
+    text: String,
+) {
+    match outcome {
+        Ok(()) => {
+            crate::wizard::log_displayed_notice(fauna_i18n::strings::common::COPIED);
+            state.local_failure = None;
+            state.logs_copied = Some(text);
+        }
+        Err(e) => {
+            state.logs_copied = None;
+            state.local_failure = Some(crate::wizard::copy_failed_text(&e));
+        }
+    }
+}
+
 /// The local UTC offset in seconds — the tui's own device-offset door, and the
 /// twin of linux's `logs_view::local_offset_secs` (same shape in both apps:
 /// the offset lives in the logs module and every other surface calls it).
@@ -71,6 +102,23 @@ pub(super) fn logs_elements(state: &SettingsState) -> Vec<Element> {
         .get(filter as usize)
         .copied()
         .unwrap_or(logs::FILTER_ALL);
+    let entries = filtered_log_entries(filter);
+    let ring_answer = ring_action_possibility(entries.len());
+    let copy_label = if state.logs_copied.is_some() {
+        fauna_i18n::strings::common::COPIED
+    } else {
+        logs::COPY_BUTTON
+    };
+    let mut copy = Element::gesture_button(
+        ids::LOG_COPY_BUTTON,
+        copy_label,
+        ring_answer.is_possible(),
+        Gesture::Settings(Action::CopyLogs),
+    )
+    .possible(ring_answer.clone());
+    if let Some(text) = &state.logs_copied {
+        copy = copy.attr("copied", text.clone());
+    }
     let mut els = vec![
         // settings-logs — the page landmark (Rule 1: every page has one).
         Element::label(ids::SETTINGS_LOGS, logs::TITLE),
@@ -82,21 +130,19 @@ pub(super) fn logs_elements(state: &SettingsState) -> Vec<Element> {
             SelectTarget::LogLevel,
             labels.iter().map(|l| l.to_string()).collect(),
         ),
-        Element::gesture_button(
-            ids::LOG_COPY_BUTTON,
-            logs::COPY_BUTTON,
-            true,
-            Gesture::Settings(Action::CopyLogs),
-        ),
+        // log-copy-button / log-clear-button — disabled by the page's own
+        // empty line on an empty ring (README § Offer only what is possible,
+        // rule 2); the copy confirms like `account-actor-id-copy-btn`.
+        copy,
         Element::gesture_button(
             ids::LOG_CLEAR_BUTTON,
             logs::CLEAR_BUTTON,
-            true,
+            ring_answer.is_possible(),
             Gesture::Settings(Action::ClearLogs),
-        ),
+        )
+        .possible(ring_answer),
     ];
 
-    let entries = filtered_log_entries(filter);
     if entries.is_empty() {
         // Untagged placeholder chrome — the page still resolves (`settings-logs`
         // is present) but paints no `log-entry`.

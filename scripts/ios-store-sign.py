@@ -282,7 +282,8 @@ def _main_executable(bundle: Path) -> Path | None:
 
 
 def nested_code_outside(app: Path) -> list[str]:
-    """Code under the app that BUNDLES does not sign: a code bundle, or a stray Mach-O."""
+    """Code under the app that BUNDLES does not sign: a code bundle, or a stray Mach-O,
+    each named by its bundle-relative path with forward slashes on every host."""
     known = {Path(rel).relative_to("Fauna-iOS.app") for rel in BUNDLES if rel != "Fauna-iOS.app"}
     mains = {_main_executable(app / k) for k in known} | {_main_executable(app)}
     extra = []
@@ -291,11 +292,11 @@ def nested_code_outside(app: Path) -> list[str]:
         if rel in known:
             continue
         if path.name.endswith(_NESTED_CODE_SUFFIXES):
-            extra.append(str(rel))
+            extra.append(rel.as_posix())
         elif path.is_file() and not path.is_symlink() and path not in mains:
             with path.open("rb") as f:
                 if f.read(4) in _MACHO_MAGICS:
-                    extra.append(str(rel))
+                    extra.append(rel.as_posix())
     return sorted(extra)
 
 

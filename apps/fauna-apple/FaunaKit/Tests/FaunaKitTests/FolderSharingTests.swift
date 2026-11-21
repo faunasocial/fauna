@@ -28,15 +28,18 @@ import Testing
     await vm.removeFolderMember(name: "docs", memberActorIdHex: "ab", groupIdHex: "cd")
     #expect(vm.sharingError == nil)
 
-    // Share with no `api`: reports failure (`false`) without surfacing a glue error.
-    let shared = await vm.shareFolder(name: "docs", recipientInput: "alice@fauna.social")
-    #expect(shared == false)
-    #expect(vm.sharingError == nil)
-
     // Grant edit with no `api`: bails before the write AND before the re-read.
     await vm.setFolderMemberAccess(name: "docs", memberActorIdHex: "ab", access: "writer", byteCap: nil)
     #expect(vm.folderActors["docs"] == nil)
     #expect(vm.sharingError == nil)
+
+    // Share with no `api`: reports failure (`false`), refused up front by the
+    // shared `share_possibility` with its not-ready reason on `error-message`
+    // (folders.md § Errors & edge cases) — never a silent return.
+    let shared = await vm.shareFolder(name: "docs", recipientInput: "alice@fauna.social")
+    #expect(shared == false)
+    #expect(vm.sharingError != nil)
+    #expect(vm.sharingError == vm.folderSharePossibility(recipient: "someone").refusal)
 }
 
 // The member-access pickers paint the shared catalog, keyed by the wire values

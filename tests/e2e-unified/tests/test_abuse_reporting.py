@@ -51,6 +51,7 @@ from common.auth import create_actor_and_register
 from helpers.app_surface import require_surface
 from helpers.e2e_session import e2e_login_device_id, login_as
 from helpers.mail_dedicated_nest import login_as_nest_admin
+from helpers.use_case_walk import assert_use_case_walked
 from i18n.strings import S
 from helpers.room_seats import (  # noqa: F401 — room_app/room_seat_pair are pytest fixtures adopted by import
     MESSAGE_BUDGET_S,
@@ -725,6 +726,7 @@ def test_a_restricted_posts_text_reaches_the_admins_when_ticked(app, nest_instan
 
 
 @pytest.mark.feature("report-abuse")
+@pytest.mark.use_case("report-and-block")
 def test_reporting_a_post_can_block_its_author_in_the_same_step(logged_in_app, nest_instance):
     """Tick *also block this person* in the sheet → once the report lands the
     author's profile shows them blocked (moderation.md § What a report
@@ -743,6 +745,9 @@ def test_reporting_a_post_can_block_its_author_in_the_same_step(logged_in_app, n
     _poll(app.report.submit_enabled, _PAGE_BUDGET_S, "a reasoned report becomes sendable")
     app.report.submit()
     _assert_acknowledged_by_own_nest(app, nest_instance)
+    # Every step reached by a gesture, from the feed post (main-use-cases.md
+    # § The journeys); the profile read below is the outcome, not the walk.
+    assert_use_case_walked(app.driver, "report-and-block")
 
     app.profile.navigate_to_actor(other["actor_id_hex"])
     _poll(

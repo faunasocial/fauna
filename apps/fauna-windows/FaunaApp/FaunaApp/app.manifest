@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <assemblyIdentity version="1.0.0.0" name="FaunaApp.app"/>
+
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 and Windows 11 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
+    </application>
+  </compatibility>
+
+  <!-- Per-Monitor v2 DPI awareness. Without this, the unpackaged WinUI 3 process
+       runs DPI-unaware (96 DPI) and Windows bitmap-stretches it, which shows up as
+       blurry fonts on scaled displays and HiDPI RDP sessions (e.g. Retina Mac with
+       "Optimize for Retina displays"). This is the manifest the standard Visual
+       Studio WinUI 3 template ships; the XAML framework re-rasterizes crisply at the
+       session's scale once the process is Per-Monitor-v2 aware. -->
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/PM</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2, PerMonitor</dpiAwareness>
+    </windowsSettings>
+  </application>
+
+  <!-- No package-identity (`msix`) element. The app's identity is the full MSIX's
+       own — the Store package or the direct-download bundle, both from
+       installer/store/AppxManifest.xml.in — which reaches every process started in
+       the package's context (installers/windows.md § Package identity for
+       FaunaApp.exe). The element bound an exe to an external-location (sparse)
+       package an MSI registered; no MSI installs the app any more, so it went with
+       that package (§ Direct download, 6). -->
+</assembly>

@@ -105,6 +105,9 @@ struct ArchiveWidgets {
     path_input: gtk::Entry,
     archive_summary: gtk::Label,
     archive_summary_row: adw::ActionRow,
+    /// The Archive step's `wizard-next-button` — painted from
+    /// `ArchiveImportSnapshot::next_possibility` ([`paint_answers`]).
+    archive_next: gtk::Button,
 
     // Step 3 — Scope.
     scope_group: adw::PreferencesGroup,
@@ -115,10 +118,15 @@ struct ArchiveWidgets {
     hidden_tiers_note: gtk::Label,
     date_from_input: gtk::Entry,
     date_to_input: gtk::Entry,
+    /// The Scope step's `wizard-next-button` — painted from the answer over
+    /// the typed date drafts ([`paint_answers`]).
+    scope_next: gtk::Button,
 
     // Step 4 — Confirm.
     confirm_group: adw::PreferencesGroup,
     confirm_summary: gtk::Label,
+    /// `archive-import-start-button` — painted from `start_possibility`.
+    start_button: gtk::Button,
 
     // Step 5 — Progress.
     progress_group: adw::PreferencesGroup,
@@ -585,12 +593,17 @@ fn build_page_parts() -> (adw::PreferencesPage, ArchiveWidgets, WizardButtons) {
         ids::ARCHIVE_IMPORT_REVIEW_SKIPPED_BUTTON,
         S::REVIEW_SKIPPED_BUTTON,
     );
-    // Offered, never applied silently (module docs) — `render` enables it.
+    // Offered, never applied silently (module docs) — `render` paints it
+    // from the shared answer.
     let profile_prefill_button = button(
         ids::ARCHIVE_IMPORT_PROFILE_PREFILL_BUTTON,
         S::PROFILE_PREFILL_BUTTON,
     );
-    profile_prefill_button.set_sensitive(false);
+    crate::possible::paint(
+        &profile_prefill_button,
+        None,
+        ArchiveImportSnapshot::empty().profile_prefill_possibility(),
+    );
     let done_nav_row = adw::ActionRow::builder().activatable(false).build();
     done_nav_row.add_suffix(&view_imported_button);
     done_nav_row.add_suffix(&review_skipped_button);
@@ -629,6 +642,7 @@ fn build_page_parts() -> (adw::PreferencesPage, ArchiveWidgets, WizardButtons) {
         path_input,
         archive_summary,
         archive_summary_row,
+        archive_next: archive_next.clone(),
         scope_group,
         category_box,
         category_key: Rc::new(RefCell::new(Vec::new())),
@@ -637,8 +651,10 @@ fn build_page_parts() -> (adw::PreferencesPage, ArchiveWidgets, WizardButtons) {
         hidden_tiers_note,
         date_from_input,
         date_to_input,
+        scope_next: scope_next.clone(),
         confirm_group,
         confirm_summary,
+        start_button: start_button.clone(),
         progress_group,
         progress_summary,
         progress_bar,
@@ -767,10 +783,20 @@ fn wire_machine(widgets: ArchiveWidgets, b: WizardButtons) -> Option<Rc<ArchiveC
         });
     }
     // Next off Scope commits both date drafts first, so the Confirm summary can
-    // never describe a scope the machine has not got.
+    // never describe a scope the machine has not got. Every gated press asks
+    // the answer its button painted from again (rule 6): blocked → its reason
+    // on `error-message`, nothing dispatched.
     {
         let ctx = Rc::clone(&ctx);
         b.scope_next.connect_clicked(move |_| {
+            let answer = ctx
+                .machine
+                .snapshot()
+                .with_scope_drafts(&ctx.w.date_from_input.text(), &ctx.w.date_to_input.text())
+                .next_possibility();
+            if crate::form_gate::refuse(&answer, &ctx.w.error_label) {
+                return;
+            }
             let from = ctx.w.date_from_input.text().trim().to_string();
             let to = ctx.w.date_to_input.text().trim().to_string();
             dispatch_actions(
@@ -784,7 +810,19 @@ fn wire_machine(widgets: ArchiveWidgets, b: WizardButtons) -> Option<Rc<ArchiveC
         });
     }
     wire_dispatch(&ctx, &b.source_next, ArchiveImportAction::Next);
-    wire_dispatch(&ctx, &b.archive_next, ArchiveImportAction::Next);
+    wire_asked(&ctx, &b.archive_next, ArchiveImportAction::Next, |s| {
+        s.next_possibility()
+    });
+    // The date drafts are committed only at Next, so Next repaints from the
+    // answer over them as they are typed.
+    for entry in [&ctx.w.date_from_input, &ctx.w.date_to_input] {
+        let ctx = Rc::clone(&ctx);
+        entry.connect_changed(move |_| {
+            if let Some(snap) = ctx.last.borrow().as_ref() {
+                paint_answers(&ctx.w, snap);
+            }
+        });
+    }
     for back in [
         &b.archive_back,
         &b.scope_back,
@@ -794,7 +832,9 @@ fn wire_machine(widgets: ArchiveWidgets, b: WizardButtons) -> Option<Rc<ArchiveC
     ] {
         wire_dispatch(&ctx, back, ArchiveImportAction::Back);
     }
-    wire_dispatch(&ctx, &b.start_button, ArchiveImportAction::Start);
+    wire_asked(&ctx, &b.start_button, ArchiveImportAction::Start, |s| {
+        s.start_possibility()
+    });
     wire_dispatch(&ctx, &b.pause_button, ArchiveImportAction::Pause);
     wire_dispatch(&ctx, &b.resume_button, ArchiveImportAction::Resume);
     // Cancel is destructive — two-click inline confirm. Already-imported
@@ -838,10 +878,11 @@ fn wire_machine(widgets: ArchiveWidgets, b: WizardButtons) -> Option<Rc<ArchiveC
             ctx.w.done_error_log_row.set_visible(ctx.show_skipped.get());
         });
     }
-    wire_dispatch(
+    wire_asked(
         &ctx,
         &ctx.w.profile_prefill_button,
         ArchiveImportAction::ApplyArchiveProfile,
+        |s| s.profile_prefill_possibility(),
     );
     ctx.w.folder_link.clone().connect_clicked(|btn| {
         crate::app::navigate_to_settings_subpage(btn, "folders");
@@ -849,6 +890,43 @@ fn wire_machine(widgets: ArchiveWidgets, b: WizardButtons) -> Option<Rc<ArchiveC
 
     hydrate_and_render(&ctx);
     Some(ctx)
+}
+
+/// Wire a button whose press first asks `answer` of the machine's snapshot:
+/// blocked → refused with the reason on `error-message`, nothing dispatched.
+fn wire_asked(
+    ctx: &Rc<ArchiveCtx>,
+    button: &gtk::Button,
+    action: ArchiveImportAction,
+    answer: fn(&ArchiveImportSnapshot) -> fauna_core::possibility::Possibility,
+) {
+    let ctx = Rc::clone(ctx);
+    button.connect_clicked(move |_| {
+        if crate::form_gate::refuse(&answer(&ctx.machine.snapshot()), &ctx.w.error_label) {
+            return;
+        }
+        dispatch_actions(&ctx, vec![action.clone()]);
+    });
+}
+
+/// Paint the Archive and Scope steps' Next, the Start and the profile prefill
+/// from the machine's answers (`archive-import.md` § Wizard steps) — Scope's
+/// Next over the typed date drafts; blocked → insensitive with the reason on
+/// the tooltip.
+fn paint_answers(w: &ArchiveWidgets, snap: &ArchiveImportSnapshot) {
+    crate::possible::paint(&w.archive_next, None, snap.next_possibility());
+    crate::possible::paint(
+        &w.scope_next,
+        None,
+        snap.with_scope_drafts(&w.date_from_input.text(), &w.date_to_input.text())
+            .next_possibility(),
+    );
+    crate::possible::paint(&w.start_button, None, snap.start_possibility());
+    crate::possible::paint(
+        &w.profile_prefill_button,
+        None,
+        snap.profile_prefill_possibility(),
+    );
 }
 
 /// Wire a button to a single fire-and-render action.
@@ -1045,8 +1123,7 @@ fn render(ctx: &Rc<ArchiveCtx>, snap: &ArchiveImportSnapshot) {
         .set_text(&composed(&compose::done_summary(snap)));
     w.done_error_log.set_text(&skip_log);
     w.done_error_log_row.set_visible(ctx.show_skipped.get());
-    w.profile_prefill_button
-        .set_sensitive(snap.archive_profile.is_some() && !snap.profile_applied);
+    paint_answers(w, snap);
     w.folder_link.set_label(&composed(&compose::folder_link(
         snap.folder_name.as_deref().unwrap_or_default(),
     )));

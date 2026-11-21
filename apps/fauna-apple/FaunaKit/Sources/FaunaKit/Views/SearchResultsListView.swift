@@ -59,6 +59,7 @@ public struct SearchResultsListView: View {
                             }
                             .padding(.vertical, 4)
                             .contentShape(Rectangle())
+                            .faunaActsOnClick()
                             .onTapGesture { onTapResult(result) }
                             // In-process automation actuation (`.onTapGesture`
                             // is a native gesture the registry can't invoke) —

@@ -52,7 +52,8 @@ use fauna_client_caldav::{
     project_attendee_rsvp, seal_calendar_metadata, set_reminder, uid_hash,
     unseal_calendar_metadata,
 };
-use fauna_client_config::{DavStoreContext, dav_store_context};
+use fauna_client_caldav::{CalendarsRead, CalendarsReadState};
+use fauna_client_config::{DavCustody, DavStoreContext, dav_custody, dav_store_context};
 use fauna_client_conversations::NestImipDispatch;
 use fauna_client_email::EmailClient;
 use fauna_conversations::ConversationsSession;
@@ -141,6 +142,13 @@ pub struct EventRow {
 #[derive(Default)]
 pub struct EventsState {
     nest: Option<Arc<NestClient>>,
+    /// The refused-change list's gesture generation — bumped by a dismissal's
+    /// local half, which drops the row at once. Every spawned read of the list
+    /// (the store notice's [`Op::LoadRefusedChanges`], a push's or a
+    /// reconnect's [`Op::RefreshCalendars`]) carries it, and a read taken
+    /// before the dismissal never brings the row back (the late-fold rule's
+    /// generation half).
+    pub(crate) refused_gen: crate::settings::GestureGen,
     /// A `SecretString` (not a plain `String`) so the identity secret is
     /// zeroized on drop, like `SettingsState.secret_hex`.
     secret_hex: SecretString,
@@ -166,6 +174,13 @@ pub struct EventsState {
     pub focus_month: u32,
     pub focus_day: u32,
     pub calendars: Vec<CalendarRow>,
+    /// What the last calendar read answered — the answers of `ui/events.md`
+    /// § Errors & edge cases → *No calendar to hold an event*, rulings 2 and 5
+    /// (`fauna_client_caldav::CalendarsRead`, payload-free; a missing key is
+    /// *unresolved*, the mint in flight). Every
+    /// door to the compose asks [`create_possibility`] over it. The default is
+    /// *unresolved*: a page that has not read yet is loading, never empty.
+    pub calendars_read: CalendarsReadState,
     pub selected_calendar: Option<String>,
     /// The `calendar-visibility` display filter's checked set — client-side
     /// display state, **never persisted server-side and never a privacy or
@@ -329,6 +344,7 @@ pub fn nav_enter_op(
         organizer_email: state.organizer_email.clone(),
         selected_calendar: state.selected_calendar.clone(),
         query_gen,
+        refused_of: state.refused_gen,
     })
 }
 
@@ -341,10 +357,22 @@ pub fn nav_enter_op(
 /// repaints the same rows. `None` while the account store is not assembled:
 /// nothing could have changed there, and an empty read would blank the list.
 pub fn store_resync_op(
+    state: &EventsState,
     account_store: Option<fauna_sync_engine::account_runtime::AccountStoreHandle>,
 ) -> Option<Op> {
+    // An unresolved read re-runs whole: custody's first listing lands as a
+    // store walk, which is this notice (ruling 2: *unresolved* is a wait,
+    // re-run when custody lists). Only that answer — a settled one is
+    // re-read at the next page entry, and a re-run on every notice would
+    // race the page's own mutations for no new answer.
+    if state.calendars_read == CalendarsReadState::Unresolved
+        && let Some(op) = nav_enter_op(state, account_store.clone())
+    {
+        return Some(op);
+    }
     Some(Op::LoadRefusedChanges {
         account_store: Some(account_store?),
+        resync_of: state.refused_gen,
     })
 }
 
@@ -483,6 +511,38 @@ impl EventsState {
 /// existing calendar keeps whatever the user chose. Unchecking every box empties
 /// the set, which the shared predicate reads as the union — so the next load
 /// re-seeds it, exactly as linux behaves.
+/// Can an event compose open (and a create be sent) now? The shared
+/// predicate over the page's read — the one answer `new-event-btn`, the
+/// day-cell double-press, the time-slot press, their key bindings and
+/// `create-event` all ask (`ui/events.md` § *No calendar to hold an event*,
+/// rulings 3 and 5).
+pub(crate) fn create_possibility(app: &App) -> fauna_core::possibility::Possibility {
+    fauna_client_caldav::event_create_possibility(&app.events.calendars_read)
+}
+
+/// Can a calendar be created, or an `.ics` imported, now? The shared
+/// predicate over the same read — the one answer `new-calendar-btn`,
+/// `create-calendar`, `calendar-import-button` and their actions ask
+/// (`ui/events.md` § Errors & edge cases → *The other calendar writes*).
+pub(crate) fn write_possibility(app: &App) -> fauna_core::possibility::Possibility {
+    fauna_client_caldav::calendar_write_possibility(&app.events.calendars_read)
+}
+
+/// The words a calendar write refuses on when custody holds no key at the act
+/// (lost between the paint and the act): the mint is in flight, so it is the
+/// predicate's "loading", never a step for the person (ruling 5).
+fn key_not_ready() -> String {
+    crate::wizard::localized(&fauna_core::localized::LocalizedText::key(
+        fauna_client_caldav::calendars_read::reason_keys::LOADING,
+    ))
+}
+
+/// The compose's whole-sentence report of a create refused after the gate
+/// (ruling 4): the form stays open with what was typed.
+fn save_failed(cause: &str) -> String {
+    et::SAVE_FAILED.replace("{error}", cause)
+}
+
 fn seed_visible_calendars(
     visible: &mut std::collections::HashSet<String>,
     previous: &[CalendarRow],
@@ -696,26 +756,50 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             open_time_axis_at_working_start(app);
             None
         }
-        Action::PrevMonth => {
-            app.events.pan(PanDirection::Backward);
-            None
-        }
-        Action::NextMonth => {
-            app.events.pan(PanDirection::Forward);
+        // The pan pair's one predicate (rule 6): the seam has already
+        // desensitized both buttons in agenda; a key binding reaching here
+        // refuses with the same reason rather than returning silently.
+        Action::PrevMonth | Action::NextMonth => {
+            let answer = fauna_core::caltime::pan_possibility(app.events.view_mode);
+            if app.errors.refuse(Page::Events, &answer) {
+                return None;
+            }
+            app.events.pan(if action == Action::PrevMonth {
+                PanDirection::Backward
+            } else {
+                PanDirection::Forward
+            });
             None
         }
         Action::ShowCreateCalendar => {
+            // The gate (rule 4): the seam has already desensitized the
+            // button; a key binding reaching here refuses with the reason.
+            if app.errors.refuse(Page::Events, &write_possibility(app)) {
+                return None;
+            }
             app.events.mode = Mode::CreateCalendar;
             app.events.new_calendar_name.clear();
             None
         }
-        Action::CreateCalendarSubmit => Some(Op::CreateCalendar {
-            nest,
-            secret_hex,
-            mail: mail.clone(),
-            name: app.events.new_calendar_name.clone(),
-        }),
+        Action::CreateCalendarSubmit => {
+            // The submit asks the same predicate (rule 6); the form stays
+            // open with the name typed.
+            if app.errors.refuse(Page::Events, &write_possibility(app)) {
+                return None;
+            }
+            Some(Op::CreateCalendar {
+                nest,
+                secret_hex,
+                mail: mail.clone(),
+                name: app.events.new_calendar_name.clone(),
+            })
+        }
         Action::ShowCreateEvent => {
+            // The gate (ruling 3): the seam has already desensitized the
+            // button; a key binding reaching here refuses with the reason.
+            if app.errors.refuse(Page::Events, &create_possibility(app)) {
+                return None;
+            }
             // Deliberately does NOT clear: this opener RESUMES the persisted
             // draft (`events.md` § Persistence — "opening the compose resumes
             // the draft; a day-cell gesture starts fresh"). Clearing here is
@@ -740,6 +824,12 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             None
         }
         Action::ComposeOnDay { y, m, d, at } => {
+            // A positional door is simply not live while no calendar can hold
+            // the event (ruling 3); the reason is on the page's empty state
+            // and, here, on error-message, never a silent drop.
+            if app.errors.refuse(Page::Events, &create_possibility(app)) {
+                return None;
+            }
             // Focus follows the cell, so a Back out of the compose returns to
             // the month the user was actually looking at rather than to
             // wherever focus happened to be.
@@ -761,30 +851,42 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             app.events.notify_drafts();
             None
         }
-        Action::CreateEventSubmit => Some(Op::CreateEvent {
-            nest,
-            secret_hex,
-            mail: mail.clone(),
-            // Fall back to the first calendar when none is explicitly selected
-            // (linux parity — the grid views create without a prior
-            // `select_calendar`); `EventCreated` then selects it for display.
-            calendar_id: app
-                .events
-                .selected_calendar
-                .clone()
-                .or_else(|| app.events.calendars.first().map(|c| c.id.clone()))
-                .unwrap_or_default(),
-            organizer_email: app.events.organizer_email.clone(),
-            summary: app.events.new_event_summary.clone(),
-            // The A2 rule (events.md § Where logic lives): pad a bare
-            // `…THH:MM` to `…THH:MM:00`, unify a space-separated date+time to
-            // `T` — the other 6 clients already normalize this text-field
-            // input before it reaches the nest.
-            dtstart: normalize_event_datetime_input(&app.events.new_event_dtstart),
-            dtend: normalize_event_datetime_input(&app.events.new_event_dtend),
-            description: app.events.new_event_description.clone(),
-            location: app.events.new_event_location.clone(),
-        }),
+        Action::CreateEventSubmit => {
+            // The submit asks the predicate again (ruling 3) through the
+            // shared target: the live selection, else the first calendar (linux
+            // parity — the grid views create without a prior
+            // `select_calendar`), else the predicate's reason in words — never
+            // an empty calendar id. `EventCreated` then selects it for display.
+            let target = fauna_client_caldav::event_create_target(
+                &app.events.calendars_read,
+                app.events.selected_calendar.as_deref(),
+                app.events.calendars.iter().map(|c| c.id.as_str()),
+            );
+            let calendar_id = match target {
+                Ok(id) => id,
+                Err(reason) => {
+                    app.errors
+                        .insert(Page::Events, crate::wizard::localized(&reason));
+                    return None;
+                }
+            };
+            Some(Op::CreateEvent {
+                nest,
+                secret_hex,
+                mail: mail.clone(),
+                calendar_id,
+                organizer_email: app.events.organizer_email.clone(),
+                summary: app.events.new_event_summary.clone(),
+                // The A2 rule (events.md § Where logic lives): pad a bare
+                // `…THH:MM` to `…THH:MM:00`, unify a space-separated date+time to
+                // `T` — the other 6 clients already normalize this text-field
+                // input before it reaches the nest.
+                dtstart: normalize_event_datetime_input(&app.events.new_event_dtstart),
+                dtend: normalize_event_datetime_input(&app.events.new_event_dtend),
+                description: app.events.new_event_description.clone(),
+                location: app.events.new_event_location.clone(),
+            })
+        }
         Action::BackFromDetail => {
             app.events.mode = Mode::List;
             None
@@ -861,12 +963,16 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             // re-read be the truth (it also brings in anything another device
             // has raised since).
             app.events.refused_changes.retain(|row| row.key() != key);
+            app.events.refused_gen.bump();
             Some(Op::DismissRefusedChange {
                 account_store: app.settings.account_store.clone(),
                 key,
             })
         }
         Action::ImportIcs => {
+            if app.errors.refuse(Page::Events, &write_possibility(app)) {
+                return None;
+            }
             let calendar = app.events.selected_calendar_row()?.clone();
             let path = app.events.import_path.trim().to_string();
             if path.is_empty() {
@@ -1140,6 +1246,8 @@ pub enum Op {
         /// direction: a slow union fetched at nav-entry must not clobber a
         /// faster single-calendar select that started later.
         query_gen: u64,
+        /// [`EventsState::refused_gen`] as the op was built.
+        refused_of: crate::settings::GestureGen,
     },
     CreateEvent {
         nest: Arc<NestClient>,
@@ -1217,6 +1325,8 @@ pub enum Op {
     /// store-change notice's re-drive ([`store_resync_op`]).
     LoadRefusedChanges {
         account_store: Option<fauna_sync_engine::account_runtime::AccountStoreHandle>,
+        /// [`EventsState::refused_gen`] as the op was built.
+        resync_of: crate::settings::GestureGen,
     },
     /// Read the `.ics` at `path` and import its VEVENTs into `calendar_id`
     /// through the shared `CalDavClient::import_ical_events`, then re-read
@@ -1243,23 +1353,41 @@ pub enum Op {
 
 #[derive(Debug)]
 pub enum Outcome {
-    CalendarCreated(Vec<CalendarRow>),
+    /// A calendar was created; the re-listed rows, and how many listed
+    /// calendars would not unseal ([`calendar_rows`]).
+    CalendarCreated {
+        rows: Vec<CalendarRow>,
+        unreadable_calendars: usize,
+    },
     /// The [`Op::RefreshCalendars`] reply — the calendar list plus the
     /// scoped-or-unioned events (§ Where logic lives above).
     CalendarsAndEventsLoaded {
+        /// The read's answer ([`EventsState::calendars_read`]).
+        read: CalendarsReadState,
         calendars: Vec<CalendarRow>,
+        /// Listed calendars whose metadata would not unseal — left out of
+        /// `calendars` and said on the page ([`calendar_rows`]).
+        unreadable_calendars: usize,
         events: Vec<EventRow>,
         /// The open refused-change rows, fetched in the same pass — see
         /// [`EventsState::refused_changes`] for why they ride the calendar
         /// hydration rather than a poll of their own.
         refused_changes: Vec<fauna_core::data::RefusedSchedulingChange>,
         query_gen: u64,
+        /// [`Op::RefreshCalendars`]'s `refused_of`: `refused_changes` is
+        /// dropped when a dismissal outlived the read.
+        refused_of: crate::settings::GestureGen,
     },
     /// The re-read open refused-change rows — after a
     /// `refused-change-dismiss` landed (the dismissed one is gone, and any
     /// row another device raised meanwhile is now here), or on the
     /// store-change notice while the page is open ([`Op::LoadRefusedChanges`]).
-    RefusedChangesLoaded(Vec<fauna_core::data::RefusedSchedulingChange>),
+    RefusedChangesLoaded {
+        rows: Vec<fauna_core::data::RefusedSchedulingChange>,
+        /// `Some(generation)` on the store notice's re-read, `None` on a
+        /// dismissal's own re-read (written after its write).
+        resync_of: Option<crate::settings::GestureGen>,
+    },
     EventsLoaded {
         calendar_id: String,
         events: Vec<EventRow>,
@@ -1325,7 +1453,7 @@ impl Op {
                     prior_mseks,
                 }) = caldav_context(mail.as_ref(), &secret_hex).await
                 else {
-                    return Outcome::Failed(errors::CALENDAR_REQUIRES_MAIL.to_string());
+                    return Outcome::Failed(key_not_ready());
                 };
                 let metadata = match seal_calendar_metadata(
                     &CalendarMetadata {
@@ -1353,7 +1481,10 @@ impl Op {
                     return Outcome::Failed(format!("provision_calendar: {e}"));
                 }
                 match list_calendars_rows(&nest, &actor_id, &msek, &prior_mseks).await {
-                    Ok(rows) => Outcome::CalendarCreated(rows),
+                    Ok((rows, unreadable_calendars)) => Outcome::CalendarCreated {
+                        rows,
+                        unreadable_calendars,
+                    },
                     Err(e) => Outcome::Failed(e),
                 }
             }
@@ -1365,6 +1496,7 @@ impl Op {
                 organizer_email,
                 selected_calendar,
                 query_gen,
+                refused_of,
             } => {
                 // Mail/CalDAV off ⇒ no calendar store. The refused-change
                 // rows are fetched anyway: they are the account plane's, not
@@ -1374,24 +1506,39 @@ impl Op {
                     account_store.as_ref(),
                 )
                 .await;
-                let Some(DavStoreContext {
-                    actor_id,
-                    msek,
-                    prior_mseks,
-                }) = caldav_context(mail.as_ref(), &secret_hex).await
+                // The read (rulings 2 and 5): custody decides *unresolved*
+                // without a call — a missing key included, the mint in flight,
+                // which the store-change re-run picks up when it lands; with
+                // the key the shared load (the lazy `Personal` included)
+                // answers *loaded* or *provision failed*.
+                let custody = caldav_custody(mail.as_ref(), &secret_hex).await;
+                let read = match CalDavClient::new(Arc::clone(&nest))
+                    .read_calendars(&custody)
+                    .await
+                {
+                    Ok(read) => read,
+                    Err(e) => return Outcome::Failed(format!("list_calendars: {e}")),
+                };
+                let (
+                    DavCustody::Ready(DavStoreContext {
+                        actor_id,
+                        msek,
+                        prior_mseks,
+                    }),
+                    CalendarsRead::Loaded { calendars: entries },
+                ) = (custody, &read)
                 else {
                     return Outcome::CalendarsAndEventsLoaded {
+                        read: read.state(),
                         calendars: vec![],
+                        unreadable_calendars: 0,
                         events: vec![],
                         refused_changes,
                         query_gen,
+                        refused_of,
                     };
                 };
-                let calendars =
-                    match list_calendars_rows(&nest, &actor_id, &msek, &prior_mseks).await {
-                        Ok(rows) => rows,
-                        Err(e) => return Outcome::Failed(e),
-                    };
+                let (calendars, unreadable_calendars) = calendar_rows(entries, &msek, &prior_mseks);
                 let mut events = Vec::new();
                 for cal in calendars_in_scope(&calendars, &selected_calendar) {
                     match fetch_events_rows(
@@ -1409,10 +1556,13 @@ impl Op {
                     }
                 }
                 Outcome::CalendarsAndEventsLoaded {
+                    read: read.state(),
                     calendars,
+                    unreadable_calendars,
                     events,
                     refused_changes,
                     query_gen,
+                    refused_of,
                 }
             }
             Op::ImportIcs {
@@ -1436,7 +1586,7 @@ impl Op {
                     prior_mseks,
                 }) = caldav_context(mail.as_ref(), &secret_hex).await
                 else {
-                    return Outcome::Failed(errors::CALENDAR_REQUIRES_MAIL.to_string());
+                    return Outcome::Failed(key_not_ready());
                 };
                 let result = CalDavClient::new(Arc::clone(&nest))
                     .import_ical_events(
@@ -1520,12 +1670,21 @@ impl Op {
                 if let Err(e) = dismiss(account_store.as_ref(), &key).await {
                     return Outcome::Failed(format!("dismiss refused change: {e}"));
                 }
-                Outcome::RefusedChangesLoaded(load_open(account_store.as_ref()).await)
+                Outcome::RefusedChangesLoaded {
+                    rows: load_open(account_store.as_ref()).await,
+                    resync_of: None,
+                }
             }
-            Op::LoadRefusedChanges { account_store } => Outcome::RefusedChangesLoaded(
-                fauna_client_account_runtime::refused_changes::load_open(account_store.as_ref())
-                    .await,
-            ),
+            Op::LoadRefusedChanges {
+                account_store,
+                resync_of,
+            } => Outcome::RefusedChangesLoaded {
+                rows: fauna_client_account_runtime::refused_changes::load_open(
+                    account_store.as_ref(),
+                )
+                .await,
+                resync_of: Some(resync_of),
+            },
             Op::RefreshEvents {
                 nest,
                 secret_hex,
@@ -1585,7 +1744,7 @@ impl Op {
                     prior_mseks,
                 }) = caldav_context(mail.as_ref(), &secret_hex).await
                 else {
-                    return Outcome::Failed(errors::CALENDAR_REQUIRES_MAIL.to_string());
+                    return Outcome::Failed(save_failed(errors::CALENDAR_REQUIRES_MAIL));
                 };
                 let uid = format!("{}@fauna-tui", uuid::Uuid::new_v4());
                 let fields = EventFields {
@@ -1618,7 +1777,7 @@ impl Op {
                     )
                     .await
                 {
-                    return Outcome::Failed(format!("put_event_ciphertext: {e}"));
+                    return Outcome::Failed(save_failed(&e.to_string()));
                 }
                 match fetch_events_rows(
                     &nest,
@@ -1924,8 +2083,25 @@ impl Op {
 /// a load/mutate clears it (the page shows fresh truth), matching
 /// `notifications::apply_outcome`.
 pub fn apply_outcome(app: &mut App, outcome: Outcome) {
+    // A landed mutation carries the freshest list there is, so it claims the
+    // next `events_gen`: a load already in flight (a nav-entry or a
+    // store-change re-run, read before the write) is then dropped at its
+    // fold instead of putting the pre-mutation roster back.
+    if matches!(
+        outcome,
+        Outcome::CalendarCreated { .. }
+            | Outcome::EventCreated { .. }
+            | Outcome::EventDeleted { .. }
+            | Outcome::EventMutated { .. }
+            | Outcome::IcsImported { .. }
+    ) {
+        app.events.events_gen.set(app.events.events_gen.get() + 1);
+    }
     match outcome {
-        Outcome::CalendarCreated(rows) => {
+        Outcome::CalendarCreated {
+            rows,
+            unreadable_calendars,
+        } => {
             // Seed here too, not just on the load path: a calendar the user
             // just created must arrive with its box CHECKED. Without this it
             // would render unchecked the moment any box was already checked
@@ -1936,9 +2112,12 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
                 &app.events.calendars,
                 &rows,
             );
+            if !rows.is_empty() {
+                app.events.calendars_read = CalendarsReadState::Loaded;
+            }
             app.events.calendars = rows;
             app.events.mode = Mode::List;
-            app.errors.remove(&Page::Events);
+            report_unreadable_calendars(app, unreadable_calendars);
         }
         // Both variants are dropped outright when a fresher fetch (claimed a
         // later `events_gen`) has since superseded them — a slow
@@ -1947,12 +2126,16 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         // (events.md § Implementation status today, the no-selection-union
         // race apple/android/web already guard against the same way).
         Outcome::CalendarsAndEventsLoaded {
+            read,
             calendars,
+            unreadable_calendars,
             events,
             refused_changes,
             query_gen,
+            refused_of,
         } => {
             if query_gen == app.events.events_gen.get() {
+                app.events.calendars_read = read;
                 seed_visible_calendars(
                     &mut app.events.visible_calendars,
                     &app.events.calendars,
@@ -1960,11 +2143,19 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
                 );
                 app.events.calendars = calendars;
                 app.events.events_cache = events;
-                app.events.refused_changes = refused_changes;
-                app.errors.remove(&Page::Events);
+                // A dismissal since the read was taken outlives its list.
+                if !app.events.refused_gen.outlived(refused_of) {
+                    app.events.refused_changes = refused_changes;
+                }
+                report_unreadable_calendars(app, unreadable_calendars);
             }
         }
-        Outcome::RefusedChangesLoaded(rows) => {
+        Outcome::RefusedChangesLoaded { rows, resync_of } => {
+            // The store notice's re-read is spawned: one taken before a
+            // dismissal folded would resurrect the dismissed row.
+            if resync_of.is_some_and(|carried| app.events.refused_gen.outlived(carried)) {
+                return;
+            }
             // No `query_gen` guard: the rows are not the calendar/event race's
             // subject (that token guards a union against a single-calendar
             // select — neither of which touches this list), and a dismissal's
@@ -2081,6 +2272,20 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
     }
 }
 
+/// A load or a create that left calendars out because they would not unseal
+/// says so on the page's `error-message` (rule 7: never only logged); a clean
+/// one clears it.
+fn report_unreadable_calendars(app: &mut App, unreadable: usize) {
+    if unreadable == 0 {
+        app.errors.remove(&Page::Events);
+    } else {
+        app.errors.insert(
+            Page::Events,
+            et::CALENDARS_UNREADABLE.replace("{count}", &unreadable.to_string()),
+        );
+    }
+}
+
 /// A calendar name as a file-name stem: path separators and control or
 /// reserved characters become `_`, and an empty result falls back to
 /// `calendar`.
@@ -2148,12 +2353,45 @@ async fn caldav_context(
     dav_store_context(mail, actor_id).await
 }
 
+/// [`caldav_context`]'s custody answer, kept whole for the calendar read
+/// (ruling 2). A malformed connection secret is no answer about custody, so
+/// it reads as *unresolved* (logged), never as *no key*.
+async fn caldav_custody(mail: &dyn fauna_client_config::MailStore, secret_hex: &str) -> DavCustody {
+    match ActorKeypair::from_secret_hex(secret_hex) {
+        Ok(kp) => dav_custody(mail, kp.actor_id().0).await,
+        Err(e) => {
+            tracing::error!("events: the connection secret does not parse: {e}");
+            DavCustody::Unreadable(e.to_string())
+        }
+    }
+}
+
+/// Unseal each listed calendar's metadata into a row; a row that will not
+/// unseal is left out and counted, so the page can say so
+/// ([`report_unreadable_calendars`]).
+fn calendar_rows(
+    entries: &[fauna_client_caldav::bridge_routing::CalendarEntry],
+    msek: &[u8; 32],
+    prior_mseks: &[[u8; 32]],
+) -> (Vec<CalendarRow>, usize) {
+    // Derived once for the whole list — every row's metadata reuses it instead
+    // of paying its own X-Wing keygen .
+    let keys =
+        DavRecipientKeys::from_mseks(fauna_client_caldav::DavKind::Calendar, msek, prior_mseks);
+    let rows: Vec<CalendarRow> = entries
+        .iter()
+        .filter_map(|e| calendar_row_from_entry(e, &keys))
+        .collect();
+    let unreadable = entries.len() - rows.len();
+    (rows, unreadable)
+}
+
 async fn list_calendars_rows(
     nest: &Arc<NestClient>,
     actor_id: &[u8; 32],
     msek: &[u8; 32],
     prior_mseks: &[[u8; 32]],
-) -> Result<Vec<CalendarRow>, String> {
+) -> Result<(Vec<CalendarRow>, usize), String> {
     let client = CalDavClient::new(Arc::clone(nest));
     // The shared load: a fresh or re-claimed actor with no calendars gets the
     // lazy `Personal` first (caldav-server.md § Lazy "Personal" calendar).
@@ -2161,18 +2399,17 @@ async fn list_calendars_rows(
         .list_calendars_with_personal(actor_id, msek)
         .await
         .map_err(|e| format!("list_calendars: {e}"))?;
-    if let Some(e) = &reply.personal_provision_error {
-        tracing::error!("events::list_calendars_rows: lazy Personal: {e}");
+    // A listing with no calendar is the read's *provision failed* answer:
+    // said in the predicate's sentence, never only logged (rule 7).
+    match CalendarsRead::from_listing(reply) {
+        CalendarsRead::Loaded { calendars } => Ok(calendar_rows(&calendars, msek, prior_mseks)),
+        read => Err(
+            fauna_client_caldav::calendar_write_possibility(&read.state())
+                .reason()
+                .map(crate::wizard::localized)
+                .unwrap_or_else(key_not_ready),
+        ),
     }
-    // Derived once for the whole list — every row's metadata reuses it instead
-    // of paying its own X-Wing keygen .
-    let keys =
-        DavRecipientKeys::from_mseks(fauna_client_caldav::DavKind::Calendar, msek, prior_mseks);
-    Ok(reply
-        .calendars
-        .iter()
-        .filter_map(|e| calendar_row_from_entry(e, &keys))
-        .collect())
 }
 
 fn calendar_row_from_entry(
@@ -2486,6 +2723,7 @@ pub fn elements(app: &App) -> Vec<Element> {
             true,
             Gesture::Events(Action::PrevMonth),
         )
+        .possible(fauna_core::caltime::pan_possibility(st.view_mode))
         .starts_row(),
     );
     out.push(Element::label(ids::CALENDAR_DATE_LABEL, date_label(st)).inline());
@@ -2496,15 +2734,21 @@ pub fn elements(app: &App) -> Vec<Element> {
             true,
             Gesture::Events(Action::NextMonth),
         )
+        .possible(fauna_core::caltime::pan_possibility(st.view_mode))
         .inline(),
     );
 
-    out.push(Element::gesture_button(
-        ids::NEW_CALENDAR_BTN,
-        et::NEW_CALENDAR,
-        true,
-        Gesture::Events(Action::ShowCreateCalendar),
-    ));
+    // The other calendar-write gate (rules 4-6): declared here, applied by
+    // the one seam, the same answer `ShowCreateCalendar` refuses on.
+    out.push(
+        Element::gesture_button(
+            ids::NEW_CALENDAR_BTN,
+            et::NEW_CALENDAR,
+            true,
+            Gesture::Events(Action::ShowCreateCalendar),
+        )
+        .possible(write_possibility(app)),
+    );
     // One sidebar ROW per calendar — the name button that selects, then its
     // `calendar-visibility` checkbox, exactly the two-affordance row linux
     // builds in its hbox (`ui/events.md` § Layout & flow). The pair is one
@@ -2536,6 +2780,28 @@ pub fn elements(app: &App) -> Vec<Element> {
             .inline(),
         );
     }
+    // The calendar list's empty state (rulings 3 and 5): while the read is
+    // unresolved (a missing key included), the loading line and never the
+    // empty state; on *provision failed*, the predicate's reason (the next
+    // read retries the provision — no step on another page). A loaded read with no
+    // row painted (every row failed to unseal) adds nothing: "No calendars
+    // yet." is never said of a list that is not real.
+    if st.calendars.is_empty() {
+        match &st.calendars_read {
+            CalendarsReadState::Loaded => {}
+            CalendarsReadState::Unresolved => {
+                out.push(Element::chrome(et::create_blocked::LOADING));
+            }
+            CalendarsReadState::ProvisionFailed { .. } => {
+                if let Some(reason) = create_possibility(app).reason() {
+                    out.push(Element::label(
+                        ids::CALENDAR_LIST_EMPTY_STATE,
+                        crate::wizard::localized(reason),
+                    ));
+                }
+            }
+        }
+    }
     // Calendar-level `.ics` import/export, beside the calendar list and only
     // while a calendar is selected — both act on THAT calendar (events.md
     // § Import / Export). The path is typed: a terminal has no picker, so the
@@ -2556,6 +2822,7 @@ pub fn elements(app: &App) -> Vec<Element> {
                 true,
                 Gesture::Events(Action::ImportIcs),
             )
+            .possible(write_possibility(app))
             .starts_row(),
         );
         out.push(
@@ -2571,12 +2838,18 @@ pub fn elements(app: &App) -> Vec<Element> {
             out.push(Element::chrome(st.ics_notice.clone()));
         }
     }
-    out.push(Element::gesture_button(
-        ids::NEW_EVENT_BTN,
-        et::NEW_EVENT,
-        true,
-        Gesture::Events(Action::ShowCreateEvent),
-    ));
+    // The gate (ruling 3): declared here, applied by the one seam
+    // (`App::page_elements`) — desensitized with its reason while blocked,
+    // not painted while absent.
+    out.push(
+        Element::gesture_button(
+            ids::NEW_EVENT_BTN,
+            et::NEW_EVENT,
+            true,
+            Gesture::Events(Action::ShowCreateEvent),
+        )
+        .possible(create_possibility(app)),
+    );
 
     match &st.mode {
         // The page's calendar scope, resolved ONCE here and handed to whichever
@@ -2601,12 +2874,15 @@ pub fn elements(app: &App) -> Vec<Element> {
                 st.new_calendar_name.clone(),
                 Field::Events(EventsField::CalendarName),
             ));
-            out.push(Element::gesture_button(
-                ids::CREATE_CALENDAR,
-                t::SAVE,
-                true,
-                Gesture::Events(Action::CreateCalendarSubmit),
-            ));
+            out.push(
+                Element::gesture_button(
+                    ids::CREATE_CALENDAR,
+                    t::SAVE,
+                    true,
+                    Gesture::Events(Action::CreateCalendarSubmit),
+                )
+                .possible(write_possibility(app)),
+            );
         }
         Mode::CreateEvent => {
             out.push(Element::input(
@@ -2744,6 +3020,9 @@ mod tests {
                 "calendar-date-label",
                 "events-next-month",
                 "new-calendar-btn",
+                // The loading line: a page that has not read yet is loading,
+                // never empty (ruling 2 of *No calendar to hold an event*).
+                "",
                 "new-event-btn",
             ]
         );
@@ -2901,6 +3180,48 @@ mod tests {
         );
     }
 
+    /// The store notice's re-read (`store_resync_op`'s `Op::LoadRefusedChanges`)
+    /// and a push's calendar hydration are spawned: a read taken before a
+    /// dismissal never brings the dismissed row back.
+    #[test]
+    fn a_late_refused_change_re_read_never_paints_over_a_newer_gesture() {
+        let mut app = events_test_app();
+        app.events.refused_changes = vec![refusal_row("uid-1", "Kickoff")];
+        let carried = app.events.refused_gen;
+        let key = app.events.refused_changes[0].key();
+
+        let _ = apply_local(&mut app, Action::DismissRefusedChange(key));
+        apply_outcome(
+            &mut app,
+            Outcome::RefusedChangesLoaded {
+                rows: vec![refusal_row("uid-1", "Kickoff")],
+                resync_of: Some(carried),
+            },
+        );
+        assert!(
+            app.events.refused_changes.is_empty(),
+            "a store re-read older than the dismissal resurrected the row"
+        );
+
+        let query_gen = app.events.events_gen.get();
+        apply_outcome(
+            &mut app,
+            Outcome::CalendarsAndEventsLoaded {
+                read: CalendarsReadState::Loaded,
+                calendars: Vec::new(),
+                unreadable_calendars: 0,
+                events: Vec::new(),
+                refused_changes: vec![refusal_row("uid-1", "Kickoff")],
+                query_gen,
+                refused_of: carried,
+            },
+        );
+        assert!(
+            app.events.refused_changes.is_empty(),
+            "a calendar hydration older than the dismissal resurrected the row"
+        );
+    }
+
     /// Dismissing drops the row from the painted list at once (the op's
     /// re-read is the truth, but a terminal must acknowledge immediately) and
     /// writes the dismissal to the account store.
@@ -2937,19 +3258,26 @@ mod tests {
         );
     }
 
-    /// The store-change notice re-reads the refused-change list only — the
-    /// page's one store-backed source — and only once the account store is
-    /// assembled (before that nothing could have changed there, and an empty
-    /// read would blank the list).
+    /// With the calendar read loaded, the store-change notice re-reads the
+    /// refused-change list only — the page's one store-backed source — and
+    /// only once the account store is assembled (before that nothing could
+    /// have changed there, and an empty read would blank the list).
     #[test]
     fn the_store_change_resync_reads_the_refused_list_only_once_the_store_is_up() {
+        let loaded = EventsState {
+            calendars_read: CalendarsReadState::Loaded,
+            ..Default::default()
+        };
         assert!(
-            store_resync_op(None).is_none(),
+            store_resync_op(&loaded, None).is_none(),
             "no account store: nothing to re-read, nothing to blank"
         );
         let mut app = events_test_app();
         app.events.refused_changes = vec![refusal_row("uid-1", "Kickoff")];
-        let folded = Outcome::RefusedChangesLoaded(vec![refusal_row("uid-2", "Standup")]);
+        let folded = Outcome::RefusedChangesLoaded {
+            rows: vec![refusal_row("uid-2", "Standup")],
+            resync_of: None,
+        };
         apply_outcome(&mut app, folded);
         assert_eq!(
             app.events.refused_changes[0].uid_hash, "uid-2",
@@ -3195,7 +3523,10 @@ mod tests {
 
         apply_outcome(
             &mut app,
-            Outcome::CalendarCreated(vec![cal("aa", "Work"), cal("bb", "Home")]),
+            Outcome::CalendarCreated {
+                rows: vec![cal("aa", "Work"), cal("bb", "Home")],
+                unreadable_calendars: 0,
+            },
         );
 
         assert!(
@@ -3930,6 +4261,9 @@ mod tests {
             fauna_core::identity::ActorKeypair::generate(),
         );
         app.events = init(nest, "aa", "alice@example.com", fake_mail());
+        // A working account's read: loaded, so the doors open (the tests of
+        // the other answers set theirs — *No calendar to hold an event*).
+        app.events.calendars_read = CalendarsReadState::Loaded;
         app
     }
 
@@ -4794,19 +5128,61 @@ mod tests {
         }
     }
 
-    /// Panning in Agenda does nothing: the agenda list is date-unfiltered
-    /// (`agenda.rs`), so the focus date it would move is not observable there.
-    /// Moving it anyway is what made tui's `calendar-date-label` advance above
-    /// a list that never changed.
+    /// Panning in Agenda is REFUSED: the agenda list is date-unfiltered
+    /// (`agenda.rs`), so there is no range to pan. A key binding that reaches
+    /// the action past the disabled buttons asks the same shared predicate
+    /// the paint does (`ui/README.md` § Offer only what is possible, rule 6)
+    /// and refuses with its reason — never a silent no-op, and never a moved
+    /// focus date (what once made `calendar-date-label` advance above a list
+    /// that never changed).
     #[test]
-    fn pan_is_inert_in_the_date_unfiltered_agenda() {
-        let mut app = events_test_app();
-        app.events.view_mode = ViewMode::Agenda;
-        focus_on(&mut app, 2026, 7, 15);
-        let before = date_label(&app.events);
-        apply_local(&mut app, Action::NextMonth);
-        assert_eq!(app.events.focus(), (2026, 7, 15));
-        assert_eq!(date_label(&app.events), before);
+    fn pan_is_refused_with_its_reason_in_the_date_unfiltered_agenda() {
+        let reason = crate::wizard::localized(&fauna_core::localized::LocalizedText::key(
+            fauna_core::caltime::PAN_NONE_IN_AGENDA_KEY,
+        ));
+        for action in [Action::NextMonth, Action::PrevMonth] {
+            let mut app = events_test_app();
+            app.events.view_mode = ViewMode::Agenda;
+            focus_on(&mut app, 2026, 7, 15);
+            let before = date_label(&app.events);
+            apply_local(&mut app, action.clone());
+            assert_eq!(app.events.focus(), (2026, 7, 15), "{action:?}");
+            assert_eq!(date_label(&app.events), before, "{action:?}");
+            assert_eq!(
+                app.errors.get(&Page::Events).map(String::as_str),
+                Some(reason.as_str()),
+                "{action:?} refuses with the predicate's reason"
+            );
+        }
+    }
+
+    /// **The pan pair is painted from the shared predicate**: disabled with
+    /// its reason in Agenda (the person unblocks it by switching view, so it
+    /// stays shown — rule 2), offered in every view that has a range.
+    #[test]
+    fn the_pan_pair_is_disabled_in_agenda_and_offered_in_ranged_views() {
+        for mode in [
+            ViewMode::Agenda,
+            ViewMode::Month,
+            ViewMode::Week,
+            ViewMode::Day,
+        ] {
+            let mut app = events_test_app();
+            app.events.view_mode = mode;
+            let els = elements(&app);
+            for id in [ids::EVENTS_PREV_MONTH, ids::EVENTS_NEXT_MONTH] {
+                let el = els
+                    .iter()
+                    .find(|e| e.id == id)
+                    .unwrap_or_else(|| panic!("{id} present in {mode:?}"));
+                assert_eq!(
+                    el.possibility,
+                    Some(fauna_core::caltime::pan_possibility(mode)),
+                    "{id} declares the shared answer in {mode:?}"
+                );
+                assert_eq!(el.offered(), mode != ViewMode::Agenda, "{id} in {mode:?}");
+            }
+        }
     }
 
     /// `CreateEventSubmit` falls back to the first calendar when none is
@@ -4936,7 +5312,10 @@ mod tests {
         apply_outcome(
             &mut app,
             Outcome::CalendarsAndEventsLoaded {
+                refused_of: Default::default(),
+                read: CalendarsReadState::Loaded,
                 calendars: vec![cal("aa", "Work"), cal("bb", "Home")],
+                unreadable_calendars: 0,
                 events: vec![
                     ev_at("1", "A", "2026-07-15T10:00", "2026-07-15T11:00"),
                     ev_at("2", "B", "2026-07-16T10:00", "2026-07-16T11:00"),
@@ -4979,7 +5358,10 @@ mod tests {
         apply_outcome(
             &mut app,
             Outcome::CalendarsAndEventsLoaded {
+                refused_of: Default::default(),
+                read: CalendarsReadState::Loaded,
                 calendars: vec![cal("aa", "Work"), cal("bb", "Home")],
+                unreadable_calendars: 0,
                 events: vec![
                     ev_at("1", "Fresh", "2026-07-15T10:00", "2026-07-15T11:00"),
                     ev_at("2", "Stale-union", "2026-07-16T10:00", "2026-07-16T11:00"),
@@ -5011,7 +5393,10 @@ mod tests {
         apply_outcome(
             &mut app,
             Outcome::CalendarsAndEventsLoaded {
+                refused_of: Default::default(),
+                read: CalendarsReadState::Loaded,
                 calendars: vec![cal("aa", "Work"), cal("bb", "Home")],
+                unreadable_calendars: 0,
                 events: vec![
                     ev_at("1", "A", "2026-07-15T10:00", "2026-07-15T11:00"),
                     ev_at("2", "B", "2026-07-16T10:00", "2026-07-16T11:00"),
@@ -5056,5 +5441,363 @@ mod tests {
             panic!("expected Op::RefreshCalendars");
         };
         assert_eq!(selected_calendar, Some("bb".to_string()));
+    }
+
+    // --- `ui/events.md` § Errors & edge cases → *No calendar to hold an
+    // event*, rulings 3 and 4: the doors, the submit and the empty state on
+    // each of the read's answers. ---
+
+    /// The page with each element's answer applied as the one seam applies
+    /// it (`App::page_elements`, which a signed-out test app does not reach):
+    /// absent dropped, not-possible disabled.
+    fn painted(app: &mut crate::app::App) -> Vec<Element> {
+        let mut els = elements(app);
+        els.retain(|e| e.possibility.as_ref().is_none_or(|p| p.is_shown()));
+        for e in &mut els {
+            if !app.element_possibility(e).is_possible() {
+                e.enabled = false;
+            }
+        }
+        els
+    }
+
+    fn find<'a>(elements: &'a [Element], id: &str) -> Option<&'a Element> {
+        elements.iter().find(|e| e.id == id)
+    }
+
+    fn with_read(read: CalendarsReadState) -> crate::app::App {
+        let mut app = events_test_app();
+        app.events.calendars_read = read;
+        app
+    }
+
+    // --- *The other calendar writes*: new-calendar-btn, create-calendar
+    // and calendar-import-button on each of the read's answers. ---
+
+    #[test]
+    fn the_calendar_write_doors_are_shut_on_each_answer_that_is_not_loaded() {
+        for read in [
+            CalendarsReadState::Unresolved,
+            CalendarsReadState::ProvisionFailed { error: "x".into() },
+        ] {
+            let mut app = with_read(read.clone());
+            let els = painted(&mut app);
+            let btn = find(&els, ids::NEW_CALENDAR_BTN).expect("shown, never absent");
+            assert!(!btn.enabled, "{read:?}: new-calendar-btn is blocked");
+            for action in [
+                Action::ShowCreateCalendar,
+                Action::CreateCalendarSubmit,
+                Action::ImportIcs,
+            ] {
+                let mut app = with_read(read.clone());
+                assert!(apply_local(&mut app, action.clone()).is_none());
+                assert_eq!(app.events.mode, Mode::List, "{read:?} {action:?}");
+                assert!(
+                    app.errors.get(&Page::Events).is_some(),
+                    "{read:?} {action:?}: the reason is said"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_loaded_read_opens_the_calendar_write_doors() {
+        let mut app = with_read(CalendarsReadState::Loaded);
+        app.events.calendars = vec![cal("aa", "Personal")];
+        app.events.selected_calendar = Some("aa".into());
+        let els = painted(&mut app);
+        assert!(find(&els, ids::NEW_CALENDAR_BTN).unwrap().enabled);
+        // The import and the save are wire actions, so the offline gate of a
+        // signed-out test app also folds in; their own declared answer is
+        // what this test pins.
+        let declared = elements(&app);
+        assert!(
+            find(&declared, ids::CALENDAR_IMPORT_BUTTON)
+                .unwrap()
+                .offered()
+        );
+        assert!(apply_local(&mut app, Action::ShowCreateCalendar).is_none());
+        assert_eq!(app.events.mode, Mode::CreateCalendar);
+        let els = elements(&app);
+        assert!(find(&els, ids::CREATE_CALENDAR).unwrap().offered());
+    }
+
+    /// The import's ruled no-file refusal stays at the press (events.md
+    /// § Import / Export): the gate is possible, the press says so.
+    #[test]
+    fn a_loaded_import_with_no_path_still_says_so() {
+        let mut app = with_read(CalendarsReadState::Loaded);
+        app.events.calendars = vec![cal("aa", "Personal")];
+        app.events.selected_calendar = Some("aa".into());
+        app.events.import_path.clear();
+        assert!(apply_local(&mut app, Action::ImportIcs).is_none());
+        assert_eq!(
+            app.errors.get(&Page::Events).map(String::as_str),
+            Some(et::ICS_PATH_REQUIRED)
+        );
+    }
+
+    /// A calendar whose metadata will not unseal is said on error-message,
+    /// never only logged; a clean load clears it.
+    #[test]
+    fn unreadable_calendars_are_said_on_the_page() {
+        let mut app = events_test_app();
+        let query_gen = app.events.events_gen.get();
+        apply_outcome(
+            &mut app,
+            Outcome::CalendarsAndEventsLoaded {
+                refused_of: Default::default(),
+                read: CalendarsReadState::Loaded,
+                calendars: vec![cal("aa", "Work")],
+                unreadable_calendars: 2,
+                events: vec![],
+                refused_changes: vec![],
+                query_gen,
+            },
+        );
+        let said = app.errors.get(&Page::Events).expect("said").clone();
+        assert!(said.contains('2'), "{said}");
+        let query_gen = app.events.events_gen.get();
+        apply_outcome(
+            &mut app,
+            Outcome::CalendarsAndEventsLoaded {
+                refused_of: Default::default(),
+                read: CalendarsReadState::Loaded,
+                calendars: vec![cal("aa", "Work")],
+                unreadable_calendars: 0,
+                events: vec![],
+                refused_changes: vec![],
+                query_gen,
+            },
+        );
+        assert!(app.errors.get(&Page::Events).is_none());
+    }
+
+    #[test]
+    fn an_unresolved_read_paints_loading_never_the_empty_state_and_shuts_the_opener() {
+        let mut app = with_read(CalendarsReadState::Unresolved);
+        let els = painted(&mut app);
+        assert!(find(&els, ids::CALENDAR_LIST_EMPTY_STATE).is_none());
+        assert!(
+            els.iter().any(|e| e.text == et::create_blocked::LOADING),
+            "the loading line is painted"
+        );
+        let btn = find(&els, ids::NEW_EVENT_BTN).expect("the opener is shown");
+        assert!(!btn.enabled, "blocked while loading");
+    }
+
+    #[test]
+    fn a_refused_provision_paints_its_error_and_no_jump() {
+        let mut app = with_read(CalendarsReadState::ProvisionFailed {
+            error: "provision_calendar: refused".into(),
+        });
+        let els = painted(&mut app);
+        let empty = find(&els, ids::CALENDAR_LIST_EMPTY_STATE).unwrap();
+        assert!(
+            empty.text.contains("provision_calendar: refused"),
+            "{}",
+            empty.text
+        );
+        assert!(find(&els, ids::CALENDAR_LIST_EMPTY_STATE_STEP).is_none());
+    }
+
+    #[test]
+    fn a_loaded_read_opens_every_door_and_paints_no_empty_state() {
+        let mut app = with_read(CalendarsReadState::Loaded);
+        app.events.calendars = vec![cal("aa", "Personal")];
+        let els = painted(&mut app);
+        assert!(find(&els, ids::CALENDAR_LIST_EMPTY_STATE).is_none());
+        assert!(find(&els, ids::NEW_EVENT_BTN).unwrap().enabled);
+        assert!(apply_local(&mut app, Action::ShowCreateEvent).is_none());
+        assert_eq!(app.events.mode, Mode::CreateEvent);
+        app.events.mode = Mode::List;
+        apply_local(
+            &mut app,
+            Action::ComposeOnDay {
+                y: 2026,
+                m: 11,
+                d: 16,
+                at: None,
+            },
+        );
+        assert_eq!(app.events.mode, Mode::CreateEvent);
+    }
+
+    /// Every door refuses on each answer that is not *loaded* — the opener's
+    /// key binding, the day-cell double-press and the time-slot press — and
+    /// says why on error-message, never a silent drop.
+    #[test]
+    fn every_door_stays_shut_on_each_answer_that_is_not_loaded() {
+        for read in [
+            CalendarsReadState::Unresolved,
+            CalendarsReadState::ProvisionFailed { error: "x".into() },
+        ] {
+            for action in [
+                Action::ShowCreateEvent,
+                Action::ComposeOnDay {
+                    y: 2026,
+                    m: 11,
+                    d: 16,
+                    at: None,
+                },
+                Action::ComposeOnDay {
+                    y: 2026,
+                    m: 11,
+                    d: 16,
+                    at: Some((9, 30)),
+                },
+            ] {
+                let mut app = with_read(read.clone());
+                assert!(apply_local(&mut app, action.clone()).is_none());
+                assert_eq!(app.events.mode, Mode::List, "{read:?} {action:?}");
+                assert!(
+                    app.errors.get(&Page::Events).is_some(),
+                    "{read:?} {action:?}: the reason is said"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_submit_refuses_with_the_predicate_reason_on_each_answer_not_loaded() {
+        for read in [
+            CalendarsReadState::Unresolved,
+            CalendarsReadState::ProvisionFailed { error: "x".into() },
+        ] {
+            let said = crate::wizard::localized(
+                fauna_client_caldav::event_create_possibility(&read)
+                    .reason()
+                    .expect("blocked"),
+            );
+            let mut app = with_read(read);
+            app.events.mode = Mode::CreateEvent;
+            app.events.new_event_summary = "Lunch".into();
+            assert!(apply_local(&mut app, Action::CreateEventSubmit).is_none());
+            assert_eq!(app.errors.get(&Page::Events), Some(&said));
+            assert_eq!(app.events.mode, Mode::CreateEvent, "the form stays open");
+            assert_eq!(app.events.new_event_summary, "Lunch");
+        }
+    }
+
+    /// Ruling 4: a create refused after the gate keeps the form open with
+    /// what was typed and says so in a whole sentence.
+    #[test]
+    fn a_failed_save_keeps_the_compose_open_with_its_fields() {
+        let mut app = with_read(CalendarsReadState::Loaded);
+        app.events.calendars = vec![cal("aa", "Personal")];
+        app.events.mode = Mode::CreateEvent;
+        app.events.new_event_summary = "Lunch".into();
+        apply_outcome(&mut app, Outcome::Failed(save_failed("nest said no")));
+        assert_eq!(app.events.mode, Mode::CreateEvent);
+        assert_eq!(app.events.new_event_summary, "Lunch");
+        let message = app.errors.get(&Page::Events).unwrap();
+        assert!(
+            message.starts_with("The event could not be saved"),
+            "{message}"
+        );
+        assert!(message.contains("nest said no"), "{message}");
+    }
+
+    /// The read's answer rides the load's outcome, and a later load replaces
+    /// it.
+    #[test]
+    fn the_load_folds_the_read() {
+        let mut app = events_test_app();
+        let query_gen = app.events.events_gen.get();
+        apply_outcome(
+            &mut app,
+            Outcome::CalendarsAndEventsLoaded {
+                refused_of: Default::default(),
+                read: CalendarsReadState::Unresolved,
+                calendars: vec![],
+                unreadable_calendars: 0,
+                events: vec![],
+                refused_changes: vec![],
+                query_gen,
+            },
+        );
+        assert_eq!(app.events.calendars_read, CalendarsReadState::Unresolved);
+        apply_outcome(
+            &mut app,
+            Outcome::CalendarsAndEventsLoaded {
+                refused_of: Default::default(),
+                read: CalendarsReadState::Loaded,
+                calendars: vec![cal("aa", "Personal")],
+                unreadable_calendars: 0,
+                events: vec![],
+                refused_changes: vec![],
+                query_gen,
+            },
+        );
+        assert_eq!(app.events.calendars_read, CalendarsReadState::Loaded);
+    }
+
+    /// Until the read loads, the store-change notice (custody's first
+    /// listing lands as a store walk) re-runs the whole calendar load.
+    #[test]
+    fn the_store_change_re_runs_the_load_until_the_read_is_loaded() {
+        let app = with_read(CalendarsReadState::Unresolved);
+        assert!(matches!(
+            store_resync_op(&app.events, None),
+            Some(Op::RefreshCalendars { .. })
+        ));
+        for settled in [
+            CalendarsReadState::ProvisionFailed { error: "x".into() },
+            CalendarsReadState::Loaded,
+        ] {
+            let app = with_read(settled.clone());
+            assert!(
+                store_resync_op(&app.events, None).is_none(),
+                "{settled:?}: settled, re-read at the next entry"
+            );
+        }
+    }
+
+    /// A load in flight when a mutation lands is dropped at its fold, so the
+    /// mutation's fresher roster stays (an RSVP raced by a re-run load).
+    #[test]
+    fn a_landed_mutation_drops_a_load_already_in_flight() {
+        let mut app = with_read(CalendarsReadState::Loaded);
+        app.events.calendars = vec![cal("aa", "Work")];
+        let in_flight = app.events.events_gen.get() + 1;
+        app.events.events_gen.set(in_flight);
+        let mut fresh = ev("e1", "aa", "Lunch");
+        fresh.self_rsvp = "accepted".into();
+        apply_outcome(
+            &mut app,
+            Outcome::EventMutated {
+                calendar_id: "aa".into(),
+                events: vec![fresh],
+                error: None,
+            },
+        );
+        apply_outcome(
+            &mut app,
+            Outcome::CalendarsAndEventsLoaded {
+                refused_of: Default::default(),
+                read: CalendarsReadState::Unresolved,
+                calendars: vec![],
+                unreadable_calendars: 0,
+                events: vec![ev("e1", "aa", "Lunch")],
+                refused_changes: vec![],
+                query_gen: in_flight,
+            },
+        );
+        assert_eq!(app.events.events_cache[0].self_rsvp, "accepted");
+        assert_eq!(app.events.calendars_read, CalendarsReadState::Loaded);
+        assert_eq!(app.events.calendars.len(), 1);
+    }
+
+    #[test]
+    fn a_created_calendar_loads_the_read() {
+        let mut app = with_read(CalendarsReadState::ProvisionFailed { error: "x".into() });
+        apply_outcome(
+            &mut app,
+            Outcome::CalendarCreated {
+                rows: vec![cal("aa", "Work")],
+                unreadable_calendars: 0,
+            },
+        );
+        assert_eq!(app.events.calendars_read, CalendarsReadState::Loaded);
     }
 }

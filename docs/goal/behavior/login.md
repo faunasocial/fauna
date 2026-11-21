@@ -418,7 +418,7 @@ cannot-lock-the-last-admin guard exists, and the exemption lifts at every door t
 is the only lockout gate any *Fauna* app passes. **The lock also covers the credentials a bridge resolves for the account (2026-11-07):** a mail credential (IMAP, SMTP submission, CalDAV, CardDAV, WebDAV) and an ATProto app password sign nothing in and serve nothing while the account is locked or suspended, sessions already open included, with the same admin exemption — the mechanism, and the third door it adds to "every door", is owned by [`../architecture/transport-connection.md`](../architecture/transport-connection.md) § Revocation teardown, the bridge-held sessions paragraph. This gate is what delivers the refusal to
 the locked surface on every launch path ([`devices.md`](devices.md) § The locked
 state). *Implementation status: the mint-time gate is built — `auth_core::verify_core`
-reads `locked_until` (admins exempt), `SilentChallengeOutcome::Locked` carries it,
+reads `locked_until` (admins exempt — through `auth_core::refuse_if_locked`, the one check the handshake, verify and device doors share), `SilentChallengeOutcome::Locked` carries it,
 and the launch machine lands it terminal with `LaunchSnapshot::locked_until_secs`.
 This is the mint half; the use-time half is the paragraph below, and the app
 half — the machine's one refresh at `locked_until`, the bearer mints' locked latch

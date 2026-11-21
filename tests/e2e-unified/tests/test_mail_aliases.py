@@ -35,6 +35,7 @@ import pytest
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from conftest import MAIL_PRIMARY_DOMAIN
 from helpers.mail_aliases import default_alias_domain
+from helpers.mail_client_ui import turn_mail_on
 
 # Implemented on all 7 apps now; the action class is platform-agnostic and
 # every app drives the same gestures through the shared MailAliasesMachine.
@@ -82,6 +83,7 @@ def _delete_all(client):
 @pytest.mark.feature("mail-aliases")
 def test_mail_aliases_page_reachable(logged_in_app):
     """Navigate to the mail-aliases page and confirm the add-button shows."""
+    turn_mail_on(logged_in_app)
     logged_in_app.mail_aliases.navigate()
     assert logged_in_app.mail_aliases.is_page_visible(), (
         "mail-aliases-add-button should be visible after navigating to the "
@@ -104,6 +106,7 @@ def test_mail_aliases_generate_disposable_renders_row(logged_in_app, test_user, 
         _seed_exact(api, handle)
         try:
             app = logged_in_app
+            turn_mail_on(app)
             app.mail_aliases.navigate()
             assert app.mail_aliases.is_page_visible()
 
@@ -146,6 +149,7 @@ def test_mail_aliases_add_exact_via_sheet(logged_in_app, test_user, nest_instanc
         _seed_exact(api, handle)
         try:
             app = logged_in_app
+            turn_mail_on(app)
             app.mail_aliases.navigate()
             assert app.mail_aliases.is_page_visible()
             # Re-list the seeded alias into the snapshot (sets default_domain).
@@ -185,6 +189,7 @@ def test_mail_aliases_revoke_then_delete(logged_in_app, test_user, nest_instance
         _seed_exact(api, handle)
         try:
             app = logged_in_app
+            turn_mail_on(app)
             app.mail_aliases.navigate()
             assert app.mail_aliases.is_page_visible()
             app.mail_aliases.refresh_via_generate()
@@ -288,8 +293,7 @@ def test_mail_aliases_revoke_and_delete_by_address_with_canonical_row_present(
             },
         )
 
-        app.mail_settings.navigate()
-        app.mail_settings.ensure_mail_enabled()
+        turn_mail_on(app)
 
         app.mail_aliases.navigate()
         assert app.mail_aliases.is_page_visible()

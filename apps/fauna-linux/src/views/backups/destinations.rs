@@ -68,6 +68,9 @@ use std::sync::Arc;
 
 use adw::prelude::*;
 
+use fauna_backups_machine::possibility::{
+    DestinationForm, destination_form_possibility, parse_destination_capacity,
+};
 use fauna_client_backup::audit::{DestinationAuditRecord, run_audit_pass};
 use fauna_client_config::{
     BackupStateStore, CustodianEnrollment, deregister_backup_destination, enroll_client_custodian,
@@ -78,6 +81,7 @@ use fauna_core::data::{
     BackupDestination, DESTINATION_KIND_CLIENT_DEVICE, DESTINATION_KIND_NEST, DestinationKind,
     DestinationUnattestedMark, every_destination_is_a_client_device,
 };
+use fauna_core::possibility::Possibility;
 // The status rows are the nest's projection since the leg-(d) repoint. The wire
 // row is a field-for-field mirror of the retired source-side
 // `fauna_sync_engine::segment_backup::BackupDestinationStatus`, so the alias
@@ -961,6 +965,7 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets) -> Rc<Ctx> {
             ctx.w
                 .form_title
                 .set_text(s::BACKUP_DESTINATION_FORM_ADD_TITLE);
+            paint_form_confirm(&ctx);
             ctx.w.error_label.set_visible(false);
             ctx.w.remove_modal.set_visible(false);
             ctx.w.form.set_visible(true);
@@ -979,6 +984,7 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets) -> Rc<Ctx> {
             .clone()
             .connect_selected_notify(move |_| {
                 ctx.w.sync_kind_fields();
+                paint_form_confirm(&ctx);
                 if ctx.editing.borrow().is_none() {
                     let custodian = ctx.w.kind_select.selected_kind(DESTINATION_KIND_NEST)
                         == DESTINATION_KIND_CLIENT_DEVICE;
@@ -990,6 +996,13 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets) -> Rc<Ctx> {
                     crate::offline_gate::declare_wire_kind(&ctx.w.confirm_button, kind);
                 }
             });
+    }
+
+    // What has been typed decides the confirm's answer, so each keystroke
+    // repaints it (rule 4: the form case).
+    for entry in [ctx.w.url_input.clone(), ctx.w.capacity_input.clone()] {
+        let ctx = Rc::clone(&ctx);
+        entry.connect_changed(move |_| paint_form_confirm(&ctx));
     }
 
     // Cancel → hide the form.
@@ -1210,62 +1223,131 @@ enum Mutation {
     },
 }
 
-/// Read the form and dispatch the mutation its kind + `Ctx::editing` select.
-fn submit_form(ctx: &Rc<Ctx>) {
-    let name = ctx.w.name_input.text().trim().to_string();
-    let editing = ctx.editing.borrow().clone();
+/// Which ceremony the open dialog runs: the row being edited (`editing`) or
+/// an add, crossed with the kind the select shows — on edit, prefilled from the
+/// row and never changeable, so it is the row's own kind.
+fn destination_form(
+    editing: bool,
+    kind_select: &crate::wire_kind_dropdown::WireKindDropdown,
+) -> DestinationForm {
+    let device = kind_select.selected_kind(DESTINATION_KIND_NEST) == DESTINATION_KIND_CLIENT_DEVICE;
+    match (editing, device) {
+        (false, false) => DestinationForm::AddNest,
+        (false, true) => DestinationForm::AddClientDevice,
+        (true, false) => DestinationForm::EditNest,
+        (true, true) => DestinationForm::EditClientDevice,
+    }
+}
 
-    // The kind select is add-only: edit paints it disabled and never reads it
-    // back, because re-pointing a live row would keep a `destination_id` whose
+/// `backup-destination-add-confirm-button`'s answer over what has been typed:
+/// the shared draft predicate (a nest form needs its URL, the add-device form
+/// a readable cap, a this-device rename nothing). The paint and the press both
+/// ask it.
+fn form_confirm_answer(
+    editing: bool,
+    kind_select: &crate::wire_kind_dropdown::WireKindDropdown,
+    url_input: &gtk::Entry,
+    capacity_input: &gtk::Entry,
+) -> Possibility {
+    destination_form_possibility(
+        destination_form(editing, kind_select),
+        &url_input.text(),
+        &capacity_input.text(),
+    )
+}
+
+/// Paint the dialog's confirm from [`form_confirm_answer`]: disabled with the
+/// reason on its tooltip while the draft cannot be saved.
+fn paint_form_confirm(ctx: &Rc<Ctx>) {
+    let editing = ctx.editing.borrow().is_some();
+    crate::possible::paint(
+        &ctx.w.confirm_button,
+        None,
+        form_confirm_answer(
+            editing,
+            &ctx.w.kind_select,
+            &ctx.w.url_input,
+            &ctx.w.capacity_input,
+        ),
+    );
+}
+
+/// The mutation a confirm press dispatches, or the answer that refuses it —
+/// the same [`destination_form_possibility`] the confirm was painted from.
+/// A this-device edit is a rename: the row has no URL, so its blank one is
+/// carried unchanged and the shared edit re-resolves only a URL that changed
+/// (`backup-destinations.md` § Create / edit / remove protocol → *Edit*).
+fn form_submission(
+    form: DestinationForm,
+    editing: Option<String>,
+    url: &str,
+    name: &str,
+    capacity: &str,
+) -> Result<Mutation, Possibility> {
+    let answer = destination_form_possibility(form, url, capacity);
+    if !answer.is_possible() {
+        return Err(answer);
+    }
+    let url = url.trim().to_string();
+    let name = name.trim().to_string();
+    Ok(match (form, editing) {
+        (DestinationForm::AddClientDevice, _) => Mutation::EnrollCustodian {
+            name,
+            // A blank cap is a real choice (uncapped,
+            // `CustodianEnrollment::capacity_cap_bytes: None`); the answer above
+            // already refused one that cannot be read — never a substituted
+            // default, because guessing a cap is how a device's disk fills.
+            capacity_cap_bytes: parse_destination_capacity(capacity).map_err(|_| answer)?,
+        },
+        (DestinationForm::AddNest, _) => Mutation::Add { url, name },
+        (DestinationForm::EditNest | DestinationForm::EditClientDevice, Some(id)) => {
+            Mutation::Edit { id, url, name }
+        }
+        // An edit form with no row to edit: nothing is offered.
+        (DestinationForm::EditNest | DestinationForm::EditClientDevice, None) => {
+            return Err(Possibility::Absent);
+        }
+    })
+}
+
+/// Read the form and dispatch the mutation its kind + `Ctx::editing` select —
+/// after asking the confirm's answer again, refused on `error-message` with
+/// its reason (rule 7: never a silent no-op).
+fn submit_form(ctx: &Rc<Ctx>) {
+    let editing = ctx.editing.borrow().clone();
+    // The kind select is add-only: edit paints it disabled, prefilled from the
+    // row, because re-pointing a live row would keep a `destination_id` whose
     // registry row and grants describe the other kind (§ Create / edit /
     // remove — the kind is not an editable property).
-    if editing.is_none()
-        && ctx.w.kind_select.selected_kind(DESTINATION_KIND_NEST) == DESTINATION_KIND_CLIENT_DEVICE
-    {
-        // The cap is the kind's only knob, and a blank one is a real choice:
-        // `CustodianEnrollment::capacity_cap_bytes: None` is uncapped. A
-        // non-blank one that cannot be read is a refusal the user sees, never a
-        // substituted default — guessing a cap is how a device's disk fills.
-        let typed = ctx.w.capacity_input.text().trim().to_string();
-        let capacity_cap_bytes = if typed.is_empty() {
-            None
-        } else {
-            match fauna_core::format::parse_byte_size(&typed) {
-                Some(bytes) => Some(bytes),
-                None => {
-                    ctx.w.error_label.add_css_class("error");
-                    crate::settings::render_error_label(
-                        &ctx.w.error_label,
-                        Some(s::BACKUP_DESTINATION_CAPACITY_INVALID),
-                    );
-                    return;
-                }
-            }
-        };
+    let form = destination_form(editing.is_some(), &ctx.w.kind_select);
+    let mutation = match form_submission(
+        form,
+        editing,
+        &ctx.w.url_input.text(),
+        &ctx.w.name_input.text(),
+        &ctx.w.capacity_input.text(),
+    ) {
+        Ok(mutation) => mutation,
+        Err(answer) => {
+            super::allowed(&ctx.w.error_label, &answer);
+            return;
+        }
+    };
+    match form {
+        // Resolving a destination is a network round-trip; show interim status.
+        DestinationForm::AddNest | DestinationForm::EditNest => {
+            ctx.w.error_label.remove_css_class("error");
+            crate::settings::render_error_label(
+                &ctx.w.error_label,
+                Some(s::BACKUP_DESTINATION_RESOLVING),
+            );
+        }
         // No interim "Resolving…": there is nothing to resolve — the whole
         // point of the kind is that it has no address.
-        crate::settings::render_error_label(&ctx.w.error_label, None);
-        dispatch(
-            ctx,
-            Mutation::EnrollCustodian {
-                name,
-                capacity_cap_bytes,
-            },
-        );
-        return;
+        DestinationForm::AddClientDevice | DestinationForm::EditClientDevice => {
+            crate::settings::render_error_label(&ctx.w.error_label, None);
+        }
     }
-
-    let url = ctx.w.url_input.text().trim().to_string();
-    if url.is_empty() {
-        return;
-    }
-    let mutation = match editing {
-        Some(id) => Mutation::Edit { id, url, name },
-        None => Mutation::Add { url, name },
-    };
-    // Resolving a destination is a network round-trip; show interim status.
-    ctx.w.error_label.remove_css_class("error");
-    crate::settings::render_error_label(&ctx.w.error_label, Some(s::BACKUP_DESTINATION_RESOLVING));
     dispatch(ctx, mutation);
 }
 
@@ -2573,6 +2655,7 @@ fn build_status_row(
             ctx.w
                 .form_title
                 .set_text(s::BACKUP_DESTINATION_FORM_EDIT_TITLE);
+            paint_form_confirm(&ctx);
             ctx.w.error_label.set_visible(false);
             ctx.w.remove_modal.set_visible(false);
             ctx.w.form.set_visible(true);
@@ -3251,6 +3334,92 @@ mod tests {
                 WidgetExt::is_visible(&f.custodian_note),
                 "the full-offline-corpus exposure must be stated where the user opts in"
             );
+        });
+    }
+
+    /// A this-device row has no URL, so its edit is a rename: the confirm is
+    /// live with the URL box blank, and the press saves the rename rather than
+    /// returning early (the silent no-op this page used to have).
+    #[test]
+    fn a_this_device_rename_saves_with_a_blank_url() {
+        crate::testid::run_on_gtk_thread(|| {
+            let f = build_form();
+            f.kind_select.select_kind(DESTINATION_KIND_CLIENT_DEVICE);
+            assert_eq!(
+                destination_form(true, &f.kind_select),
+                DestinationForm::EditClientDevice
+            );
+            assert!(
+                form_confirm_answer(true, &f.kind_select, &f.url_input, &f.capacity_input)
+                    .is_possible()
+            );
+            match form_submission(
+                DestinationForm::EditClientDevice,
+                Some("d1".into()),
+                "",
+                " Laptop ",
+                "",
+            ) {
+                Ok(Mutation::Edit { id, url, name }) => {
+                    assert_eq!(
+                        (id.as_str(), url.as_str(), name.as_str()),
+                        ("d1", "", "Laptop")
+                    );
+                }
+                _ => panic!("a this-device rename must save"),
+            }
+        });
+    }
+
+    /// A nest form with no URL cannot be saved: its confirm paints disabled with
+    /// the shared reason, and a press past the paint is refused with that same
+    /// reason on `error-message` — never dropped silently.
+    #[test]
+    fn a_nest_form_with_a_blank_url_is_refused_with_its_reason() {
+        crate::testid::run_on_gtk_thread(|| {
+            crate::offline_gate::reset_for_test("connected");
+            let f = build_form();
+            f.url_input.set_text("  ");
+            let answer =
+                form_confirm_answer(false, &f.kind_select, &f.url_input, &f.capacity_input);
+            assert_eq!(
+                answer.reason().map(|r| r.key.as_str()),
+                Some("backups.backup_destination_url_required")
+            );
+            let reason = answer
+                .reason()
+                .unwrap()
+                .resolve(crate::i18n::strings::lookup);
+            crate::possible::paint(&f.confirm_button, None, answer);
+            assert!(!f.confirm_button.is_sensitive());
+            assert_eq!(
+                f.confirm_button.tooltip_text().as_deref(),
+                Some(reason.as_str())
+            );
+
+            for form in [DestinationForm::AddNest, DestinationForm::EditNest] {
+                let refused = match form_submission(form, Some("d1".into()), "", "n", "") {
+                    Err(answer) => answer,
+                    Ok(_) => panic!("{form:?} with no URL must be refused"),
+                };
+                let error_label = gtk::Label::new(None);
+                assert!(!super::super::allowed(&error_label, &refused));
+                assert!(error_label.is_visible());
+                assert_eq!(error_label.text().as_str(), reason);
+            }
+            // The add-device form refuses only an unreadable cap.
+            assert!(matches!(
+                form_submission(DestinationForm::AddClientDevice, None, "", "n", "lots"),
+                Err(Possibility::Blocked { .. })
+            ));
+            assert!(matches!(
+                form_submission(DestinationForm::AddClientDevice, None, "", "n", "50 GB"),
+                Ok(Mutation::EnrollCustodian {
+                    capacity_cap_bytes: Some(_),
+                    ..
+                })
+            ));
+            crate::offline_gate::reset_for_test("disconnected");
         });
     }
 

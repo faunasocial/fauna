@@ -4,7 +4,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertCountEquals
-import androidx.compose.ui.test.assertTextEquals
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onChildren
 import androidx.compose.ui.test.onNodeWithTag
@@ -43,8 +45,14 @@ class DisabledControlReasonTextTest {
             }
         }
         composeTestRule.onNodeWithTag("container").onChildren().assertCountEquals(1)
-        composeTestRule.onNodeWithTag("container").onChildren()[0]
-            .assertTextEquals("Choose a plan for your server to continue.")
+        // The text sits inside the reason line's `SelectionContainer` (the
+        // read-only text is selectable), so it is a descendant of the
+        // container, not necessarily its direct child.
+        composeTestRule.onAllNodes(
+            hasText("Choose a plan for your server to continue.") and
+                hasAnyAncestor(hasTestTag("container")),
+            useUnmergedTree = true,
+        ).assertCountEquals(1)
     }
 
     @Test

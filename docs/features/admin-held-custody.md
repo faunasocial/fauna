@@ -70,9 +70,9 @@ Stamped 2026-11-07 at 6a0ded1015.
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_admin_custody_hosting.py::test_admin_custody_hosting_page_reachable_and_honestly_empty` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_nest_anchored` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_nest_anchored` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_admin_custody_hosting.py::test_an_admin_lists_and_removes_a_copy_another_member_holds` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_nest_anchored` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_nest_anchored` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_admin_custody_hosting.py::test_an_admin_lists_and_removes_a_copy_another_member_holds` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/api/test_custody_hosting_pump.py::test_removing_the_last_copy_for_a_person_drops_their_store_and_one_of_several_keeps_it` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_custody_hosting_pump.py::test_a_paused_copy_keeps_its_space_until_it_is_removed` | nest (linux): passed |

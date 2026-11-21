@@ -1,5 +1,6 @@
 package com.fauna.app.ui.components
 
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -18,16 +19,18 @@ import androidx.compose.ui.Modifier
  * there's nothing to show) can be passed straight through — the verdict
  * (enabled/disabled) and its explanation come from the same paired shared-Rust
  * getters (e.g. `dns_provider_eligible` / `dns_provider_ineligible_reason`),
- * so they can't disagree.
+ * so they can't disagree. Selectable (`ui/README.md` § Text the person reads
+ * can be copied): the reason is read, never acted on.
  */
 @Composable
 fun DisabledControlReasonText(reason: String?, modifier: Modifier = Modifier) {
     if (!reason.isNullOrEmpty()) {
-        Text(
-            text = reason,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.error,
-            modifier = modifier,
-        )
+        SelectionContainer(modifier) {
+            Text(
+                text = reason,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
     }
 }

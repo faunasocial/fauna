@@ -1,6 +1,14 @@
 package com.fauna.app.ui.screen.settings
 
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assert
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.junit4.createComposeRule
+import com.fauna.app.ui.FailingClipboard
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -40,15 +48,27 @@ class AdminLogsContentTest {
 
     private val nestRows = listOf(row("nest started"), row("slow query"))
 
-    private fun render(rows: List<LogRow> = nestRows) {
+    private fun render(
+        rows: List<LogRow> = nestRows,
+        onError: (String) -> Unit = {},
+        failingClipboard: Boolean = false,
+    ) {
         composeTestRule.setContent {
-            AdminLogsContent(
-                rows = rows,
-                copyText = rows.joinToString("\n") { it.line },
-                filterIndex = 0,
-                onFilterChange = {},
-                onBack = {},
-            )
+            val page = @androidx.compose.runtime.Composable {
+                AdminLogsContent(
+                    rows = rows,
+                    copyText = rows.joinToString("\n") { it.line },
+                    filterIndex = 0,
+                    onFilterChange = {},
+                    onBack = {},
+                    onError = onError,
+                )
+            }
+            if (failingClipboard) {
+                CompositionLocalProvider(LocalClipboardManager provides FailingClipboard("denied")) { page() }
+            } else {
+                page()
+            }
         }
     }
 
@@ -92,7 +112,7 @@ class AdminLogsContentTest {
                 onBack = {},
                 auditRows = listOf("2026-10-18 12:00  first", "2026-10-18 12:01  second"),
                 auditStatus = "chain verified",
-                auditMoreEnabled = true,
+                auditMorePossibility = uniffi.fauna_core.Possibility.Possible,
             )
         }
         composeTestRule.onNodeWithTag("admin-audit-section").assertExists()
@@ -123,5 +143,38 @@ class AdminLogsContentTest {
             composeTestRule.onAllNodesWithTag("log-entry").fetchSemanticsNodes().size,
         )
         composeTestRule.onNodeWithTag("admin-logs-heading").assertExists()
+    }
+
+    @Test
+    fun emptyRingDisablesCopyBehindThePagesEmptyLine() {
+        // `ring_action_possibility(0, "admin.logs_page.empty")` — blocked, the
+        // reason being the page's own empty line, painted once.
+        render(rows = emptyList())
+        composeTestRule.onNodeWithTag("log-copy-button").assertIsNotEnabled()
+        assertEquals(
+            1,
+            composeTestRule.onAllNodes(hasText("No nest log entries yet.")).fetchSemanticsNodes().size,
+        )
+    }
+
+    @Test
+    fun aCopyThatReachedTheClipboardIsConfirmed() {
+        render()
+        composeTestRule.onNodeWithTag("log-copy-button").assertIsEnabled().performClick()
+        composeTestRule.onNodeWithTag("log-copy-button").assert(hasText("Copied!"))
+        composeTestRule.onNodeWithTag("log-copy-button").assert(
+            SemanticsMatcher.expectValue(
+                SemanticsProperties.StateDescription,
+                nestRows.joinToString("\n") { it.line },
+            ),
+        )
+    }
+
+    @Test
+    fun aFailedCopySaysSoOnTheErrorMessage() {
+        var error: String? = null
+        render(onError = { error = it }, failingClipboard = true)
+        composeTestRule.onNodeWithTag("log-copy-button").performClick()
+        assertEquals("Could not copy to the clipboard: denied", error)
     }
 }

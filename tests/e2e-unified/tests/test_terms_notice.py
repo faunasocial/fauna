@@ -85,8 +85,6 @@ def _handle_outcome(app, outcome, key: str, args: dict):
         "outcome": outcome,
         "message": {"key": key, "args": args},
         "continue_enabled": True,
-        "control_checkbox_visible": False,
-        "control_checkbox_checked": False,
     })
     # The page is painted from the snapshot; Continue enabled is the anchor
     # that the injected outcome has reached the render.
@@ -127,8 +125,6 @@ def test_handle_entry_shows_the_notice_only_when_continue_signs_in(app):
         "outcome": "None",
         "message": {"key": "onboarding.handle_check.idle", "args": {}},
         "continue_enabled": False,
-        "control_checkbox_visible": False,
-        "control_checkbox_checked": False,
     })
     assert app.is_visible("handle-input"), app.driver.diagnose("handle-input")
     _assert_no_notice(app, "before a check")

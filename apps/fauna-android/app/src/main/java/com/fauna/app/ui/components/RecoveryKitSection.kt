@@ -10,8 +10,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -30,6 +28,7 @@ import com.fauna.app.R
 import com.fauna.app.core.AftermathProgress
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.faunaFormGate
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.RecoveryKitUiState
@@ -43,6 +42,8 @@ import com.fauna.ffi.FfiSweepView
 import social.fauna.generated.Ids
 import uniffi.fauna_core.LocalizedText
 import uniffi.fauna_core.QrMatrix
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
 
 /**
  * The Settings/Account **Recovery kit** section (`docs/goal/ui/settings.md`
@@ -456,7 +457,12 @@ private fun StolenAction(
     onStolenConfirmChange: (String) -> Unit,
     onStolen: () -> Unit,
 ) {
-    val gate = faunaGate("fauna.recovery.succession.submit", enabled = state.stolenArmed)
+    // Painted from the shared draft answer (the kit, then the word), folded
+    // with the commit's offline gate; a ceremony in flight holds it too.
+    val gate = faunaFormGate(
+        state.stolenAnswer,
+        faunaGate("fauna.recovery.succession.submit", enabled = state.stolenArmed),
+    )
     Spacer(Modifier.height(12.dp))
     Text(
         stringResource(R.string.settings_recovery_kit_stolen_warning),

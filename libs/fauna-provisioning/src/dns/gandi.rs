@@ -78,6 +78,7 @@ impl DnsProvider for Gandi {
             .map(|d| DnsZone {
                 id: d.id,
                 name: d.fqdn,
+                nameservers: Vec::new(),
             })
             .collect())
     }

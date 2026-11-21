@@ -153,6 +153,7 @@ abstract class KidsExcisedApi {
         searchManager = null
         atprotoSettingsMachine = null
         depositorAppsMachine = null
+        mailSettingsMachine = null
         archiveLinksHost.stop()
         return {
             feedMgr?.close()
@@ -194,6 +195,21 @@ abstract class KidsExcisedApi {
 
     /** Re-read the views with the Contacts roster. */
     suspend fun refreshArchiveLinks() = archiveLinksHost.refresh()
+
+    /** Re-read the imported archives' message threads onto the conversations
+     *  `Archive` rail (`archive-import.md` § What each category becomes): the
+     *  shared factory registered the source, so this only asks the session to
+     *  read it again, on every visit to the page. Best-effort: a failed read
+     *  keeps what the last one listed. */
+    suspend fun refreshArchiveThreads(session: uniffi.fauna_conversations.ConversationsSession) {
+        try {
+            com.fauna.ffi.refreshArchiveThreads(session)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            ShellLog.i("KidsExcisedApi", "archive threads: ${e.message}")
+        }
+    }
 
     /** `contact-archive-link-yes` / `-no`: the row's same-person answer. */
     suspend fun answerArchiveLink(contact: String, platform: String, yes: Boolean) =
@@ -404,7 +420,13 @@ abstract class KidsExcisedApi {
         feedManager?.let { return it }
         val client = api.nestClient ?: return null
         val secretBytes = api.secret?.let { HexUtil.hexToBytes(it) } ?: return null
-        val mgr = runCatching { client.feedManager(secretBytes) }
+        // The recording device — the same sync device id `conversationsSession`
+        // gets — registers the folded archive comments' source on the manager
+        // (`archive-import.md` § What each category becomes → *Placement under
+        // the owner's own post*); [FeedVM] re-reads it on every feed entry.
+        val mgr = runCatching {
+            client.feedManager(secretBytes, api.sessionAccount.resolveDeviceId())
+        }
             .onFailure { ShellLog.w("ApiClient", "feedManager build failed: ${it.message}") }
             .getOrNull() ?: return null
         mgr.addObserver(observer)
@@ -466,6 +488,27 @@ abstract class KidsExcisedApi {
         return com.fauna.ffi.buildMailSettingsMachine(client, secretBytes, api.nodeUrl)
     }
 
+    // The session's ONE mail-settings machine — the hub's and the mail-usable
+    // gate's (`mail-settings.md` § Errors & edge cases, the mail-usable gate:
+    // the rows read the machine's LIVE snapshot, so turning mail on in the hub
+    // lights them at once). A connection-bound singleton, same shape as
+    // [feedManager]; built lazily by [sharedMailSettingsMachine], torn down by
+    // [detachKidsExcised].
+    @Volatile
+    private var mailSettingsMachine: uniffi.fauna_client_mail_settings.MailSettingsMachine? = null
+
+    /**
+     * The session's shared [buildMailSettingsMachine]: `null` while there is no
+     * connection yet (the gate answers `mail_usable_unread()`), and it THROWS
+     * when the build fails (an undecodable secret — the gate answers
+     * `mail_usable_unbuilt()`); a failed build is not cached, so the next call
+     * tries again.
+     */
+    fun sharedMailSettingsMachine(): uniffi.fauna_client_mail_settings.MailSettingsMachine? =
+        mailSettingsMachine ?: synchronized(this) {
+            mailSettingsMachine ?: buildMailSettingsMachine()?.also { mailSettingsMachine = it }
+        }
+
     /**
      * The post-claim serving enablement (`onboarding.md` § 3b *Mechanism*) — the
      * ONE shared-Rust call [com.fauna.app.ui.viewmodel.MailEnableGlueVM] makes
@@ -473,8 +516,11 @@ abstract class KidsExcisedApi {
      * replacing the per-step firing of the mail provision, the three DAV toggles
      * and their companion mints. Same `secret` + `nodeUrl` idiom as
      * [buildMailSettingsMachine]; the shared step resolves `am_i_admin` itself and
-     * each step logs its own failure, so this throws only on a missing connection
-     * or an undecodable secret (priority #2; mirrors apple's
+     * tries a step refused for a passing reason again for as long as the app
+     * runs. Returns the page's `error-message` text when a step was refused for
+     * good (`onboarding.md` § 3b *The step completes; it is not fired once*),
+     * `null` when every planned step succeeded; throws only on a missing
+     * connection or an undecodable secret (priority #2; mirrors apple's
      * `APIClient.applyPostClaimServingEnablement`).
      */
     suspend fun applyPostClaimServingEnablement(
@@ -482,12 +528,12 @@ abstract class KidsExcisedApi {
         caldav: Boolean,
         carddav: Boolean,
         webdav: Boolean,
-    ) {
+    ): String? {
         api.ensureAuthenticated()
         val client = api.nestClient ?: throw ApiException("No nest connection for post-claim serving enablement")
         val secretBytes = api.secret?.let { HexUtil.hexToBytes(it) }
             ?: throw ApiException("No secret for post-claim serving enablement")
-        com.fauna.ffi.applyPostClaimServingEnablement(
+        return com.fauna.ffi.applyPostClaimServingEnablement(
             client, secretBytes, api.nodeUrl, email, caldav, carddav, webdav,
         )
     }

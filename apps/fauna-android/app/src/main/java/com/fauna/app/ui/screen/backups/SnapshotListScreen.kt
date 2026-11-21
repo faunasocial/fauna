@@ -21,6 +21,7 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.text
 import androidx.compose.ui.text.AnnotatedString
@@ -33,7 +34,13 @@ import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.components.TokenSelect
 import com.fauna.app.ui.util.ValueFormat
+import com.fauna.app.ui.util.and
+import com.fauna.app.ui.util.answerRefusal
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.blockedReason
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.getStringFmt
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.util.stringResourceFmt
@@ -41,12 +48,22 @@ import com.fauna.app.ui.viewmodel.BackupsVM
 import uniffi.fauna_backups_machine.BackupFolderRow
 import uniffi.fauna_backups_machine.BackupOp
 import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
+import uniffi.fauna_core.ReadState
+import com.fauna.ffi.backupsIdlePossibility
+import com.fauna.ffi.backupsImmediateDeletePossibility
+import com.fauna.ffi.backupsSetActionPossibility
+import com.fauna.ffi.readPossibility
+import com.fauna.ffi.snapshotDeletePossibility
 import uniffi.fauna_backups_machine.BackupsSnapshot
 import uniffi.fauna_backups_machine.PolicyState
 import uniffi.fauna_backups_machine.PrunePreview
 import uniffi.fauna_backups_machine.SnapshotRow
 import uniffi.fauna_backups_machine.SnapshotState
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.AlertDialog
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.TextButton
 
 /**
  * The Backups page's snapshot half, rendered off the shared `BackupsMachine`
@@ -89,7 +106,20 @@ fun SnapshotListScreen(
     // control is disabled. One predicate so no control can drift off it — the
     // FAB included, which used to stay live through its own create.
     val busy = snap?.inProgressOp != null
-    val armed = !busy && snap?.selectedFolder != null
+    // The set-scoped actions paint from the shared answer
+    // (`BackupsSnapshot::set_action_possibility`, `ui/backups.md` § Errors &
+    // edge cases → *What the page offers*): a selected folder, no op in flight,
+    // and — with no folder at all — the reason names where one is made. Each
+    // handler asks the same answer again ([setActionRefused]).
+    val setAction = remember(snap) { setActionAnswer(snap) }
+    val idle = remember(snap) { idleAnswer(snap) }
+    val armed = setAction.isPossible
+    val refuse: (Possibility) -> Boolean = { answer ->
+        val refusal = answerRefusal(context, answer)
+        refusal?.reason?.let { appMessages.showError(it) }
+        refusal != null
+    }
+    val setActionRefused: () -> Boolean = { refuse(setActionAnswer(vm.snapshot.value)) }
 
     Scaffold(
         topBar = {
@@ -102,7 +132,7 @@ fun SnapshotListScreen(
                 },
                 actions = {
                     IconButton(
-                        onClick = { vm.prunePreview() },
+                        onClick = { if (!setActionRefused()) vm.prunePreview() },
                         enabled = armed,
                         modifier = Modifier.testTag(Ids.SNAPSHOT_PRUNE_BUTTON)
                     ) {
@@ -112,7 +142,7 @@ fun SnapshotListScreen(
                         )
                     }
                     IconButton(
-                        onClick = { vm.checkIntegrity() },
+                        onClick = { if (!setActionRefused()) vm.checkIntegrity() },
                         enabled = armed,
                         modifier = Modifier.testTag(Ids.SNAPSHOT_CHECK_BUTTON)
                     ) {
@@ -125,9 +155,16 @@ fun SnapshotListScreen(
             )
         },
         floatingActionButton = {
+            // M3's FAB has no `enabled`: the blocked answer is carried as the
+            // node's disabled semantics and a muted container, and the gesture
+            // asks the answer again and refuses with its reason.
             FloatingActionButton(
-                onClick = { if (armed) vm.createSnapshot() },
-                modifier = Modifier.testTag(Ids.SNAPSHOT_CREATE_BUTTON)
+                onClick = { if (!setActionRefused()) vm.createSnapshot() },
+                containerColor = if (armed) FloatingActionButtonDefaults.containerColor
+                else MaterialTheme.colorScheme.surfaceVariant,
+                modifier = Modifier
+                    .testTag(Ids.SNAPSHOT_CREATE_BUTTON)
+                    .semantics { if (!armed) disabled() }
             ) {
                 Icon(Icons.Default.Add, stringResource(R.string.backups_create_snapshot))
             }
@@ -203,6 +240,11 @@ fun SnapshotListScreen(
                 snap?.inProgressOp?.let { op ->
                     Caption(busyText(context, op))
                 }
+                // Otherwise the set actions' own reason (no folder / none
+                // selected) — the busy line above already speaks while one runs.
+                if (idle.isPossible) {
+                    localized(setAction.blockedReason)?.let { Caption(it) }
+                }
 
                 CheckResultLine(snap)
                 PrunePreviewSection(snap, vm)
@@ -221,6 +263,16 @@ fun SnapshotListScreen(
                     item { HorizontalDivider() }
                     // Wire order (newest-first) — the app does not re-sort.
                     items(snap?.snapshots.orEmpty()) { row ->
+                        // The row's answers: `BackupsSnapshot::delete_possibility`
+                        // is the row half (`snapshot_delete_possibility` — only an
+                        // ACTIVE row enters the soft delete) and the single-flight
+                        // gate; `immediate_delete_possibility` is that gate alone.
+                        // Composed with the shared `and`, so the snapshot crosses
+                        // the boundary once per paint rather than once per row.
+                        val softDelete = remember(row, idle) {
+                            askForm { snapshotDeletePossibility(row) } and idle
+                        }
+                        val hardDelete = idle
                         ListItem(
                             headlineContent = {
                                 Text(stringResourceFmt(R.string.backups_snapshot, row.id))
@@ -228,6 +280,11 @@ fun SnapshotListScreen(
                             supportingContent = {
                                 Column {
                                     Text(snapshotRowText(context, row))
+                                    // The row's own reason only: a busy page
+                                    // already says why on its busy line.
+                                    if (idle.isPossible) {
+                                        DisabledControlReasonText(localized(softDelete.blockedReason))
+                                    }
                                 }
                             },
                             trailingContent = {
@@ -256,8 +313,10 @@ fun SnapshotListScreen(
                                     // one-click action: it only OPENS the friction-bar
                                     // modal (Architectural rule 4).
                                     IconButton(
-                                        onClick = { vm.openImmediateDelete(row.id) },
-                                        enabled = !busy,
+                                        onClick = {
+                                            if (!refuse(immediateDeleteAnswer(vm.snapshot.value, row.id))) vm.openImmediateDelete(row.id)
+                                        },
+                                        enabled = hardDelete.isPossible,
                                         modifier = Modifier.testTag(Ids.SNAPSHOT_IMMEDIATE_DELETE_BUTTON)
                                     ) {
                                         Icon(
@@ -266,8 +325,12 @@ fun SnapshotListScreen(
                                         )
                                     }
                                     IconButton(
-                                        onClick = { snapshotPendingDelete = row.id },
-                                        enabled = !busy,
+                                        onClick = {
+                                            if (!refuse(softDeleteAnswer(vm.snapshot.value, row.id))) {
+                                                snapshotPendingDelete = row.id
+                                            }
+                                        },
+                                        enabled = softDelete.isPossible,
                                         modifier = Modifier.testTag(Ids.SNAPSHOT_DELETE_BUTTON)
                                     ) {
                                         Icon(
@@ -325,7 +388,9 @@ fun SnapshotListScreen(
             text = { Text(stringResource(R.string.backups_delete_snapshot_confirm)) },
             confirmButton = {
                 TextButton(onClick = {
-                    vm.deleteSnapshot(id)
+                    // The confirm asks again: the row may have moved on (a
+                    // sibling device soft-deleted it) while the dialog stood.
+                    if (!refuse(softDeleteAnswer(vm.snapshot.value, id))) vm.deleteSnapshot(id)
                     snapshotPendingDelete = null
                 }) { Text(stringResource(R.string.common_delete)) }
             },
@@ -430,6 +495,42 @@ internal fun ImmediateDeleteConfirmModal(
             ) { Text(stringResource(R.string.backups_immediate_delete_cancel_button)) }
         }
     )
+}
+
+/**
+ * `snapshot-create-button` / `-prune-` / `-check-`: the shared
+ * `BackupsSnapshot::set_action_possibility`, or — before the machine's first
+ * snapshot — the shared still-loading answer, never a guess.
+ */
+internal fun setActionAnswer(snap: BackupsSnapshot?): Possibility = askForm {
+    if (snap == null) readPossibility(ReadState.PENDING) else backupsSetActionPossibility(snap)
+}
+
+/** The single-flight gate as an answer (`BackupsSnapshot::idle_possibility`). */
+internal fun idleAnswer(snap: BackupsSnapshot?): Possibility = askForm {
+    if (snap == null) readPossibility(ReadState.PENDING) else backupsIdlePossibility(snap)
+}
+
+/**
+ * `snapshot-delete` for the row with [id]: the shared row half
+ * (`snapshot_delete_possibility`) AND the single-flight gate — exactly
+ * `BackupsSnapshot::delete_possibility`. A row no longer listed is absent.
+ */
+internal fun softDeleteAnswer(snap: BackupsSnapshot?, id: Long): Possibility {
+    val row = snap?.snapshots?.firstOrNull { it.id == id } ?: return Possibility.Absent
+    return askForm { snapshotDeletePossibility(row) } and idleAnswer(snap)
+}
+
+/**
+ * `snapshot-immediate-delete-button` for the row with [id]: the shared
+ * `BackupsSnapshot::immediate_delete_possibility` — a real choice in every row
+ * state, so only the single-flight gate holds it; a row no longer listed is
+ * absent.
+ */
+internal fun immediateDeleteAnswer(snap: BackupsSnapshot?, id: Long): Possibility {
+    val index = snap?.snapshots?.indexOfFirst { it.id == id } ?: -1
+    if (snap == null || index < 0) return Possibility.Absent
+    return askForm { backupsImmediateDeletePossibility(snap, index.toUInt()) }
 }
 
 /** The check verdict — the shared `is_ok` predicate, **called**, never re-derived

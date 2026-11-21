@@ -70,9 +70,10 @@ pub use trust::{
     TrustGrantDuration, TrustGrantRow, TrustHistoryRow, TrustLens, TrustLiveness, TrustMintOption,
     TrustMintUseCase, TrustPlatform, TrustRestoreOutcome, TrustScope, TrustSeams,
     auto_renew_check_secs, backup_status_label, duration_label, grant_bound_note,
-    grant_scope_labels, history_line_text, mint_duration_options, mint_option_default_duration,
-    mint_option_label, mint_option_note, principal_grant_bound_note, principal_scope_labels,
-    project_history, project_principal_grant, scope_label, scope_label_in_folder, status_label,
+    grant_scope_labels, history_line_text, mint_draft_possibility, mint_duration_options,
+    mint_holder, mint_option_default_duration, mint_option_label, mint_option_note,
+    name_deposit_folders, principal_grant_bound_note, principal_scope_labels, project_history,
+    project_principal_grant, scope_label, scope_label_in_folder, status_label,
     trust_scope_is_bounded_mail_grant, trust_scope_is_materialization_grant, trust_status_label,
 };
 // `HolderInfo` + `discover_holders` now live in `fauna-client-bridges` (the home
@@ -557,6 +558,21 @@ pub enum LinkInput {
     NestUrl { nest_url: String },
 }
 
+/// Whether `nests-add-submit-button` can link `raw` now
+/// (`docs/goal/ui/README.md` § Offer only what is possible, rule 4's form
+/// case): blocked with the field's reason on a blank draft; any other text is
+/// classified by [`classify_link_input`] and answered by the link itself.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn link_input_possibility(raw: &str) -> fauna_core::possibility::Possibility {
+    if raw.trim().is_empty() {
+        fauna_core::possibility::Possibility::blocked(fauna_core::localized::LocalizedText::key(
+            "nests.add_input_blank",
+        ))
+    } else {
+        fauna_core::possibility::Possibility::Possible
+    }
+}
+
 /// Classify a user-entered link-form value into the action it should drive. A
 /// trimmed 64-char ASCII-hex string is a nest identity ([`LinkInput::NestId`] →
 /// single-end `Link`, the existing out-of-band path); anything else is a nest
@@ -789,6 +805,24 @@ pub trait PostLinkHook: MaybeSendSync {
     async fn after_link_both(&self, peer_url: &str) -> Result<(), PairDispatchError>;
 }
 
+/// The account store's pairing-mark door (`account-runtime.md` § Multi-instance
+/// concurrency → *A nest-side change a store-backed page shows leaves a mark
+/// in the store: the pairing mark*): one entry per nest, its value the digest
+/// of that nest's pairing listing ([`fauna_client_core::linked_nests::pairing_mark_digest`]).
+/// The machine puts the connected nest's mark after a link, a both-ends link
+/// or an unlink, once its own re-list is in hand, so a sibling seat's open
+/// Nests page re-reads. The one production impl is
+/// `fauna_account_seams::pairing_marks::PlanePairingMarks`, over the seat's
+/// account runtime. An `Err` is the store's refusal or its absence; the
+/// machine logs it and the gesture stands.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait PairingMarkStore: MaybeSendSync {
+    /// Put `digest` as `nest_id`'s mark. Whether anything was written — the
+    /// value the entry already holds writes nothing.
+    async fn put_mark(&self, nest_id: &[u8; 32], digest: [u8; 32]) -> Result<bool, String>;
+}
+
 // ── machine ─────────────────────────────────────────────────────────
 
 struct Inner {
@@ -810,6 +844,10 @@ pub struct LinkedNestsMachine {
     /// the home row's trust facet and drives Mint/Renew/Revoke. See
     /// [`trust::TrustSeams`].
     trust: Option<TrustSeams>,
+    /// The pairing-mark door ([`PairingMarkStore`]). `None` ⇒ the gestures
+    /// write no mark (a seat with no account runtime, a harness); the
+    /// account runtime's secondary leg still keeps the mark true.
+    pairing_marks: Option<Arc<dyn PairingMarkStore>>,
     inner: Mutex<Inner>,
 }
 
@@ -823,6 +861,7 @@ impl LinkedNestsMachine {
             nest,
             post_link: None,
             trust: None,
+            pairing_marks: None,
             inner: Mutex::new(Inner {
                 snapshot: LinkedNestsSnapshot::empty(),
             }),
@@ -841,6 +880,7 @@ impl LinkedNestsMachine {
             nest,
             post_link: Some(post_link),
             trust: None,
+            pairing_marks: None,
             inner: Mutex::new(Inner {
                 snapshot: LinkedNestsSnapshot::empty(),
             }),
@@ -857,6 +897,7 @@ impl LinkedNestsMachine {
             nest,
             post_link: None,
             trust: Some(trust),
+            pairing_marks: None,
             inner: Mutex::new(Inner {
                 snapshot: LinkedNestsSnapshot::empty(),
             }),
@@ -874,6 +915,47 @@ impl LinkedNestsMachine {
         self
     }
 
+    /// Wire the pairing-mark door ([`PairingMarkStore`]): after a link, a
+    /// both-ends link or an unlink, the machine puts the connected nest's mark
+    /// from the gesture's own re-list. Every runtime-hosting seat wires it
+    /// where it wires the blessing door.
+    #[must_use]
+    pub fn with_pairing_marks(mut self, marks: Arc<dyn PairingMarkStore>) -> Self {
+        self.pairing_marks = Some(marks);
+        self
+    }
+
+    /// Put the connected nest's pairing mark from the listing digest
+    /// `digest` (`account-runtime.md` § Multi-instance concurrency → *the
+    /// pairing mark*, part 2) — after the nest has answered the gesture and
+    /// its re-list is in hand, so a sibling woken by the mark reads the
+    /// pairing it announces. Best-effort: no door, an unproven nest or a
+    /// refused put is logged and never fails or undoes the gesture.
+    async fn put_pairing_mark(&self, digest: [u8; 32]) {
+        let Some(marks) = &self.pairing_marks else {
+            return;
+        };
+        let nest_id = match self.bound_nest_id().await.map(|id| bound_array(&id)) {
+            Ok(Some(id)) => id,
+            Ok(None) => {
+                tracing::warn!(target: "fauna_pair", "pairing mark: the bound nest id is not 32 bytes; no mark");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(target: "fauna_pair", error = %e, "pairing mark: the connected nest is unproven; no mark");
+                return;
+            }
+        };
+        match marks.put_mark(&nest_id, digest).await {
+            Ok(written) => {
+                tracing::info!(target: "fauna_pair", written, "pairing mark: put after the gesture's re-list");
+            }
+            Err(e) => {
+                tracing::warn!(target: "fauna_pair", error = %e, "pairing mark: the put was refused; the account runtime's reconcile will write it");
+            }
+        }
+    }
+
     /// The full-fat constructor: both a [`PostLinkHook`] and the trust-facet
     /// seams. The mail consumer uses this so a client gets the mailbox
     /// auto-provision hook *and* the Nests-page trust facet from one machine.
@@ -886,6 +968,7 @@ impl LinkedNestsMachine {
             nest,
             post_link: Some(post_link),
             trust: Some(trust),
+            pairing_marks: None,
             inner: Mutex::new(Inner {
                 snapshot: LinkedNestsSnapshot::empty(),
             }),
@@ -897,14 +980,17 @@ impl LinkedNestsMachine {
     }
 
     async fn refresh(&self) -> Result<(), PairDispatchError> {
-        self.refresh_with(true).await
+        self.refresh_with(true).await.map(|_| ())
     }
 
     /// [`Self::refresh`], with the auto-renew sweep optional — `AutoRenew`
     /// refreshes after a sweep of its own and must not sweep twice.
-    async fn refresh_with(&self, renew_sweep: bool) -> Result<(), PairDispatchError> {
+    /// Answers the [`pairing_mark_digest`](fauna_client_core::linked_nests::pairing_mark_digest)
+    /// of the listing it painted — what a gesture's mark is put from.
+    async fn refresh_with(&self, renew_sweep: bool) -> Result<[u8; 32], PairDispatchError> {
         self.set_status(LinkedNestStatus::Loading);
         let listed = self.nest.list().await?;
+        let digest = fauna_client_core::linked_nests::pairing_mark_digest(&listed);
         let pairings = listed.pairings;
         let forward_queue = Some(ForwardQueueStatus::from(listed.forward_queue));
         // Trust facet for the connected/home nest (v1 scope, `nests.md:110`):
@@ -937,7 +1023,7 @@ impl LinkedNestsMachine {
         inner.snapshot.home = home;
         inner.snapshot.forward_queue = forward_queue;
         inner.snapshot.status = LinkedNestStatus::Idle;
-        Ok(())
+        Ok(digest)
     }
 
     /// `RetryForwards`: re-arm the user's queued forwards, then re-list so the
@@ -1758,7 +1844,7 @@ impl LinkedNestsMachine {
         if self.auto_renew_sweep().await == 0 {
             return Ok(());
         }
-        self.refresh_with(false).await
+        self.refresh_with(false).await.map(|_| ())
     }
 
     /// **The auto-renew loop's body** (`nests.md` § Expiry / renewal →
@@ -1911,7 +1997,9 @@ impl LinkedNestsMachine {
                 extra: Default::default(),
             })
             .await?;
-        self.refresh().await
+        let digest = self.refresh_with(true).await?;
+        self.put_pairing_mark(digest).await;
+        Ok(())
     }
 
     /// Link two of the user's nests with one action, seeding both ends. Discovers
@@ -1992,7 +2080,10 @@ impl LinkedNestsMachine {
         // Re-list so the user sees the new pairing *before* the post-link hook
         // runs — a hook failure then leaves the pairing visible plus an error
         // banner, rather than hiding the (already-durable) link.
-        self.refresh().await?;
+        let digest = self.refresh_with(true).await?;
+        // The connected nest's mark only — the notice is payload-free, so a
+        // sibling connected to the other nest re-reads its own listing there.
+        self.put_pairing_mark(digest).await;
 
         // Post-link side effect (e.g. mail auto-provisions the user's mailbox
         // onto the just-linked home box, reusing the fleet MSEK — the one-action
@@ -2075,7 +2166,9 @@ impl LinkedNestsMachine {
         self.set_status(LinkedNestStatus::Working);
         self.sweep_escrow_at(&private_nest_id).await;
         self.nest.revoke(private_nest_id).await?;
-        self.refresh().await
+        let digest = self.refresh_with(true).await?;
+        self.put_pairing_mark(digest).await;
+        Ok(())
     }
 
     /// **Unlinking ends the replica** (`account-sync-plane.md` § The bind leg,
@@ -4524,6 +4617,111 @@ mod tests {
         assert_eq!(snap.status, LinkedNestStatus::Idle);
     }
 
+    // ── The pairing mark (`account-runtime.md` § Multi-instance concurrency
+    // → *the pairing mark*, part 2) ───────────────────────────────────────
+
+    /// A recording [`PairingMarkStore`]: every put, in order; `refuse` makes
+    /// every put fail the way a store with no runtime does.
+    #[derive(Default)]
+    struct FakeMarks {
+        puts: StdMutex<Vec<([u8; 32], [u8; 32])>>,
+        refuse: bool,
+    }
+
+    #[async_trait]
+    impl PairingMarkStore for FakeMarks {
+        async fn put_mark(&self, nest_id: &[u8; 32], digest: [u8; 32]) -> Result<bool, String> {
+            if self.refuse {
+                return Err("the account runtime is not running".into());
+            }
+            self.puts.lock().unwrap().push((*nest_id, digest));
+            Ok(true)
+        }
+    }
+
+    /// The digest of what `nest` lists now — the mark a gesture must put.
+    async fn listed_digest(nest: &FakeNest) -> [u8; 32] {
+        fauna_client_core::linked_nests::pairing_mark_digest(&nest.list().await.unwrap())
+    }
+
+    fn a_link(id: u8) -> LinkedNestsAction {
+        LinkedNestsAction::Link {
+            nest_id: fauna_core::hex32::encode(&[id; 32]),
+            capabilities: vec![],
+            expires_at: None,
+            label: None,
+            nest_url: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_link_and_an_unlink_each_put_the_connected_nests_mark_once() {
+        let fake = Arc::new(FakeNest::with_id(0xaa, "https://this.test"));
+        let marks = Arc::new(FakeMarks::default());
+        let m = LinkedNestsMachine::new(fake.clone()).with_pairing_marks(marks.clone());
+        m.hydrate().await.unwrap();
+        assert!(
+            marks.puts.lock().unwrap().is_empty(),
+            "a page load writes no mark"
+        );
+
+        m.dispatch(a_link(0xbb)).await.unwrap();
+        let after_link = listed_digest(&fake).await;
+        assert_eq!(*marks.puts.lock().unwrap(), vec![([0xaa; 32], after_link)]);
+
+        m.dispatch(LinkedNestsAction::Unlink {
+            nest_id: fauna_core::hex32::encode(&[0xbb; 32]),
+        })
+        .await
+        .unwrap();
+        let after_unlink = listed_digest(&fake).await;
+        assert_ne!(after_link, after_unlink);
+        assert_eq!(
+            *marks.puts.lock().unwrap(),
+            vec![([0xaa; 32], after_link), ([0xaa; 32], after_unlink)],
+            "the unlink puts the connected nest's mark from its re-list"
+        );
+        m.dispatch(LinkedNestsAction::Refresh).await.unwrap();
+        assert_eq!(
+            marks.puts.lock().unwrap().len(),
+            2,
+            "a refresh writes no mark"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_both_ends_link_puts_the_connected_nests_mark_only() {
+        let peer = Arc::new(FakeNest::with_id(0xbb, "https://peer.test"));
+        let connected = Arc::new(FakeNest::with_id(0xaa, "https://this.test"));
+        *connected.peer.lock().unwrap() = Some(peer.clone());
+        let marks = Arc::new(FakeMarks::default());
+        let m = LinkedNestsMachine::new(connected.clone()).with_pairing_marks(marks.clone());
+        m.dispatch(LinkedNestsAction::LinkBoth {
+            other_nest_url: "https://peer.test".into(),
+            capabilities: vec![],
+            expires_at: None,
+            label: None,
+        })
+        .await
+        .unwrap();
+        let expected = vec![([0xaa; 32], listed_digest(&connected).await)];
+        assert_eq!(*marks.puts.lock().unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn a_refused_mark_never_fails_the_gesture() {
+        let fake = Arc::new(FakeNest::default());
+        let marks = Arc::new(FakeMarks {
+            refuse: true,
+            ..Default::default()
+        });
+        let m = LinkedNestsMachine::new(fake.clone()).with_pairing_marks(marks);
+        m.dispatch(a_link(0xbb)).await.expect("the link stands");
+        let snap = m.snapshot();
+        assert_eq!(snap.error, None);
+        assert_eq!(snap.pairings.len(), 1);
+    }
+
     // ── Both-ends linking (LinkBoth) ────────────────────────────────────────
 
     #[tokio::test]
@@ -5393,6 +5591,7 @@ mod tests {
             class: "content.label-write".into(),
             kind: None,
             tier: None,
+            folder: None,
         }
     }
 
@@ -6718,11 +6917,13 @@ mod tests {
             class: "content.read".into(),
             kind: Some("mail".into()),
             tier: None,
+            folder: None,
         };
         let post_read = TrustScope {
             class: "content.read".into(),
             kind: Some("post".into()),
             tier: Some("gold".into()),
+            folder: None,
         };
 
         for (holder, scope) in [
@@ -7133,11 +7334,13 @@ mod tests {
                     class: "content.read".into(),
                     kind: Some("mail".into()),
                     tier: None,
+                    folder: None,
                 },
                 TrustScope {
                     class: "content.label-write".into(),
                     kind: None,
                     tier: None,
+                    folder: None,
                 },
             ],
             "the Mail use case mints the production bundle, never read{{mail}} alone"

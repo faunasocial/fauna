@@ -11,6 +11,32 @@
 use serde::{Deserialize, Serialize};
 
 use fauna_core::localized::LocalizedText;
+use fauna_core::possibility::Possibility;
+
+/// Blocked reason on a sibling's row that is off: turning peer transfers on
+/// is that device's own consent, given there.
+pub const P2P_ON_FROM_THAT_DEVICE: &str = "devices.p2p_participation_on_there";
+
+impl P2pParticipationPaint {
+    /// The [`Possibility`] sibling of [`Self::actionable`]
+    /// (`docs/goal/ui/devices.md` § Errors & edge cases;
+    /// `docs/goal/ui/README.md` § Offer only what is possible, rule 6). The
+    /// own row and a sibling that may still be on are possible. A sibling
+    /// whose off request is pending is blocked by its own label (the
+    /// "turning off" sentence it already paints); a sibling that is off is
+    /// blocked by [`P2P_ON_FROM_THAT_DEVICE`] — enabling is local consent on
+    /// that device, so the step that unblocks it is taken there. Shown, never
+    /// absent: the switch is also where the person reads the row's state.
+    pub fn possibility(&self) -> Possibility {
+        if self.actionable {
+            Possibility::Possible
+        } else if self.checked {
+            Possibility::blocked(self.label.clone())
+        } else {
+            Possibility::blocked(LocalizedText::key(P2P_ON_FROM_THAT_DEVICE))
+        }
+    }
+}
 
 /// `device-p2p-participation-toggle`'s paint for one roster row, computed by
 /// the machine and published on [`crate::DeviceSummary::p2p_participation_paint`].
@@ -221,6 +247,32 @@ mod tests {
         assert_eq!(
             OwnRowAnswer::from_door(Some(Err("no runtime".into()))),
             OwnRowAnswer::Unnamed
+        );
+    }
+
+    /// The switch's answer: the own row and a live sibling are possible; a
+    /// sibling turning off is blocked by its own label; an off sibling is
+    /// blocked by "turn it on from that device".
+    #[test]
+    fn the_switch_answers_possible_or_blocked_with_the_step_that_unblocks_it() {
+        let key = |p: &P2pParticipationPaint| p.possibility().reason().map(|r| r.key.clone());
+        assert!(
+            p2p_participation_paint(true, Some(false), None, false)
+                .possibility()
+                .is_possible()
+        );
+        assert!(
+            p2p_participation_paint(false, None, Some(true), false)
+                .possibility()
+                .is_possible()
+        );
+        assert_eq!(
+            key(&p2p_participation_paint(false, None, Some(true), true)),
+            Some("devices.p2p_participation_off_requested".to_string())
+        );
+        assert_eq!(
+            key(&p2p_participation_paint(false, None, Some(false), false)),
+            Some(P2P_ON_FROM_THAT_DEVICE.to_string())
         );
     }
 }

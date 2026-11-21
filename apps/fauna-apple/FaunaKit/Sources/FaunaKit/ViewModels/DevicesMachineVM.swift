@@ -190,14 +190,13 @@ public final class DevicesMachineVM {
     /// discards its machine instead of installing it for the next session.
     private var sessionGeneration: UInt64 = 0
 
-    /// A `folder-add-button` tap that arrived before the machine existed. The
-    /// page and its + button render while `devicesMachine` is still awaiting
-    /// the nest connect and the ConversationsSession, so a tap there must be
-    /// held and honoured when the machine lands — dropped, it is a + button
-    /// that does nothing (measured: the iOS no-tier paywall witness tapped
-    /// within moments of navigating and the wizard never opened). Cleared by
-    /// a failed build (its connect error answers the tap) and by `reset()`.
-    private(set) var wizardOpenHeld = false
+    /// The refusal a `folder-add-button` press got while its answer was not
+    /// possible (`addFolderAnswer`), painted on `errorMessage` — the press asks
+    /// what the paint asked (`ui/README.md` § Offer only what is possible,
+    /// rule 7). Only a press the paint did not stop reaches it (the button is
+    /// disabled while the answer is blocked); cleared when the machine lands,
+    /// by the next press, and by `reset()`.
+    private(set) var addFolderRefusal: String?
 
     // ── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -267,7 +266,6 @@ public final class DevicesMachineVM {
             logMessage(level: .error, target: "fauna.devices.vm",
                        message: "configure: machine build FAILED: \(error)")
             connectError = DisplayError.message(error)
-            wizardOpenHeld = false
             return
         }
         guard sessionGeneration == generation else {
@@ -280,11 +278,7 @@ public final class DevicesMachineVM {
         // The Settings pending-actions row names an automatic prune's folder
         // off this machine (`settings.md` § Pending actions).
         FolderRoster.publish(built)
-        if wizardOpenHeld {
-            logMessage(level: .info, target: "fauna.devices.vm",
-                       message: "configure: machine built — opening the wizard a tap asked for during the build")
-            openWizard()
-        }
+        addFolderRefusal = nil
         logMessage(level: .info, target: "fauna.devices.vm",
                    message: "configure: machine built — first refresh")
         await refresh()
@@ -326,7 +320,7 @@ public final class DevicesMachineVM {
         keylessPrincipals = []
         enrollmentNotice = nil
         thisDeviceRow = nil
-        wizardOpenHeld = false
+        addFolderRefusal = nil
         pendingShares = []
         #if !FAUNA_EXCISE_P2P_SHARE
         offlineSharePanel = .closed
@@ -336,7 +330,9 @@ public final class DevicesMachineVM {
         groupShareViews = FfiGroupShareViews(invitations: [], scopes: [])
         #endif
         canServeWebdav = false
+        webdavRead = .pending
         ownTierNames = []
+        ownTiersRead = .pending
         defaultConflictPolicy = nil
         _observerTick &+= 1
     }
@@ -375,8 +371,18 @@ public final class DevicesMachineVM {
     public var errorMessage: String? {
         _ = _observerTick
         return firstNonNil(
-            connectError, sharingError, bindLocationError, retainedRestoreError,
+            connectError, addFolderRefusal, sharingError, bindLocationError, retainedRestoreError,
             machine?.snapshot().error.map(renderLocalizedText), enrollmentNotice)
+    }
+
+    /// `folder-add-button`'s answer (`ui/README.md` § Offer only what is
+    /// possible, rules 2 and 5): the devices machine is built after the
+    /// account's connect (and, on apple, the ConversationsSession), so until it
+    /// exists the page has not read — *still loading* — or, after a failed
+    /// build, never will — *failed to load*. Once built the wizard always opens.
+    public var addFolderAnswer: Possibility {
+        _ = _observerTick
+        return machinePossibility(machine, buildFailed: connectError != nil) { _ in .possible }
     }
 
     // ── Page gestures ────────────────────────────────────────────────────────
@@ -399,14 +405,18 @@ public final class DevicesMachineVM {
     /// open and before submit — the linux/windows idiom), so a newly created set
     /// inherits the `sync-default-conflict-policy-select` value. Best-effort: a
     /// defaults read failure just leaves the nest column default (`auto`) in force.
+    ///
+    /// The press asks `addFolderAnswer` first, as the paint does: before the
+    /// machine exists it is refused with the read's reason on `errorMessage`,
+    /// never held or dropped silently.
     public func openWizard() {
+        addFolderRefusal = nil
         guard let machine else {
-            wizardOpenHeld = true
+            _ = refusePress(addFolderAnswer, errorMessage: &addFolderRefusal)
             logMessage(level: .info, target: "fauna.devices.vm",
-                       message: "openWizard: machine not built yet — holding the tap until it lands")
+                       message: "openWizard: refused — the devices machine is not built")
             return
         }
-        wizardOpenHeld = false
         machine.openWizard()
         Task { [weak self] in
             guard let self else { return }
@@ -416,8 +426,42 @@ public final class DevicesMachineVM {
         }
     }
     public func closeWizard() {
-        wizardOpenHeld = false
+        sharingError = nil
         machine?.closeWizard()
+    }
+
+    /// `wizard-next-button`'s answer on the step the wizard shows — the shared
+    /// `wizard_next_possibility` dispatch (absent on Review and Done, and with no
+    /// wizard open). The button is painted from it and its press asks it.
+    public var wizardNextAnswer: Possibility {
+        _ = _observerTick
+        guard let wizard = snapshot?.wizard else { return .absent }
+        return folderWizardNextPossibility(wizard: wizard)
+    }
+
+    /// `wizard-create-button`'s answer — the shared `wizard_create_possibility`
+    /// (blocked while the name is blank, while the create is in flight and while
+    /// a public create waits on its declassify confirm; absent once done).
+    public var wizardCreateAnswer: Possibility {
+        _ = _observerTick
+        guard let wizard = snapshot?.wizard else { return .absent }
+        return folderWizardCreatePossibility(wizard: wizard)
+    }
+
+    /// `wizard-next-button`: asks ``wizardNextAnswer``, the answer the button was
+    /// painted from, and refuses with its reason on `error-message`.
+    public func wizardNext() {
+        if refuseForm(wizardNextAnswer) { return }
+        sharingError = nil
+        wizardMachine?.next()
+    }
+
+    /// `wizard-create-button`'s ask: `true` when ``wizardCreateAnswer`` refuses
+    /// the press (its reason now on `error-message`), so the caller sends nothing.
+    public func refuseWizardCreate() -> Bool {
+        if refuseForm(wizardCreateAnswer) { return true }
+        sharingError = nil
+        return false
     }
 
     /// `device-rename-input`'s prefill: the shared machine's current name for
@@ -426,10 +470,31 @@ public final class DevicesMachineVM {
         machine?.deviceName(deviceId: deviceId)
     }
 
-    /// `device-rename-confirm-button`: the machine sends nothing for a blank or
-    /// unchanged name and paints any refusal on `error-message`.
-    public func renameDevice(deviceId: String, label: String) async {
-        await machine?.renameDevice(deviceId: deviceId, label: label)
+    /// Whether the closed card paints `device-rename-button` at all: the shared
+    /// `DevicesMachine::rename_possibility` over the row's unchanged name is not
+    /// Absent (Absent for the nest's WebDAV pseudo-device row, whose rename the
+    /// nest always refuses). With no machine yet it is painted — tui's
+    /// `rename_offered` (`devices.md` § Device names).
+    public func renameOffered(deviceId: String) -> Bool {
+        guard let machine else { return true }
+        let name = machine.deviceName(deviceId: deviceId) ?? ""
+        return machine.renamePossibility(deviceId: deviceId, draft: name).isShown
+    }
+
+    /// `device-rename-confirm-button`'s answer over the typed draft — the shared
+    /// `DevicesMachine::rename_possibility` (`devices.md` § Errors & edge
+    /// cases); absent with no machine.
+    public func renamePossibility(deviceId: String, draft: String) -> Possibility {
+        machine?.renamePossibility(deviceId: deviceId, draft: draft) ?? .absent
+    }
+
+    /// `device-rename-confirm-button`: the machine asks the same answer, seals
+    /// and sends the name (an unchanged one sends nothing) and paints any
+    /// refusal or failure on `error-message`. Returns whether the save went
+    /// through: the editor closes only then, keeping the text otherwise.
+    public func renameDevice(deviceId: String, label: String) async -> Bool {
+        guard let machine else { return false }
+        return await machine.saveDeviceName(deviceId: deviceId, label: label)
     }
 
     public func removeDevice(index: Int) async {
@@ -444,6 +509,9 @@ public final class DevicesMachineVM {
     /// cannot name the row (iOS today) still takes the own arm and says why it
     /// cannot flip, rather than asking the nest to turn itself off.
     public func setP2pParticipation(index: Int, on: Bool) async {
+        // The press asks what the paint asked (rule 7): a sibling's switch the
+        // shared answer blocks refuses with the same reason on `error-message`.
+        if refuseForm(p2pParticipationPossibility(index: index)) { return }
         machine?.setThisDeviceRow(row: thisDeviceRow)
         await machine?.setP2pParticipation(index: UInt32(index), on: on)
     }
@@ -651,14 +719,87 @@ public final class DevicesMachineVM {
         ) { try await api.listFolderDevices(name: name) }
     }
 
+    // ── Form validity (`docs/goal/ui/README.md` § Offer only what is possible,
+    //    rule 4's form case; `folders.md` § Errors & edge cases) ─────────────
+    // The follow and share submits paint from the shared draft-validity
+    // predicates (`fauna_client_folders::forms`, over UniFFI) through
+    // `faunaPossible`; each verb asks the same predicate first.
+
+    /// `folder-follow-confirm`: a handle and a folder name typed, and the app
+    /// signed in (machine, nest and identity secret held).
+    public func folderFollowPossibility(handle: String, name: String) -> Possibility {
+        _ = _observerTick
+        let ready = machine != nil && (api?.folderFollowReady ?? false)
+        return FaunaFFISwift.folderFollowPossibility(handle: handle, name: name, ready: ready)
+    }
+
+    /// `folder-share-confirm`: a recipient typed, and a conversations session
+    /// to admit them through.
+    public func folderSharePossibility(recipient: String) -> Possibility {
+        _ = _observerTick
+        let ready = machine != nil && (api?.folderShareReady ?? false)
+        return FaunaFFISwift.folderSharePossibility(recipient: recipient, ready: ready)
+    }
+
+    /// `device-p2p-participation-toggle[index]`'s answer — the shared
+    /// `P2pParticipationPaint::possibility` over the row's paint
+    /// (`docs/goal/ui/devices.md` § Errors & edge cases, *The participation
+    /// switch answers one `Possibility`*): possible on the own row and on a
+    /// sibling that may still be on; blocked by the row's "turning off" label
+    /// while an off request is pending, or by
+    /// `devices.p2p_participation_on_there` on a sibling that is off. Absent
+    /// for an index no row holds.
+    public func p2pParticipationPossibility(index: Int) -> Possibility {
+        _ = _observerTick
+        guard let devices = snapshot?.devices, devices.indices.contains(index) else { return .absent }
+        return FaunaFFISwift.p2pParticipationPossibility(paint: Self.participationPaint(devices[index]))
+    }
+
+    /// A row's participation paint, drawn by the devices machine at every
+    /// snapshot (`p2p.md` § Per-device participation → *Which row is this
+    /// device's*); the app never re-derives own-ness. A row serialised without
+    /// it (fixtures) gets the sibling arm over its own report, mirroring Rust's
+    /// `DeviceSummary::participation_paint`.
+    public static func participationPaint(_ device: DeviceSummary) -> P2pParticipationPaint {
+        if let paint = device.p2pParticipationPaint { return paint }
+        let checked = device.p2pParticipation ?? true
+        let key: String
+        if device.p2pOffRequested {
+            key = "devices.p2p_participation_off_requested"
+        } else if device.p2pParticipation == nil {
+            key = "devices.p2p_participation_unreported"
+        } else {
+            key = "devices.p2p_participation"
+        }
+        return P2pParticipationPaint(
+            own: false, checked: checked, label: LocalizedText(key: key, args: [:]),
+            actionable: checked && !device.p2pOffRequested)
+    }
+
+    /// Refuse a form submit (or a press) whose answer is not possible, with its
+    /// reason on the page's `error-message` (through `sharingError`). `true`
+    /// when refused.
+    func refuseForm(_ answer: Possibility) -> Bool {
+        guard let refusal = answer.refusal else { return false }
+        sharingError = refusal
+        return true
+    }
+
     /// Share a set with the picked recipient (`folder-share-confirm`). Resolves the
     /// handle + creates the MLS group + delivers the Welcome, then refreshes the
     /// snapshot (so `mlsGroupId` flips to shared) and re-reads the roster. Returns
-    /// `true` on success so the sheet can dismiss; a failure surfaces on the page
-    /// `error-message` and returns `false`. `access` is the share-time
+    /// `true` on success; a failure surfaces on the page `error-message` and
+    /// returns `false` (the sheet has already closed once the op was issued,
+    /// so the page carries it). `access` is the share-time
     /// `folder-share-role-select` grant (`"writer"`, or `nil` = Reader).
+    ///
+    /// Asks ``folderSharePossibility(recipient:)`` first and refuses with its
+    /// reason on `error-message` (`folders.md` § Errors & edge cases): with no
+    /// session to admit the recipient through, the sheet stays open with what
+    /// was typed.
     @discardableResult
     public func shareFolder(name: String, recipientInput: String, access: String? = nil) async -> Bool {
+        if refuseForm(folderSharePossibility(recipient: recipientInput)) { return false }
         guard let api else { return false }
         sharingError = nil
         do {
@@ -855,6 +996,15 @@ public final class DevicesMachineVM {
     /// accept/decline (mirrors `pendingShares`).
     public private(set) var groupShareViews = FfiGroupShareViews(invitations: [], scopes: [])
 
+    /// Re-converges this device's File Provider domains when the account's
+    /// held group sets change. A group set joins the presence plan the moment
+    /// a ceremony admits it (`group-set.md` § Build design — the group set,
+    /// decision 11 (a)), but the apps' reconcile otherwise runs only at launch
+    /// and on a `folder-on-demand-toggle` flip — so a set admitted mid-session
+    /// had no domain until the next launch. The app sets it beside its own
+    /// reconcile hook and clears it at the session's teardown.
+    public var onPresenceSetsChanged: (@Sendable () async -> Void)?
+
     /// The whole paint decision — every offline-share element reads from
     /// here, never from the raw fields above (mirrors linux's
     /// `OfflineShareState::view()`). `nil` only before `api` is set.
@@ -960,7 +1110,20 @@ public final class DevicesMachineVM {
     /// never blanks the page — mirrors `loadPendingShares`).
     public func loadOfflineGroupShares() async {
         guard let api else { return }
+        let before = Set(groupShareViews.scopes.map(\.folderId))
         groupShareViews = await api.loadOfflineGroupShares(seat: offlineShareSeat)
+        let after = Set(groupShareViews.scopes.map(\.folderId))
+        guard after != before else { return }
+        guard let reconcile = onPresenceSetsChanged else {
+            logMessage(
+                level: .info, target: "fauna.fileprovider",
+                message: "[fp] held group sets changed (\(before.count) → \(after.count)); no reconcile hook on this seat")
+            return
+        }
+        logMessage(
+            level: .info, target: "fauna.fileprovider",
+            message: "[fp] held group sets changed (\(before.count) → \(after.count)); reconciling")
+        await reconcile()
     }
 
     /// The consent card's Accept (`folder-share-accept-button`, the group
@@ -1004,20 +1167,49 @@ public final class DevicesMachineVM {
     /// flag BEFORE re-provisioning the keys blob, so an enable by an actor with no MSEK
     /// would commit the flag and only then fail `NoMsek`. A toggle that is merely
     /// error-on-click would therefore leave the nest inconsistent — it must be disabled.
+    ///
+    /// Never read alone: the toggle is painted from ``webdavAnswer``, which keeps an
+    /// unanswered read (``webdavRead``) apart from "no MSEK" (`ui/folders.md`
+    /// § Errors & edge cases, *Own-tier and mail gates*).
     public private(set) var canServeWebdav: Bool = false
 
-    /// Re-read the capability. A failed/absent read leaves it CLOSED (never opens the
-    /// toggle on an unreadable answer). Driven from the page's `.task`, so it re-reads on
-    /// every appear — mail can be set up while the page is off-screen.
+    /// Where the custody read behind ``canServeWebdav`` stands: `.pending` until it
+    /// first answers (no account store yet included), `.failed` when the latest read
+    /// failed, else `.resolved`.
+    public private(set) var webdavRead: ReadState = .pending
+
+    /// `folder-webdav-toggle`'s answer — the shared `webdav_serve_possibility` over
+    /// the custody read. The toggle and its hint are painted from it and the press
+    /// asks it (`docs/goal/ui/README.md` § Offer only what is possible, rule 6).
+    public var webdavAnswer: Possibility {
+        folderWebdavServePossibility(read: webdavRead, holdsMsek: canServeWebdav)
+    }
+
+    /// Re-read the capability. A failed read leaves it CLOSED with ``webdavRead``
+    /// `.failed` — the toggle says the read failed rather than "set up mail first".
+    /// Driven from the page's `.task`, so it re-reads on every appear — mail can be
+    /// set up while the page is off-screen.
     public func loadCanServeWebdav() async {
         guard let api else { return }
-        canServeWebdav = (try? await api.canServeWebdav()) ?? false
+        do {
+            let holds = try await api.canServeWebdav()
+            guard self.api === api else { return }
+            canServeWebdav = holds
+            webdavRead = .resolved
+        } catch {
+            guard self.api === api else { return }
+            canServeWebdav = false
+            webdavRead = .failed
+        }
     }
 
     /// Flip one set's WebDAV serve state (`folder-webdav-toggle`, every OWNER row).
     /// A flip rotates/migrates content-key custody, so the row's `webdavEnabled` only
-    /// re-reads after a refresh. Failure surfaces on `error-message`.
+    /// re-reads after a refresh. Failure surfaces on `error-message`. Asks
+    /// ``webdavAnswer`` first, the answer the toggle was painted from, and refuses
+    /// with its reason.
     public func serveFolderWebdav(name: String, mlsGroupIdHex: String?, enable: Bool) async {
+        if refuseForm(webdavAnswer) { return }
         guard let api else { return }
         sharingError = nil
         do {
@@ -1035,21 +1227,44 @@ public final class DevicesMachineVM {
     /// The creator's own subscription tier NAMES — the option set each website-enabled row's
     /// `folder-paywall-tier-select` offers. Read per page-visit off the key-bearing
     /// face (the keyless `DevicesMachine` can't own it — same pattern as
-    /// `canServeWebdav`); a failed read degrades to empty ⇒ the select renders
-    /// disabled with the "create a tier first" hint. Never gates the page.
+    /// `canServeWebdav`); a failed read leaves no names and says so on
+    /// ``ownTiersRead``. The select is painted from ``paywallAnswer``, so a pending
+    /// or failed read is never shown as "create a tier first" (`ui/folders.md`
+    /// § Errors & edge cases, *Own-tier and mail gates*). Never gates the page.
     public private(set) var ownTierNames: [String] = []
+
+    /// Where the own-tier read behind ``ownTierNames`` stands (as ``webdavRead``).
+    public private(set) var ownTiersRead: ReadState = .pending
+
+    /// `folder-paywall-tier-select`'s answer — the shared own-tier answer (use
+    /// `Paywall`) over the own-tier read. Painted from, and asked by the press;
+    /// its answered-no-tier reason is what `folder-paywall-hint` says.
+    public var paywallAnswer: Possibility {
+        folderPaywallPossibility(read: ownTiersRead, ownTiers: UInt32(clamping: ownTierNames.count))
+    }
 
     /// Re-read the tier names (driven beside `loadCanServeWebdav` on every
     /// configure/appear — a tier can be created while this page is off-screen).
     public func loadOwnTierNames() async {
         guard let api else { return }
-        ownTierNames = ((try? await api.listSubscriptionTiers()) ?? []).map(\.name)
+        do {
+            let names = try await api.listSubscriptionTiers().map(\.name)
+            guard self.api === api else { return }
+            ownTierNames = names
+            ownTiersRead = .resolved
+        } catch {
+            guard self.api === api else { return }
+            ownTierNames = []
+            ownTiersRead = .failed
+        }
     }
 
     /// Paywall one website-enabled set to `tier` (v1 SET-ONLY — no clear path). The row's
     /// `webPaywallTier` only re-reads after a refresh; failure surfaces on
-    /// `error-message` via the same page error the other sharing writes use.
+    /// `error-message` via the same page error the other sharing writes use. Asks
+    /// ``paywallAnswer`` first and refuses with its reason, as ``serveFolderWebdav``.
     public func paywallFolder(name: String, mlsGroupIdHex: String?, tier: String) async {
+        if refuseForm(paywallAnswer) { return }
         guard let api else { return }
         sharingError = nil
         do {
@@ -1078,6 +1293,23 @@ public final class DevicesMachineVM {
             await applyCustodyFacet(facet, api: api)
         }
         await loadKeylessPosture()
+        _ = await readMintCandidates()
+    }
+
+    /// `custody-mint-button`'s entry answer — the shared
+    /// `custody_mint_possibility` over the 1:1 conversations this visit read
+    /// (`devices.md` § Errors & edge cases): not enabled before the read,
+    /// blocked with the start-a-conversation step over none. The gate is at the
+    /// entry, never a refusal on click.
+    public private(set) var mintEntry: Possibility = readPossibility(read: .pending)
+
+    /// Read the offer's host options and repaint the entry from them; `nil`
+    /// when unread (no nest, or the read failed).
+    func readMintCandidates() async -> [CustodyMintCandidateView]? {
+        guard let api else { return nil }
+        let read = try? await api.loadCustodyMintCandidates()
+        mintEntry = custodyMintPossibility(candidates: read)
+        return read
     }
 
     /// Paint one re-folded facet — the load edge's and every act's. The
@@ -1162,19 +1394,12 @@ public final class DevicesMachineVM {
     /// `error-message` says to start a conversation first, rather than
     /// offering an empty picker whose confirm can never succeed.
     public func openCustodyMint() async -> [CustodyMintCandidateView]? {
-        guard let api else { return nil }
         sharingError = nil
-        do {
-            let candidates = try await api.loadCustodyMintCandidates()
-            if candidates.isEmpty {
-                sharingError = L.devices.custodyMintNoContacts
-                return nil
-            }
-            return candidates
-        } catch {
-            sharingError = DisplayError.message(error)
-            return nil
-        }
+        // Re-read and ask the same entry answer the button was painted from
+        // (rule 7): open the flow over them, or refuse with its reason.
+        let candidates = await readMintCandidates()
+        if refuseForm(mintEntry) { return nil }
+        return candidates
     }
 
     /// `custody-mint-confirm-button` over one `openCustodyMint` row, passed
@@ -1261,8 +1486,12 @@ public final class DevicesMachineVM {
     ///
     /// Returns `true` on success, so the caller can close its form only when
     /// something was actually stored.
+    ///
+    /// Asks ``folderFollowPossibility(handle:name:)`` first and refuses with
+    /// its reason on `error-message`.
     @discardableResult
     public func followFolder(owner: String, folderName: String) async -> Bool {
+        if refuseForm(folderFollowPossibility(handle: owner, name: folderName)) { return false }
         guard let api else { return false }
         sharingError = nil
         do {

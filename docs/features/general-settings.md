@@ -51,7 +51,7 @@ Stamped 2026-09-22 at e9f79fdf25.
 |---|---|---|
 | web | — absent | |
 | linux | ✅ full | 0.1.5-dev+cbd813be standalone |
-| windows | ✅ full | 0.1.5-dev+a73ed62e.dirty standalone |
+| windows | ✅ full | 0.1.7-dev+e8d95526 standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 | ios | — absent | |
 | android | — absent | |

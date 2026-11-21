@@ -22,7 +22,13 @@
   // `escalateAccountLocked`).
   import { onMount, onDestroy } from 'svelte';
   import { identity } from '#lib/store';
-  import { ensureWasm, accountEnrolledDeviceRow, sessionsLockoutConfirmWord } from '#lib/wasm';
+  import {
+    ensureWasm,
+    accountEnrolledDeviceRow,
+    sessionsLockoutConfirmWord,
+    sessionsRevokeOthersPossibility,
+  } from '#lib/wasm';
+  import { askPossibility, formGate, formRefusal, type Possibility } from '#lib/form-gate';
   import type { SessionRow, SessionsInput, SessionsPage, SessionsSnapshot } from '#lib/wasm';
   import { sessionsLoad, sessionsRevoke, sessionsRevokeOthers, sessionsLockout } from '#lib/rpc';
   import { ownTokenIds, currentTokenId } from '#lib/api';
@@ -54,6 +60,40 @@
   let enrolledRow: string | null = null;
 
   const idle = $derived(!busy && !locked);
+  // The wasm core is up — the shared answer is askable from here on.
+  let wasmReady = $state(false);
+
+  // `sessions-revoke-others-button`'s answer — the shared
+  // `sessions_view::revoke_others_possibility` over the page painted last
+  // (`null` before the first load) and whether an act is in flight
+  // (`ui/sessions.md` § Errors & edge cases): still loading, failed to load,
+  // no other sign-in to end, or in flight. The button paints from it; the arm
+  // and the confirm ask it again (`ui/README.md` § Offer only what is
+  // possible, rules 5–7). Matches tui's `sessions::revoke_others_answer`.
+  function revokeOthersAnswer(): Possibility | null {
+    if (!wasmReady) return null;
+    return askPossibility(() => sessionsRevokeOthersPossibility(snapshot, busy));
+  }
+  const revokeOthersPaint = $derived.by(() => {
+    void snapshot;
+    void busy;
+    return formGate(revokeOthersAnswer());
+  });
+
+  /** Ask the answer again at a press: a refusal goes on `error-message` and
+   *  disarms the confirm; `true` when the press may go on. */
+  function revokeOthersAllowed(): boolean {
+    const refusal = formRefusal(revokeOthersAnswer());
+    if (refusal === null) return true;
+    revokeOthersArmed = false;
+    if (refusal) error = refusal;
+    return false;
+  }
+
+  function armRevokeOthers(): void {
+    if (!revokeOthersAllowed()) return;
+    revokeOthersArmed = true;
+  }
 
   /** `fauna_core::format::format_unix_local`'s shape, through the shared
    *  `localTimestamp` (`#lib/value-format`). */
@@ -144,6 +184,7 @@
   }
 
   function revokeOthers(): void {
+    if (!revokeOthersAllowed()) return;
     revokeOthersArmed = false;
     void pass(sessionsRevokeOthers, (e) => t.sessions.act_failed({ error: e }));
   }
@@ -163,6 +204,7 @@
     if (!id) return;
     try {
       await ensureWasm();
+      wasmReady = true;
       confirmWord = sessionsLockoutConfirmWord();
       // The roster names device-minted sessions — rendered by the session's
       // one shared Devices machine, which owns the sealed-label render.
@@ -234,13 +276,19 @@
         onclick={() => (revokeOthersArmed = false)}
       >{t.sessions.revoke_others_cancel}</button>
     </div>
-  {:else}
+  {:else if revokeOthersPaint.shown}
+    <!-- Not live before the first load, nor with no other sign-in to end, nor
+         while an act runs — the shared answer, its reason beside it. -->
     <button
       data-testid={IDS.SESSIONS_REVOKE_OTHERS_BUTTON}
       class="btn"
-      disabled={!idle}
-      onclick={() => (revokeOthersArmed = true)}
+      disabled={locked || revokeOthersPaint.disabled}
+      title={revokeOthersPaint.reason || undefined}
+      onclick={armRevokeOthers}
     >{t.sessions.revoke_others}</button>
+    {#if revokeOthersPaint.reason}
+      <p class="muted small">{revokeOthersPaint.reason}</p>
+    {/if}
   {/if}
   <!-- REQUIRED copy: the honest bound of what revoking does. -->
   <p data-testid={IDS.SESSIONS_REVOKE_NOTE} class="muted small">{t.sessions.revoke_note}</p>

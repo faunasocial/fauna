@@ -507,6 +507,7 @@ def test_a_nest_restart_leaves_the_ramp_where_it_was(ramp_nest):
 ORDER = (
     "off",
     "bridge_down",
+    "outbound_blocked",
     "blocklisted",
     "queue_stalled",
     "records_failing",
@@ -526,7 +527,12 @@ def _holding(health, mail_enabled):
     if rows[1]["state"] == "fail":
         held.append("blocklisted")
     if rows[2]["state"] == "fail":
-        held.append("queue_stalled")
+        # The outgoing-queue row names a blocked port 25 as its cause, and the
+        # delayed count only when there is one.
+        if rows[2]["detail"].startswith("outbound port 25 is unreachable"):
+            held.append("outbound_blocked")
+        if "delayed" in rows[2]["detail"]:
+            held.append("queue_stalled")
     if rows[3]["state"] == "fail":
         held.append("records_failing")
     if rows[4]["state"] == "info" and "day" in rows[4]["detail"]:

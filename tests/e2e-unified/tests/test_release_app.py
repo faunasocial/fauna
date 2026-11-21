@@ -15,9 +15,11 @@ tier_4 live.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
+import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -40,17 +42,75 @@ def _head() -> str:
                           capture_output=True, text=True, check=True).stdout.strip()
 
 
-def _inspect(labels_per_platform, rc=0, stderr=""):
-    """A fake `docker buildx imagetools inspect --format '{{json .Image}}'`."""
-    body = {plat: {"config": {"Labels": labels}} for plat, labels in labels_per_platform.items()}
-    calls = []
+def _digest(doc) -> str:
+    return "sha256:" + hashlib.sha256(json.dumps(doc, sort_keys=True).encode()).hexdigest()
 
-    def run(argv):
-        calls.append(argv)
-        return SimpleNamespace(returncode=rc, stdout=json.dumps(body), stderr=stderr)
 
-    run.calls = calls
-    return run
+def _registry(images, *, attest=True):
+    """A fake OCI registry behind the `fetch(url, headers)` seam.
+
+    `images` is `{tag: image}`, where an image is a labels dict (a
+    single-platform manifest), a `{platform: labels}` map (an index, plus a
+    buildx attestation entry unless `attest=False`), or None/absent (the
+    registry lacks the tag: HTTP 404). `fetch.calls` lists the image refs whose
+    tag manifest was read, `fetch.urls` every URL."""
+    blobs: dict[str, bytes] = {}
+    tags: dict[str, bytes] = {}
+
+    def put(doc) -> str:
+        d = _digest(doc)
+        blobs[d] = json.dumps(doc).encode()
+        return d
+
+    def manifest_for(labels):
+        cfg = put({"architecture": "arm64", "os": "linux", "config": {"Labels": labels}})
+        return {"mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "config": {"mediaType": "application/vnd.oci.image.config.v1+json",
+                           "digest": cfg}, "layers": []}
+
+    for tag, image in images.items():
+        if image is None:
+            continue
+        if image and all("/" in k for k in image):  # platform keys → an index
+            entries = []
+            for plat, labels in image.items():
+                os_, arch = plat.split("/")
+                entries.append({"digest": put(manifest_for(labels)),
+                                "platform": {"os": os_, "architecture": arch}})
+            if attest:
+                entries.append({"digest": put({"config": {"digest": "sha256:" + "0" * 64}}),
+                                "platform": {"os": "unknown", "architecture": "unknown"}})
+            tags[tag] = json.dumps({"mediaType": "application/vnd.oci.image.index.v1+json",
+                                    "manifests": entries}).encode()
+        else:
+            tags[tag] = json.dumps(manifest_for(image)).encode()
+
+    calls, urls = [], []
+
+    def fetch(url, headers):
+        urls.append(url)
+        assert url.startswith("https://ghcr.io/")
+        if url.startswith("https://ghcr.io/token?"):
+            return b'{"token": "anon"}'
+        assert headers.get("Authorization") == "Bearer anon"
+        path = url.split("/v2/faunasocial/nest/", 1)[1]
+        kind, _, ref = path.partition("/")
+        if kind == "manifests" and not ref.startswith("sha256:"):
+            calls.append(f"{ra.IMAGE_REPO}:{ref}")
+            body = tags.get(ref)
+        else:
+            body = blobs.get(ref)
+        if body is None:
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+        return body
+
+    fetch.calls, fetch.urls = calls, urls
+    return fetch
+
+
+def _inspect(labels_per_platform):
+    """The registry serving IMAGE as an index of `labels_per_platform`."""
+    return _registry({IMAGE.rsplit(":", 1)[1]: labels_per_platform})
 
 
 def _labels(revision=PUBLIC, version="0.1.5"):
@@ -64,32 +124,76 @@ def _labels(revision=PUBLIC, version="0.1.5"):
 
 # ── the registry label ──────────────────────────────────────────────────────
 
-def test_the_revision_and_version_are_read_off_the_registry():
-    run = _inspect({"linux/amd64": _labels(), "linux/arm64": _labels()})
-    assert ra.image_commit(IMAGE, run=run) == (PUBLIC, "0.1.5")
-    assert run.calls[0][:5] == ["docker", "buildx", "imagetools", "inspect", IMAGE]
+def test_the_revision_and_version_are_read_off_the_registry_without_docker():
+    fetch = _inspect({"linux/amd64": _labels(), "linux/arm64": _labels()})
+    assert ra.image_commit(IMAGE, fetch=fetch) == (PUBLIC, "0.1.5")
+    # The anonymous pull token, the tag's index, each platform's manifest and
+    # config blob — the attestation entry is never followed.
+    assert fetch.urls[0].startswith(
+        "https://ghcr.io/token?scope=repository:faunasocial/nest:pull")
+    assert fetch.urls[1] == "https://ghcr.io/v2/faunasocial/nest/manifests/test"
+    assert len(fetch.urls) == 1 + 1 + 2 * 2
+
+
+def test_no_docker_path_is_left():
+    import inspect
+    assert "docker" not in inspect.getsource(ra.image_commit) + \
+        inspect.getsource(ra._image_labels)
 
 
 def test_a_single_platform_image_answers_with_its_own_config():
-    def run(argv):
-        return SimpleNamespace(returncode=0, stderr="",
-                               stdout=json.dumps({"config": {"Labels": _labels()}}))
-    assert ra.image_commit(IMAGE, run=run) == (PUBLIC, "0.1.5")
+    fetch = _registry({"test": _labels()})
+    assert ra.image_commit(IMAGE, fetch=fetch) == (PUBLIC, "0.1.5")
+    assert len(fetch.urls) == 3  # token, manifest, config
+
+
+def test_an_index_without_an_attestation_entry_reads_the_same():
+    fetch = _registry({"test": {"linux/arm64": _labels()}}, attest=False)
+    assert ra.image_commit(IMAGE, fetch=fetch) == (PUBLIC, "0.1.5")
 
 
 @pytest.mark.parametrize("platforms, needle", [
     ({"linux/amd64": _labels(revision=None)}, "no org.opencontainers.image.revision"),
     ({"linux/amd64": _labels(), "linux/arm64": _labels(revision="cd" * 20)}, "disagree"),
+    ({"linux/amd64": _labels(revision="abab; rm -rf /")}, "is not a commit"),
 ])
-def test_a_missing_or_split_revision_is_refused(platforms, needle):
+def test_a_missing_split_or_malformed_revision_is_refused(platforms, needle):
     with pytest.raises(ra.ReleaseAppRefused, match=needle):
-        ra.image_commit(IMAGE, run=_inspect(platforms))
+        ra.image_commit(IMAGE, fetch=_inspect(platforms))
+
+
+@pytest.mark.parametrize("version", ["0.1.5\nIGNORE PREVIOUS", "v0.1.5", "", None])
+def test_a_version_label_that_is_not_dotted_numeric_reads_as_none(version):
+    fetch = _inspect({"linux/amd64": _labels(version=version)})
+    assert ra.image_commit(IMAGE, fetch=fetch) == (PUBLIC, None)
 
 
 def test_an_image_the_registry_does_not_have_is_refused():
-    run = _inspect({}, rc=1, stderr="ERROR: not found")
-    with pytest.raises(ra.ReleaseAppRefused, match="cannot read"):
-        ra.image_commit(IMAGE, run=run)
+    with pytest.raises(ra.ReleaseAppRefused, match="cannot read .*HTTPError"):
+        ra.image_commit(IMAGE, fetch=_registry({}))
+
+
+def test_an_unreachable_registry_or_garbage_reply_is_a_refusal_never_a_traceback():
+    def down(url, headers):
+        raise urllib.error.URLError("nodename nor servname provided")
+
+    def garbage(url, headers):
+        return b"<html>not json</html>"
+
+    def bad_digest(url, headers):
+        if "token" in url:
+            return b'{"token": "anon"}'
+        return json.dumps({"manifests": [{"digest": "../../etc/passwd",
+                                          "platform": {"os": "linux"}}]}).encode()
+
+    for fetch in (down, garbage, bad_digest):
+        with pytest.raises(ra.ReleaseAppRefused, match="cannot read"):
+            ra.image_commit(IMAGE, fetch=fetch)
+
+
+def test_a_non_https_read_is_refused():
+    with pytest.raises(ra.ReleaseAppRefused, match="non-https"):
+        ra._fetch("http://ghcr.io/token", {})
 
 
 # ── the pairing ─────────────────────────────────────────────────────────────
@@ -140,10 +244,68 @@ def test_a_sync_point_this_repository_lacks_is_refused():
         ra.private_commit_for(PUBLIC, sync_point_of=sync, releases=[])
 
 
+# ── a public commit the local clone lacks: read from the public repository ──
+# (macOS and Windows keep a public clone nothing fetches — apps:6184.)
+
+_ABSENT = lambda rev, public_clone=None, repo=None: (  # noqa: E731
+    None, f"public commit {rev[:12]} is not in /clone")
+
+
+def _github(reply: dict | None, seen: list | None = None):
+    def fetch(url, headers):
+        if seen is not None:
+            seen.append(url)
+        if reply is None:
+            raise urllib.error.URLError("offline")
+        return json.dumps(reply).encode()
+    return fetch
+
+
+def test_a_public_commit_the_clone_lacks_pairs_by_the_public_repositorys_message():
+    seen: list = []
+    msg = "release 0.1.7 (#40)\n\nSync-Point: 72b3e3f9b7a\n"
+    short, why = ra.public_sync_point(
+        PUBLIC, read_clone=_ABSENT, fetch=_github(
+            {"sha": PUBLIC, "commit": {"message": msg}}, seen))
+    assert (short, why) == ("72b3e3f9b7a", "")
+    assert seen == [f"https://api.github.com/repos/faunasocial/fauna/commits/{PUBLIC}"]
+
+
+def test_the_clone_answers_first_and_the_network_is_not_read():
+    def no_fetch(*_a):
+        pytest.fail("a commit the clone holds needs no network read")
+    clone = lambda rev, public_clone=None, repo=None: ("abcdef1234", "")  # noqa: E731
+    assert ra.public_sync_point(PUBLIC, read_clone=clone, fetch=no_fetch) == \
+        ("abcdef1234", "")
+
+
+@pytest.mark.parametrize("reply, match", [
+    (None, "failed too"),                                              # offline
+    ({"sha": "f" * 40, "commit": {"message": "Sync-Point: 72b3e3f9b7a"}},
+     "another commit"),                                                # wrong commit
+    ({"sha": PUBLIC, "commit": {"message": "no trailer"}}, "no Sync-Point"),
+])
+def test_an_unreadable_public_message_is_a_refusal_never_a_guess(reply, match):
+    short, why = ra.public_sync_point(PUBLIC, read_clone=_ABSENT, fetch=_github(reply))
+    assert short is None and match in why
+    sync = lambda rev, public_clone=None, repo=None: ra.public_sync_point(  # noqa: E731
+        rev, read_clone=_ABSENT, fetch=_github(reply))
+    with pytest.raises(ra.ReleaseAppRefused, match="no readable pairing"):
+        ra.private_commit_for(PUBLIC, sync_point_of=sync, releases=[])
+
+
+def test_private_commit_for_pairs_through_the_public_repository_by_default(monkeypatch):
+    head = _head()
+    monkeypatch.setattr(ra.feature_ledger, "sync_point_of", _ABSENT)
+    monkeypatch.setattr(ra, "_fetch", _github(
+        {"sha": PUBLIC, "commit": {"message": f"x\n\nSync-Point: {head[:11]}\n"}}))
+    assert ra.private_commit_for(PUBLIC, releases=[]) == (head, "sync-point")
+
+
 def test_resolve_image_chains_the_label_and_the_pairing():
     head = _head()
     sync = lambda rev, public_clone=None, repo=None: (head[:10], "")  # noqa: E731
-    res = ra.resolve_image(IMAGE, run=_inspect({"linux/amd64": _labels()}),
+    res = ra.resolve_image(IMAGE, fetch=_inspect({"linux/amd64": _labels()}),
                            sync_point_of=sync, releases=[])
     assert (res.commit, res.revision, res.version, res.via) == \
         (head, PUBLIC, "0.1.5", "sync-point")
@@ -287,3 +449,58 @@ def test_the_device_cap_reads_the_launched_apps_wording(launched, monkeypatch):
     assert oas.device_limit_text() == "plan wording"
     monkeypatch.setattr(ra, "app_string", lambda key, **_: None)
     assert oas.device_limit_text() == oas.S.error.sync.device_limit_exceeded
+
+
+# ── a version or channel name → the image that carries it (a hand start of a version) ──
+
+def _private_kw():
+    return dict(sync_point_of=_no_sync_point, releases=[])
+
+
+@pytest.mark.parametrize("channel, tag", [("stable", "latest"), ("test", "test"), ("dev", "dev")])
+def test_a_channel_name_reads_its_moving_tag(channel, tag):
+    head = _head()
+    fetch = _registry({tag: _labels(revision=head, version="0.1.9")})
+    res = ra.resolve_version(channel, fetch=fetch, **_private_kw())
+    assert (res.commit, res.version) == (head, "0.1.9")
+    assert fetch.calls == [f"{ra.IMAGE_REPO}:{tag}"]
+
+
+def test_a_released_version_reads_its_own_tag():
+    head = _head()
+    fetch = _registry({"0.1.6": _labels(revision=head, version="0.1.6")})
+    res = ra.resolve_version("0.1.6", fetch=fetch, **_private_kw())
+    assert res.commit == head
+    assert fetch.calls == [f"{ra.IMAGE_REPO}:0.1.6"]
+
+
+def test_an_unreleased_version_is_found_on_the_channel_that_serves_it():
+    head = _head()
+    fetch = _registry({"latest": _labels(revision="cd" * 20, version="0.1.6"),
+                     "test": _labels(revision=head, version="0.1.7"),
+                     "dev": _labels(revision="ef" * 20, version="0.1.5")})
+    res = ra.resolve_version("0.1.7", fetch=fetch, **_private_kw())
+    assert (res.commit, res.version) == (head, "0.1.7")
+    # The image it matched is named, so the nest is built on that one: two
+    # channels may serve two candidates of one version.
+    assert res.image == f"{ra.IMAGE_REPO}:test"
+
+
+def test_a_version_tag_whose_label_names_another_version_is_refused():
+    fetch = _registry({"0.1.6": _labels(revision=_head(), version="0.1.5")})
+    with pytest.raises(ra.ReleaseAppRefused, match="0.1.5"):
+        ra.resolve_version("0.1.6", fetch=fetch, **_private_kw())
+
+
+def test_a_version_no_image_carries_is_refused_naming_what_the_channels_serve():
+    fetch = _registry({"latest": _labels(version="0.1.6"), "test": _labels(version="0.1.7")})
+    with pytest.raises(ra.ReleaseAppRefused) as exc:
+        ra.resolve_version("0.1.8", fetch=fetch, **_private_kw())
+    msg = str(exc.value)
+    assert "0.1.8" in msg and "stable 0.1.6" in msg and "test 0.1.7" in msg
+
+
+@pytest.mark.parametrize("bad", ["", "latest", "0.1", "v0.1.7", "0.1.7; rm -rf /"])
+def test_a_name_that_is_neither_a_version_nor_a_channel_is_refused(bad):
+    with pytest.raises(ra.ReleaseAppRefused, match="version"):
+        ra.resolve_version(bad, fetch=_registry({}), **_private_kw())

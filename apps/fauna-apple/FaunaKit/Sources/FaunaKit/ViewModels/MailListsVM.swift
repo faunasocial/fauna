@@ -18,7 +18,7 @@ import SwiftUI
 /// `dispatch(_:)` come from `MachineBackedVM`'s shared default (row 7 harvest
 /// pass 68 dedup).
 @MainActor @Observable
-public final class MailListsVM: MachineBackedVM {
+public final class MailListsVM: MachineBackedVM, MailUnbuiltRefusing {
     /// Latest snapshot; `nil` until `configure`.
     public internal(set) var snapshot: MailListsSnapshot?
     /// Page-level error surface (`error-message`).
@@ -41,6 +41,16 @@ public final class MailListsVM: MachineBackedVM {
     /// The user's owned domains; the add control is disabled when empty (a list
     /// needs a send-from domain).
     public var localDomains: [String] { snapshot?.localDomains ?? [] }
+
+    /// The list add paths' shared answer (`mail-settings.md` § Errors & edge
+    /// cases, *The in-page predicates*): blocked with the page's domain reason
+    /// until a domain exists, and — before the first snapshot — blocked while
+    /// the read is under way (rule 5). The view paints from this, never from
+    /// the domain field.
+    public var createAnswer: Possibility {
+        guard let snapshot else { return readPossibility(read: .pending) }
+        return mailListsCreatePossibility(snapshot: snapshot)
+    }
 
     /// Vend the machine from APIClient and load the first snapshot. Idempotent.
     public func configure(api: APIClient) async {

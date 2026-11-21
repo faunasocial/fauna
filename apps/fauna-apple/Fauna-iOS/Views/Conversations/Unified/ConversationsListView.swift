@@ -100,6 +100,14 @@ struct ConversationsListView: View {
                         // The standing community-room invitations, atop the list.
                         RoomInvitationsSection()
 
+                        // Empty state, chrome with no id — painted only once the
+                        // room list has loaded (`ConversationsVM.showsEmptyState`).
+                        if vm.showsEmptyState {
+                            Text(L.conversations.list.noConversations)
+                                .foregroundStyle(.secondary)
+                                .padding(.vertical, 24)
+                        }
+
                         ForEach(Array(vm.rows.enumerated()), id: \.element.id) { index, row in
                             NavigationLink(value: Route.thread(row.id)) {
                                 ConversationListRow(model: row)

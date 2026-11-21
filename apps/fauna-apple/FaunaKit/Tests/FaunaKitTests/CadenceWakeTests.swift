@@ -29,7 +29,7 @@ func aWakeEndsAWaitAlreadyInProgress() async {
     let waiter = Task { @MainActor in await wake.sleep(nanoseconds: sixHours) }
     // Let the waiter reach its suspension before the wake lands, so this pins
     // the mid-wait path rather than the stored-wake one above.
-    while !wake.isWaitingForTest { await Task.yield() }
+    guard await yieldUntil("the waiter suspends in sleep", { wake.isWaitingForTest }) else { return }
     wake.wake()
     await waiter.value
     #expect(!wake.hasPendingWake, "a mid-wait wake was stored instead of ending the wait")
@@ -40,7 +40,7 @@ func aWakeEndsAWaitAlreadyInProgress() async {
 func cancellingTheWaitingTaskEndsTheWait() async {
     let wake = CadenceWake()
     let waiter = Task { @MainActor in await wake.sleep(nanoseconds: sixHours) }
-    while !wake.isWaitingForTest { await Task.yield() }
+    guard await yieldUntil("the waiter suspends in sleep", { wake.isWaitingForTest }) else { return }
     waiter.cancel()
     await waiter.value
 }

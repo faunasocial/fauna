@@ -77,6 +77,8 @@ tokio = { workspace = true }
 # NOT a normal dependency: it pulls the WS-RPC transport, and the machine's
 # `default` build must stay transport-free.
 fauna-client-snapshots = { path = "../fauna-client-snapshots" }
+# Only so `possibility`'s tests can prove every reason key resolves.
+fauna-i18n = { path = "../fauna-i18n" }
 # Self dev-dependency turns on the test-only features for the integration-test
 # build only (the `#[cfg(any(test, feature = "..."))]` items aren't visible to
 # `tests/*.rs` otherwise). `rpc-glue` so the native ws_rpc seam compiles under

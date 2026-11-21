@@ -76,6 +76,10 @@ pub struct DevicesState {
     /// The host candidates the open computed — one per 1:1 conversation
     /// (`fauna_client_conversations::custody_mint_candidates`).
     pub custody_mint_candidates: Vec<fauna_client_conversations::CustodyMintCandidate>,
+    /// Whether [`Self::custody_mint_candidates`] has been read from the
+    /// conversations this visit — `false` keeps `custody-mint-button` not
+    /// enabled (rule 5: unknown is not possible).
+    pub custody_mint_candidates_read: bool,
     /// The chosen candidate index; `None` keeps the confirm disabled.
     pub custody_mint_selected: Option<usize>,
     /// The host's PINNED nest actor identity for the home connection, or
@@ -116,6 +120,41 @@ pub struct DevicesState {
     /// (`DevicesMachine::device_name`). One editor at a time; cleared by
     /// cancel, by the confirm's dispatch, and on a fresh visit.
     pub(super) rename: Option<RenameDraft>,
+}
+
+/// `custody-mint-button`'s answer: the shared
+/// `custody_mint_possibility` over the candidates this visit read.
+pub(super) fn custody_mint_answer(state: &DevicesState) -> fauna_core::possibility::Possibility {
+    fauna_client_conversations::custody_mint_possibility(
+        state
+            .custody_mint_candidates_read
+            .then_some(state.custody_mint_candidates.as_slice()),
+    )
+}
+
+/// The rename save's answer for `draft`: the shared
+/// `DevicesMachine::rename_possibility`, or not yet loaded with no machine.
+pub(super) fn rename_answer(
+    state: &DevicesState,
+    draft: &RenameDraft,
+) -> fauna_core::possibility::Possibility {
+    state.machine.as_ref().map_or(
+        fauna_core::possibility::Possibility::from_read(
+            fauna_core::possibility::ReadState::Pending,
+        ),
+        |m| m.rename_possibility(&draft.device_id, &draft.text),
+    )
+}
+
+/// Whether `device-rename-button` is painted on the card of `device_id`: the
+/// shared `rename_possibility` over the row's unchanged name, which is Absent
+/// only for a row no rename can ever reach (no longer listed, or the nest's
+/// WebDAV pseudo-device). No machine yet → painted, as before.
+pub(super) fn rename_offered(state: &DevicesState, device_id: &str) -> bool {
+    state.machine.as_ref().is_none_or(|m| {
+        let name = m.device_name(device_id.to_owned()).unwrap_or_default();
+        m.rename_possibility(device_id, &name) != fauna_core::possibility::Possibility::Absent
+    })
 }
 
 /// The rename editor's view state — see [`DevicesState::rename`].
@@ -511,23 +550,43 @@ pub(super) fn devices_elements(state: &DevicesState) -> Vec<Element> {
         // label, actionable — decided by the same own-row rule its gesture
         // takes its arm by, so the app never re-derives which row is its own.
         let paint = device.participation_paint();
-        els.push(
-            Element::checkbox_gesture(
-                ids::DEVICE_P2P_PARTICIPATION_TOGGLE,
-                paint.label.resolve(fauna_i18n::strings::lookup),
-                paint.checked,
-                Gesture::Settings(Action::SetP2pParticipation {
-                    index: i as u32,
-                    on: !paint.checked,
-                }),
-            )
-            .enabled(paint.actionable)
-            .within(ids::DEVICE_CARD, i),
-        );
+        let answer = paint.possibility();
+        let reason = answer
+            .reason()
+            .map(|r| r.resolve(fauna_i18n::strings::lookup))
+            .filter(|r| *r != paint.label.resolve(fauna_i18n::strings::lookup));
+        // The shared answer decides (`P2pParticipationPaint::possibility`):
+        // enabled from it, declared for the seam, and a reason the switch's
+        // own text does not already say painted as its label.
+        let mut toggle = Element::checkbox_gesture(
+            ids::DEVICE_P2P_PARTICIPATION_TOGGLE,
+            paint.label.resolve(fauna_i18n::strings::lookup),
+            paint.checked,
+            Gesture::Settings(Action::SetP2pParticipation {
+                index: i as u32,
+                on: !paint.checked,
+            }),
+        )
+        .enabled(answer.is_possible());
+        if let Some(reason) = reason {
+            toggle = toggle.labelled(reason);
+        }
+        els.push(toggle.possible(answer).within(ids::DEVICE_CARD, i));
         // The rename affordance (`ui/devices.md` § Device names): the editor
         // over THIS card when it is the one open, else the card's button.
         match state.rename.as_ref() {
             Some(draft) if draft.device_id == device.device_id => {
+                // The save's draft answer: blocked with the field's reason on
+                // a blank or reserved name or with no owner key, never
+                // refused only after the click.
+                let answer = rename_answer(state, draft);
+                // The page desensitizes the save itself, so the seam leaves
+                // its label alone: the blocked reason is painted here, on the
+                // save's own line, within eyeshot (`ui/README.md` § Offer
+                // only what is possible, rule 2).
+                let reason = answer
+                    .reason()
+                    .map(|r| r.resolve(fauna_i18n::strings::lookup));
                 els.push(
                     Element::input_commit(
                         ids::DEVICE_RENAME_INPUT,
@@ -538,15 +597,16 @@ pub(super) fn devices_elements(state: &DevicesState) -> Vec<Element> {
                     .labelled(t::RENAME_LABEL)
                     .within(ids::DEVICE_CARD, i),
                 );
-                els.push(
-                    Element::gesture_button(
-                        ids::DEVICE_RENAME_CONFIRM_BUTTON,
-                        t::RENAME_CONFIRM,
-                        true,
-                        Gesture::Settings(Action::ConfirmRenameDevice),
-                    )
-                    .within(ids::DEVICE_CARD, i),
+                let mut confirm = Element::gesture_button(
+                    ids::DEVICE_RENAME_CONFIRM_BUTTON,
+                    t::RENAME_CONFIRM,
+                    answer.is_possible(),
+                    Gesture::Settings(Action::ConfirmRenameDevice),
                 );
+                if let Some(reason) = reason {
+                    confirm = confirm.labelled(reason);
+                }
+                els.push(confirm.possible(answer).within(ids::DEVICE_CARD, i));
                 els.push(
                     Element::gesture_button(
                         ids::DEVICE_RENAME_CANCEL_BUTTON,
@@ -557,6 +617,11 @@ pub(super) fn devices_elements(state: &DevicesState) -> Vec<Element> {
                     .within(ids::DEVICE_CARD, i),
                 );
             }
+            // A row the user can never rename here — the nest's WebDAV
+            // pseudo-device — carries no button at all (`ui/README.md` §
+            // Offer only what is possible): the machine answers Absent for
+            // it even over its unchanged name.
+            _ if !rename_offered(state, &device.device_id) => {}
             _ => els.push(
                 Element::gesture_button(
                     ids::DEVICE_RENAME_BUTTON,
@@ -933,12 +998,21 @@ fn custody_elements(state: &DevicesState, els: &mut Vec<Element>) {
     // window over an EXISTING 1:1 conversation, so the host picker's options
     // are the 1:1 conversations. The REQUIRED floor copy renders before the
     // confirm (nests.md § Trust facet — custody rows).
-    els.push(Element::gesture_button(
+    // Gated at the entry (rule 4): with no 1:1 conversation the button is
+    // blocked with the step that unblocks it, never refused on click.
+    // Disabled from the answer, so its reason rides the button's own label
+    // (the seam paints only for an element left enabled; walk invariant I8).
+    let mint = custody_mint_answer(state);
+    let mut mint_button = Element::gesture_button(
         ids::CUSTODY_MINT_BUTTON,
         t::CUSTODY_MINT_BUTTON,
-        true,
+        mint.is_possible(),
         Gesture::Settings(Action::CustodyMintOpen),
-    ));
+    );
+    if let Some(reason) = mint.reason() {
+        mint_button = mint_button.labelled(crate::wizard::localized(reason));
+    }
+    els.push(mint_button.possible(mint));
     if state.custody_mint_open {
         let options: Vec<String> = state
             .custody_mint_candidates
@@ -963,12 +1037,18 @@ fn custody_elements(state: &DevicesState, els: &mut Vec<Element>) {
             ids::CUSTODY_MINT_FLOOR_NOTE,
             t::CUSTODY_MINT_FLOOR,
         ));
-        els.push(Element::gesture_button(
-            ids::CUSTODY_MINT_CONFIRM_BUTTON,
-            t::CUSTODY_MINT_CONFIRM,
+        let confirm = fauna_client_conversations::custody_mint_confirm_possibility(
             state.custody_mint_selected.is_some(),
-            Gesture::Settings(Action::CustodyMintConfirm),
-        ));
+        );
+        els.push(
+            Element::gesture_button(
+                ids::CUSTODY_MINT_CONFIRM_BUTTON,
+                t::CUSTODY_MINT_CONFIRM,
+                confirm.is_possible(),
+                Gesture::Settings(Action::CustodyMintConfirm),
+            )
+            .possible(confirm),
+        );
         els.push(Element::gesture_button(
             ids::CUSTODY_MINT_CANCEL_BUTTON,
             fauna_i18n::strings::common::CANCEL,
@@ -1321,6 +1401,39 @@ mod tests {
     /// order, between the participation toggle and the remove button, scoped
     /// under the card the draft names by id — so a snapshot that re-orders
     /// the roster moves the editor with its device.
+    /// **A blocked save paints its reason on its own line** (`ui/README.md`
+    /// § Offer only what is possible, rule 2): the page desensitizes the
+    /// save itself, which the seam leaves alone, so the reason is the save's
+    /// own label — the line the seam's `reason` attr is read from. With no
+    /// machine yet the answer is the still-loading block.
+    #[test]
+    fn a_blocked_rename_save_carries_its_reason_as_its_label() {
+        let state = DevicesState {
+            snapshot: Some(snapshot(vec![device("d1", "laptop", true, false)])),
+            rename: Some(RenameDraft {
+                device_id: "d1".into(),
+                text: "fauna-ios".into(),
+            }),
+            ..Default::default()
+        };
+        let els = devices_elements(&state);
+        let save = els
+            .iter()
+            .find(|e| e.id == "device-rename-confirm-button")
+            .expect("the editor paints its save");
+        assert!(!save.enabled, "no machine: the save is blocked");
+        let expected = fauna_core::possibility::Possibility::from_read(
+            fauna_core::possibility::ReadState::Pending,
+        )
+        .reason()
+        .map(|r| r.resolve(fauna_i18n::strings::lookup));
+        assert!(expected.is_some());
+        assert_eq!(
+            save.label, expected,
+            "the blocked save says why on its line"
+        );
+    }
+
     #[test]
     fn the_rename_editor_opens_over_its_own_card_and_the_others_keep_the_button() {
         let state = DevicesState {

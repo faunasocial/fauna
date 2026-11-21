@@ -437,16 +437,160 @@ def _found_disabled(loc) -> bool:
         return False
 
 
-def _actuate(handler, route: str, req: dict, loc, act) -> None:
-    """Run `act`; answer 200, or the named disabled refusal when Playwright's
-    actionability wait gave up on a control the UI has disabled."""
+# Convention 11's STRUCTURAL refusal, web's half (`e2e-conventions.md` §
+# Implementation status today: tui, linux and apple refuse a gesture on an
+# element that carries none; windows' FlaUI bridge answers 409 "not actuable").
+# Playwright clicks whatever it is pointed at, so a click on an inert `<span>`
+# (a plain member's `thread-member-chip`) used to answer 200 having done
+# nothing — a silently acked command. The click and double-click routes now
+# read, at the moment Playwright's own actionability wait passes (a `trial`
+# gesture), whether the pointer would land on anything that can take it, and
+# answer 409 "not actuable" when it would not.
+#
+# Like windows' gate, the predicate must never refuse a LIVE element, so it is
+# deliberately wide: an element is actuable when it, or any ancestor of it, or
+# the element the pointer actually hits at the target's centre (a wrapper id
+# around a button) or any ancestor of THAT, is a native control, an editable
+# region, an interactive ARIA role, an explicit tab stop, or carries a pointer
+# handler — Svelte 5's delegated `__<event>` properties, a DOM0 `on<event>`
+# property, or any handler a framework hangs on the element itself under a key
+# of its own (how the SPA's current Svelte build attaches every `onclick=`). The one pointer
+# handler the SPA attaches with `addEventListener` (the notes editor's
+# checkbox widget, `notes-editor-cm.ts`) sits on a `<button>`, which the
+# native-control arm already covers; a new `addEventListener` pointer handler
+# on a bare element would need its element to carry a role or tab stop, as
+# accessibility asks of it anyway.
+_INERT_GESTURE_JS = r"""
+el => {
+  const NATIVE = new Set(['BUTTON', 'SELECT', 'TEXTAREA', 'SUMMARY', 'LABEL', 'OPTION']);
+  const ROLES = new Set([
+    'button', 'link', 'checkbox', 'radio', 'switch', 'tab', 'menuitem',
+    'menuitemcheckbox', 'menuitemradio', 'option', 'treeitem', 'gridcell', 'row',
+    'columnheader', 'rowheader', 'slider', 'spinbutton', 'combobox', 'textbox',
+    'searchbox', 'scrollbar',
+  ]);
+  const HANDLERS = [
+    'click', 'dblclick', 'mousedown', 'mouseup', 'pointerdown', 'pointerup',
+    'touchstart', 'touchend', 'contextmenu',
+  ];
+  const live = (n) => {
+    const tag = n.tagName;
+    if (NATIVE.has(tag)) return true;
+    if (tag === 'INPUT') return (n.getAttribute('type') || '').toLowerCase() !== 'hidden';
+    if ((tag === 'A' || tag === 'AREA') && n.hasAttribute('href')) return true;
+    if ((tag === 'VIDEO' || tag === 'AUDIO') && n.hasAttribute('controls')) return true;
+    if (n.isContentEditable) return true;
+    const role = (n.getAttribute('role') || '').trim().toLowerCase();
+    if (role && role.split(/\s+/).some((r) => ROLES.has(r))) return true;
+    if (n.hasAttribute('tabindex') && n.tabIndex >= 0) return true;
+    for (const ev of HANDLERS) {
+      // Svelte 5 stores a delegated handler as the function or, for a hoisted
+      // handler with arguments, as `[fn, ...args]`; `onclick={undefined}`
+      // leaves it undefined — so any non-null value is a live handler.
+      if (n['__' + ev] != null) return true;
+      if (typeof n['on' + ev] === 'function') return true;
+    }
+    return ownHandler(n);
+  };
+  // Where a framework keeps a delegated handler is its own business, and it
+  // moves between releases (the SPA's Svelte 5.57 build keeps `{click: fn}`
+  // under a `Symbol(events)` key and none at `__click`, so a live
+  // `<tr onclick>` read as inert). A DOM element carries
+  // no own properties of its own — every IDL attribute lives on its
+  // prototype — so whatever a framework hangs on the element itself is
+  // read here, under any key, string or symbol: a function, a hoisted
+  // `[fn, ...args]`, or an object holding one under a pointer event's name
+  // (Svelte's own `Symbol(attributes)` / `Symbol(class)` bookkeeping holds
+  // none, so it never reads as a handler). The limit: Svelte hangs a
+  // dispatching wrapper there for `onclick={cond ? fn : undefined}` whatever
+  // `cond` says, and that wrapper reads as live — so the SPA renders an
+  // inert element with no handler, never an undefined one (measured
+  // 2026-11-19 on a plain member's `thread-member-chip`).
+  const handlerLike = (v) =>
+    typeof v === 'function' || (Array.isArray(v) && typeof v[0] === 'function');
+  const ownHandler = (n) => {
+    for (const key of Reflect.ownKeys(n)) {
+      let v;
+      try { v = n[key]; } catch (_) { continue; }
+      if (handlerLike(v)) return true;
+      if (v && typeof v === 'object' && !(v instanceof Node)) {
+        for (const ev of HANDLERS) {
+          let h;
+          try { h = v[ev]; } catch (_) { continue; }
+          if (handlerLike(h)) return true;
+        }
+      }
+    }
+    return false;
+  };
+  const parentOf = (n) => {
+    if (n.parentElement) return n.parentElement;
+    const root = n.getRootNode();
+    return root && root.host ? root.host : null;
+  };
+  const chainLive = (start) => {
+    for (let n = start; n && n.nodeType === 1; n = parentOf(n)) {
+      if (live(n)) return true;
+    }
+    return false;
+  };
+  if (chainLive(el)) return false;
+  const r = el.getBoundingClientRect();
+  const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+  if (hit && chainLive(hit)) return false;
+  return true;
+}
+"""
+
+
+def _inert_gesture_refusal(route: str, element_id: str, index: int) -> dict:
+    """The structural refusal: 409, never 404 — the element WAS found; it
+    carries no gesture. The phrase "not actuable" is the one tui, apple and
+    windows answer, so `helpers/inert_refusal.py` classifies web with them."""
+    return {
+        "error": (
+            f"{route}: {element_id}[{index}] is not actuable — nothing there takes "
+            "a pointer gesture (convention 11: an agent never silently acks a "
+            "command it did not carry out)"
+        ),
+        "status": 409,
+        "id": element_id,
+        "index": index,
+    }
+
+
+def _never_attached(loc) -> bool:
+    """Whether `loc` resolves to nothing at all, asked only after an actuation
+    gave up — so an element that exists but could not be driven (obstructed,
+    never stable) still re-raises to the generic 500 path, a real bug."""
     try:
+        return loc.count() == 0
+    except Exception:
+        return False
+
+
+def _actuate(handler, route: str, req: dict, loc, act, trial=None) -> None:
+    """Run `act`; answer 200, or one of the named refusals: the disabled 409
+    when Playwright's actionability wait gave up on a control the UI has
+    disabled; the inert 409 when `trial` (the same gesture with `trial=True` —
+    the actionability wait without the act) passed but the pointer would land
+    on nothing that takes it; 404 "could not find element" when the wait gave
+    up on an element that never attached (the `/element/scroll-into-view`
+    shape; it used to be Playwright's bare 500)."""
+    element_id, index = req["id"], req.get("index", 0)
+    try:
+        if trial is not None:
+            trial()
+            if loc.evaluate(_INERT_GESTURE_JS):
+                handler._respond(409, _inert_gesture_refusal(route, element_id, index))
+                return
         act()
     except PlaywrightTimeoutError:
         if _found_disabled(loc):
-            handler._respond(
-                409, _disabled_actuation_refusal(route, req["id"], req.get("index", 0))
-            )
+            handler._respond(409, _disabled_actuation_refusal(route, element_id, index))
+            return
+        if _never_attached(loc):
+            handler._respond(404, {"error": f"could not find element: {element_id!r}"})
             return
         raise
     handler._respond(200, {})
@@ -548,6 +692,12 @@ _REGISTRY_SNAPSHOT_JS = r"""
   const FORM_TAGS = new Set(['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'OPTION', 'OPTGROUP', 'FIELDSET']);
   const EDITABLE_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT']);
   const ACTUABLE_TAGS = new Set(['BUTTON', 'A']);
+  // An <input> whose type is a control, not a field: it is clicked, never typed
+  // into — the shape tui (a toggle has no text field) and windows (Toggle or
+  // Invoke pattern, no writable Value) publish. Read `editable`, the actuation
+  // sweep would fill it and press Enter instead of clicking it.
+  const CLICKED_INPUT_TYPES = new Set(['checkbox', 'radio', 'button', 'submit', 'reset', 'image']);
+  const clickedInput = (el) => el.tagName === 'INPUT' && CLICKED_INPUT_TYPES.has((el.type || '').toLowerCase());
 
   const visible = Array.from(document.querySelectorAll('[data-testid]')).filter(isVisible);
 
@@ -579,6 +729,43 @@ _REGISTRY_SNAPSHOT_JS = r"""
     return steps.join('/');
   }
 
+  // The same reading `/element/text` makes, so a record's text is what
+  // `get_text(id, index)` would answer: a declared `data-test-text` first, a
+  // field's value (a password as its bullet mask), a checkbox's label, else
+  // the text content.
+  function textOf(el) {
+    if (el.hasAttribute('data-test-text')) return el.getAttribute('data-test-text');
+    const t = el.tagName.toLowerCase();
+    if (t === 'input' && (el.type === 'checkbox' || el.type === 'radio')) {
+      return el.labels && el.labels.length ? (el.labels[0].textContent ?? '').trim() : '';
+    }
+    if (t === 'input' && el.type === 'password') return '•'.repeat((el.value ?? '').length);
+    return (t === 'input' || t === 'textarea' || t === 'select') ? (el.value ?? '') : (el.textContent ?? '');
+  }
+
+  // The automation attributes `/element/attr` reads unprefixed (`state` is
+  // `data-state`), minus the addressing and gating markers, plus the state the
+  // DOM holds natively: a checkbox's `checked`, `aria-selected` as `selected`,
+  // `aria-current` as `current` — what `is_current_choice` and a whole-frame
+  // comparison read on the other apps' records.
+  const NOT_STATE = new Set(['testid', 'test-text', 'offline-gate-declared']);
+  function attrsOf(el) {
+    const out = {};
+    for (const a of Array.from(el.attributes)) {
+      if (!a.name.startsWith('data-')) continue;
+      const name = a.name.slice(5);
+      if (!NOT_STATE.has(name)) out[name] = a.value;
+    }
+    if (el.tagName === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio') && !('checked' in out)) {
+      out.checked = el.checked ? 'true' : 'false';
+    }
+    const sel = el.getAttribute('aria-selected');
+    if (sel !== null && !('selected' in out)) out.selected = sel;
+    const cur = el.getAttribute('aria-current');
+    if (cur !== null && cur !== 'false' && !('current' in out)) out.current = cur;
+    return out;
+  }
+
   return visible.map((el) => {
     const tag = el.tagName;
     const nativeDisabled = FORM_TAGS.has(tag) ? !!el.disabled : false;
@@ -598,12 +785,14 @@ _REGISTRY_SNAPSHOT_JS = r"""
       // make: a plain unwired <button> and a wired-but-currently-enabled one
       // read identically by tag alone.
       declares_enabled: el.getAttribute('data-offline-gate-declared') === 'true',
-      actuable: ACTUABLE_TAGS.has(tag) && (tag !== 'A' || el.hasAttribute('href')),
-      editable: EDITABLE_TAGS.has(tag),
+      actuable: (ACTUABLE_TAGS.has(tag) && (tag !== 'A' || el.hasAttribute('href'))) || clickedInput(el),
+      editable: EDITABLE_TAGS.has(tag) && !clickedInput(el),
       scope: scopeOf(el),
       // Same "x,y,w,h" spelling apple's /registry uses, so one parser (were
       // a caller to want one) serves both.
       frame: Math.round(rect.x) + ',' + Math.round(rect.y) + ',' + Math.round(rect.width) + ',' + Math.round(rect.height),
+      text: textOf(el),
+      attrs: attrsOf(el),
     };
   });
 }
@@ -1272,14 +1461,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 page = self._require_page(req)
                 root = _scoped_root(page, self._parse_scope(req))
                 loc = root.locator(_selector(req["id"])).nth(req.get("index", 0))
-                _actuate(self, "click", req, loc, loc.click)
+                _actuate(self, "click", req, loc, loc.click,
+                         trial=lambda: loc.click(trial=True))
 
             elif route == "/element/double_click":
                 req = self._read_json()
                 page = self._require_page(req)
                 root = _scoped_root(page, self._parse_scope(req))
                 loc = root.locator(_selector(req["id"])).nth(req.get("index", 0))
-                _actuate(self, "double-click", req, loc, loc.dblclick)
+                _actuate(self, "double-click", req, loc, loc.dblclick,
+                         trial=lambda: loc.dblclick(trial=True))
 
             elif route == "/element/type":
                 req = self._read_json()
@@ -1362,6 +1553,44 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 page = self._require_page(req)
                 page.keyboard.press(req["key"])
                 self._respond(200, {})
+
+            elif route == "/element/select-text":
+                # Select the element's text the way a person does — a real mouse
+                # drag from just inside its left edge to just inside its right
+                # edge — and answer what the page's selection holds afterwards
+                # (`drivers/base.py::is_text_selectable`; `docs/goal/ui/README.md`
+                # § Text the person reads can be copied). A JS `Range` would
+                # select text a `user-select: none` rule forbids the person to
+                # select, so only the gesture is the witness. The mouse is
+                # released inside the element, so a row whose click acts receives
+                # the click that ends the drag exactly as it would from a person.
+                req = self._read_json()
+                page = self._require_page(req)
+                root = _scoped_root(page, self._parse_scope(req))
+                loc = root.locator(_selector(req["id"])).nth(req.get("index", 0))
+                if loc.count() == 0:
+                    self._respond(404, {"error": f"could not find element: {req['id']!r}"})
+                    return
+                loc.scroll_into_view_if_needed()
+                box = loc.bounding_box()
+                if not box or box["width"] < 4 or box["height"] < 2:
+                    self._respond(200, {"selected": "", "box": box})
+                    return
+                y = box["y"] + box["height"] / 2
+                page.evaluate("() => window.getSelection()?.removeAllRanges()")
+                page.mouse.move(box["x"] + 1, y)
+                page.mouse.down()
+                page.mouse.move(box["x"] + box["width"] - 1, y, steps=8)
+                page.mouse.up()
+                selected = page.evaluate("() => (window.getSelection()?.toString() ?? '')")
+                self._respond(200, {"selected": selected})
+
+            elif route == "/page/selection":
+                # The page's current text selection, as `Selection.toString()`.
+                req = self._read_json()
+                page = self._require_page(req)
+                selected = page.evaluate("() => (window.getSelection()?.toString() ?? '')")
+                self._respond(200, {"selected": selected})
 
             elif route == "/element/download":
                 # Click `id` and capture the browser download it triggers (e.g.

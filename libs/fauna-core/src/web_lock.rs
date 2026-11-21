@@ -1,22 +1,30 @@
 //! The one Web Locks request primitive every web lock in shared Rust rides —
 //! the browser's cross-tab lock manager (`navigator.locks`), reached from the
-//! three legs that take a web lock: the account registry's mutation lock
-//! (`fauna_client_accounts::with_web_mutation_lock`), the account store's two
+//! legs that take a web lock: the account registry's mutation lock
+//! (`fauna_client_accounts::with_web_mutation_lock`) and its serving-presence
+//! lock (`fauna_client_accounts::serving_presence`), the account store's two
 //! roles (`fauna_account_store::locks`, web's leg) and the conversations-engine
 //! role (`fauna_mls::engine_role`, web's leg). Lowest crate all three share,
 //! hence here (`account-runtime.md` § Multi-instance concurrency → *Election
 //! mechanics*: every web lock follows one scheme, `fauna.<owner>.<role>/<key>`).
 //!
-//! Two request shapes, the only two the fleet asks for:
+//! Three request shapes, the only three the fleet asks for:
 //!
-//! - [`WebLockHold::try_take`] — an `ifAvailable` **try**, never a wait: a
-//!   role. Answers [`WebLockAsk::Held`] (an RAII hold, released when dropped or
+//! - [`WebLockHold::try_take`] — an exclusive `ifAvailable` **try**, never a
+//!   wait: a role, or an erase's momentary probe. Answers [`WebLockAsk::Held`] (an RAII hold, released when dropped or
 //!   [`WebLockHold::release`]d, and by the browser when the tab goes away),
 //!   [`WebLockAsk::Refused`] (another holder — another tab, or another hold in
 //!   this one: a Web Lock does **not** re-enter), or [`WebLockAsk::Degraded`]
 //!   (no lock manager in this context, or the browser refused the request).
 //!   What `Degraded` means is the CALLER's: a role that guards
 //!   user-irrecoverable state fails closed on it, a probe degrades open.
+//! - [`WebLockHold::take_shared`] — a **shared** hold that **queues**: a
+//!   presence declaration (`fauna_client_accounts`' serving-presence lock,
+//!   `apps/account-scoping.md` § Concurrent instances → *Web's serving-presence
+//!   lock*). Any number of shared holds coexist; it waits only behind an
+//!   exclusive holder (a probe, held for one round trip). Answers the hold, or
+//!   the reason it could not be asked for (no lock manager, a refused request)
+//!   — never a refusal by another holder, since a queued request is not refused.
 //! - [`with_exclusive`] — an exclusive section that **queues** behind a holder
 //!   and holds for exactly one synchronous closure; degrades open (the section
 //!   runs unguarded where no lock manager answers).
@@ -64,8 +72,37 @@ impl std::fmt::Debug for WebLockHold {
 }
 
 impl WebLockHold {
-    /// Ask for the lock named `name`, never waiting on a holder.
+    /// Ask for the lock named `name` exclusively, never waiting on a holder.
     pub async fn try_take(name: &str) -> WebLockAsk {
+        let options = Object::new();
+        let _ = Reflect::set(&options, &JsValue::from_str("ifAvailable"), &JsValue::TRUE);
+        Self::request(name, options).await
+    }
+
+    /// Take the lock named `name` in **shared** mode, queueing behind an
+    /// exclusive holder until it lets go (module docs). Never `Refused`: the
+    /// error is the [`WebLockAsk::Degraded`] reason.
+    pub async fn take_shared(name: &str) -> Result<WebLockHold, std::io::Error> {
+        let options = Object::new();
+        let _ = Reflect::set(
+            &options,
+            &JsValue::from_str("mode"),
+            &JsValue::from_str("shared"),
+        );
+        match Self::request(name, options).await {
+            WebLockAsk::Held(hold) => Ok(hold),
+            WebLockAsk::Refused => Err(std::io::Error::other(
+                "the lock manager granted a queued shared request no lock",
+            )),
+            WebLockAsk::Degraded(e) => Err(e),
+        }
+    }
+
+    /// `navigator.locks.request(name, options, callback)`, held until the hold
+    /// is released: granted (the callback got a lock), refused (an
+    /// `ifAvailable` request met a holder — the callback got `null`), or
+    /// degraded.
+    async fn request(name: &str, options: Object) -> WebLockAsk {
         let Some((locks, request)) = lock_request() else {
             return WebLockAsk::Degraded(std::io::Error::other(
                 "the Web Locks API is unavailable in this context",
@@ -94,8 +131,6 @@ impl WebLockHold {
             }
         });
 
-        let options = Object::new();
-        let _ = Reflect::set(&options, &JsValue::from_str("ifAvailable"), &JsValue::TRUE);
         let requested = match request.call3(
             &locks,
             &JsValue::from_str(name),

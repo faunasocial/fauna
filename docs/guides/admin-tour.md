@@ -1,6 +1,6 @@
 # A tour of the admin area
 
-> **What this covers:** every screen in the Admin area — the pages that appear in the app when your account is the nest's admin. Like the rest of Fauna, it is built to be the same on every app — web, Linux, macOS, iOS, Android, Windows and the terminal app — and a section missing on yours is still on its way there.
+> **What this covers:** every screen in the Admin area — the pages that appear in the app when your account is the nest's admin. Like the rest of Fauna, it is built to be the same on every app — web, Linux, macOS, iOS, Android, Windows and the terminal app — though a few sections are on some apps only.
 >
 > **Who it's for.** Nest admins. This is the map of the controls; the
 > *judgment* — admission policy, moderation, capacity, kids — is
@@ -36,7 +36,7 @@ about to change. Six sections:
 
 - **Pending requests** — people who asked to join from the app's signup flow.
   Each row is approved (choosing a tier as part of the approval) or denied.
-- **Registration** — whether people can sign themselves up at all. Under **Who may create an account**, choose **Nobody — only I can admit people** (nobody signs up on their own, not even with a code — you let people in yourself; this is how a new nest starts), **Only people with an invite code** (they can sign up, but only with a code you minted), or **Anyone** (anyone can sign up). Someone whose phone reports them as a minor can't join on their own — with an ordinary code, or under **Anyone** with none: give them a code you made with their **Guardian** picked, or approve their join request with the **Guardian** picked. You can also set **Limit free accounts**, whichever setting you pick — leave it blank for no limit: once the nest holds that many free accounts, nobody more can join on their own at the free tier, and people you admit yourself are never refused by it. The same section has a switch, **Accept only signups carrying app age verification** — off unless you turn it on, and saved with the rest of the section. Only the phone apps could carry such a verification (web and desktop sign-ups never do), and no app can verify an age yet — so while the switch is on, nobody can sign up on their own, with or without a code; you can still approve requests and admit people yourself. Leave it off. Save applies immediately; nobody has to
+- **Registration** — whether people can sign themselves up at all. Under **Who may create an account**, choose **Nobody — only I can admit people** (nobody signs up on their own, not even with a code — you let people in yourself; this is how a new nest starts), **Only people with an invite code** (they can sign up, but only with a code you minted), or **Anyone** (anyone can sign up). Someone whose phone reports them as a minor can't join on their own — with an ordinary code, or under **Anyone** with none: give them a code you made with their **Guardian** picked, or approve their join request with the **Guardian** picked. You can also set **Limit free accounts**, whichever setting you pick — leave it blank for no limit: once the nest holds that many free accounts, nobody more can join on their own at the free tier, and people you admit yourself are never refused by it. The same section has a switch, **Accept only signups carrying app age verification** — off unless you turn it on, and saved with the rest of the section. Only the phone apps could carry such a verification (web and desktop sign-ups never do), and no app can verify an age today — so while the switch is on, nobody can sign up on their own, with or without a code; you can still approve requests and admit people yourself. Leave it off. Save applies immediately; nobody has to
   restart anything.
 
   Closing registration never affects the people already on your nest, and it never blocks *you* — approving a request or minting a code works in every setting, though a code you mint can't be used to sign up until you choose a setting other than **Nobody — only I can admit people**. And **Anyone** only means people may *sign up*; it never lets someone use your nest without an account.
@@ -70,7 +70,9 @@ about to change. Six sections:
   can no longer be restored. Each row also
   offers **Make Admin** (until their deletion starts) or, on an admin's row,
   **Remove Admin**, the way you give a trusted member the keys to the nest
-  alongside you, or take them back. A supervised
+  alongside you, or take them back. On the nest's last admin with full rights,
+  **Remove Admin** is shown but can't be used, and it says why: make another
+  user an admin first. A supervised
   member's row also names their guardian. If you need to look after that
   account yourself — say the guardian is leaving the nest — choose
   **Take over**, then **Confirm take-over**: you become the guardian at once, any
@@ -121,9 +123,20 @@ clearing the link leaves your subscription tier untouched. If you have no
 subscription tiers yet, create one first from your own profile's Tiers tab.
 
 Once a tier is linked, someone can redeem one of the tier's claim codes
-(minted the same way as any other subscription's — by a payment provider or in **Manual Claim Codes**, on your profile's Tiers tab; see the [app tour](app-tour.md#profile)) either from their own Settings → Subscriptions page if they already have an account, or by entering it in the invite-code field during sign-up if they don't, which works once **Registration** on [Users](#users) is set to anything other than **Nobody — only I can admit people** and the age-verification switch there is off — either way their quota tier is set right away. What's still
-missing: there's no page yet that shows a prospective member your membership
-offering before they sign up — hand them the code directly for now.
+(minted the same way as any other subscription's — by a payment provider or in **Manual Claim Codes**, on your profile's Tiers tab; see the [app tour](app-tour.md#profile)). Where they redeem it depends on where their account lives:
+
+- An account on your nest redeems it on their own Settings → Subscriptions
+  page, or under **Redeem a claim code** on your profile's Tiers tab.
+- Someone without an account enters it in the invite-code field during
+  sign-up, which works once **Registration** on [Users](#users) is set to
+  anything other than **Nobody — only I can admit people** and the
+  age-verification switch there is off.
+- An account on another nest cannot redeem it, because a membership is an
+  account on your nest: if they enter it under **Redeem a claim code** on your
+  profile's Tiers tab, their app tells them to use the code as their invite
+  code when they join your nest, and the code stays unused.
+
+In the first two cases their quota tier is set right away. No page shows a prospective member your membership offering before they sign up: hand them the code directly.
 
 ## Nest
 
@@ -137,8 +150,7 @@ Nest-wide settings that belong to no single feature:
   next time the nest restarts. Reaching the internet means a few things become
   publicly visible — for exactly what, and what stays private, see
   [Who can see what](who-can-see-what.md).
-- **Web app** — what people get when they open the app at this nest's own address: the app this nest ships (the default), or a redirect to the Fauna project's own address for the app, `https://app.fauna.social` — once it is live, that address serves the app's code and holds nothing of yours — with this nest already filled in on the sign-in page. The status line shows exactly where people are sent. It changes only what your nest's address answers: anyone who opens `https://app.fauna.social` directly, once it is live, loads the app from there either way, and an address someone types or bookmarks always wins. A nest without a domain yet has nothing to fill in, so it keeps serving its own app whatever you choose. Leave it on the default until that address is live (see [Installing](install.md)).
-- **Updates** — which builds this nest installs on its own: **Stable** (released versions — what a nest set up by hand from Fauna's container image follows; the setup wizard, where it can check, starts on the first channel with a build your app can work with), **Test** (numbered releases being accepted by users before they become Stable) or **Dev** (the newest development builds). The **Dev** channel's development builds are published, a numbered release is published on the **Test** channel, and released versions are published on the **Stable** channel (see [Installing](install.md)). The setup wizard asks this when it builds a nest for you; this is where you change the answer later. The status line shows the version the nest runs and when new builds are picked up — within the hour on Stable, within about a minute on Test and Dev. A nest never moves to an older version: switch to a channel that is behind the version it runs — Stable, say, after trying Test — and it stays where it is until that channel catches up, and the status line says so with both versions. A nest installed with the Windows or Mac installer, or directly on a Linux machine, was not installed from Fauna's container image: it follows no update channel, so the section's choices are unavailable and its status line gives the version it runs, and you update it the same way you installed it. The channels are described in full in [Set up a nest from the app](nest-app-setup.md).
+- **Updates** — which builds this nest installs on its own: **Stable** (released versions — what a nest set up by hand from Fauna's container image follows; the setup wizard, where it can check, starts on the first channel with a build your app can work with), **Test** (numbered releases being accepted by users before they become Stable) or **Dev** (the newest development builds). The **Dev** channel's development builds are published, a numbered release is published on the **Test** channel, and released versions are published on the **Stable** channel (see [Installing](install.md)). The setup wizard asks this when it builds a nest for you; this is where you change the answer later. The status line shows the version the nest runs and when new builds are picked up — within the hour on Stable, within about a minute on Test and Dev. A nest never moves to an older version: switch to a channel that is behind the version it runs — Stable, say, after trying Test — and it stays where it is until that channel catches up, and the status line says so with both versions. A nest installed with the Windows installer, or directly on a Linux machine, was not installed from Fauna's container image: it follows no update channel, so the section's choices are unavailable and its status line gives the version it runs, and you update it the same way you installed it. The channels are described in full in [Set up a nest from the app](nest-app-setup.md).
 - **Pairing** — the master switch for whether members may link this nest from
   their other nests.
 - **Serving port** — the port the nest serves apps on, for networks where
@@ -258,7 +270,7 @@ Nest-wide settings that belong to no single feature:
 
   These are the only sign-in keys to replace: the Bluesky bridge's card no
   longer has a key of its own (see [Bridges](#bridges)).
-- **Legal takedown** — one of the two ways an admin can withhold a single item by hand, and the one for legal compulsion: a court order, a statutory demand, genuinely illegal material. The other is blocking an item someone reported (see **Reports**, below). Neither deletes anything on your nest. Fauna gives a nest's admin no "remove this post for everyone because I disagree with it" lever: what people see is otherwise each person's own filter. Exactly three parties can block a single post or message for others: a guardian, for a child's account, through rules the child's device applies; you, the nest's admin — by hand only under a legal obligation or on a user's report, and through the rules you publish for your nest (see **Nest rules**, below); and, once built, a region's authority, through rules it publishes for its region (see **Region**, above). Inside a group, its owner and admins can also delete a member's message for everyone in it, and the deletion shows in its place; that is the group's own governance, which its members joined. Every block is visible and names its rule or reason; a block by hand also leaves a permanent record and an appeal. This console is the narrow exception the law can force, built so it can never quietly become anything more.
+- **Legal takedown** — one of the two ways an admin can withhold a single item by hand, and the one for legal compulsion: a court order, a statutory demand, genuinely illegal material. The other is blocking an item someone reported (see **Reports**, below). Neither deletes anything on your nest. Fauna gives a nest's admin no "remove this post for everyone because I disagree with it" lever: what people see is otherwise each person's own filter. Exactly three parties can block a single post or message for others: a guardian, for a child's account, through rules the child's device applies; you, the nest's admin — by hand only under a legal obligation or on a user's report, and through the rules you publish for your nest (see **Nest rules**, below); and a region's authority, through rules it publishes for its region — no region has one today (see **Region**, above). Inside a group, its owner and admins can also delete a member's message for everyone in it, and the deletion shows in its place; that is the group's own governance, which its members joined. Every block is visible and names its rule or reason; a block by hand also leaves a permanent record and an appeal. This console is the narrow exception the law can force, built so it can never quietly become anything more.
 
   You enter the identifier of the item named by the legal obligation and the
   legal reference you are acting under — the reference is mandatory, and the
@@ -269,7 +281,8 @@ Nest-wide settings that belong to no single feature:
   Nothing about a takedown is silent. Readers see a notice, with the reference,
   in place of the removed content — never a blank space. The author sees the
   action, labeled as removed under legal obligation, in their own moderation
-  queue. And a permanent audit record keeps who did it, what, and under what
+  queue, and can appeal it from there, as they can a block (see **Reports**,
+  below). And a permanent audit record keeps who did it, what, and under what
   reference.
 
   A takedown also reaches the places a post can be read without opening it: if
@@ -295,7 +308,7 @@ Blocked items are listed below the queue, under **Blocked items**, each with its
   setting it up — even in the moment right after you confirm — just reopen it:
   it remembers the code and picks the setup back up where it left off. You never
   need to reach the machine itself to recover.
-- **Nest rules** — rules you publish for everyone on this nest, which each member's own app applies to what reaches them through it. **Add rule** starts one. Pick its **Kind** — a **Category** of content (NSFW, spam, phishing or commercial), **Keywords** (separate them with commas), or a **Labeler**, either one you subscribe to or one these rules already include (the list also offers **Prompt**, a rule for an on-device language model; no app can apply one yet, so a prompt rule has no effect today) — and its **Verdict**: **Block**, or **Hide behind a warning**. The apps themselves detect spam and phishing; a rule on NSFW or commercial content is saved and applies as soon as a post or message is labelled that way. A category, labeler or prompt rule also has a **Level**, how sure a label must be before the rule acts, from **Very strict** to **Very lenient**; a keyword rule has none, since a keyword either appears or it doesn't. Every rule needs a **Reason shown to the member**, in your own words. **Save rules** publishes them and says which version is now in force; while a rule is incomplete the button stays unavailable, and the editor names the first rule that still needs something. A nest without a domain yet can't publish rules: the save is refused, and the editor says why. **Remove** takes a rule out; save again to publish the change.
+- **Nest rules** — rules you publish for everyone on this nest, which each member's own app applies to what reaches them through it. **Add rule** starts one. Pick its **Kind** — a **Category** of content (NSFW, spam, phishing or commercial), **Keywords** (separate them with commas), or a **Labeler**, either one you subscribe to or one these rules already include (the list also offers **Prompt**, a rule for an on-device language model; no app applies one, so a prompt rule has no effect today) — and its **Verdict**: **Block**, or **Hide behind a warning**. The apps themselves detect spam and phishing; a rule on NSFW or commercial content is saved and applies as soon as a post or message is labelled that way. A category, labeler or prompt rule also has a **Level**, how sure a label must be before the rule acts, from **Very strict** to **Very lenient**; a keyword rule has none, since a keyword either appears or it doesn't. Every rule needs a **Reason shown to the member**, in your own words. **Save rules** publishes them and says which version is now in force; while a rule is incomplete the button stays unavailable, and the editor names the first rule that still needs something. A nest without a domain yet can't publish rules: the save is refused, and the editor says why. **Remove** takes a rule out; save again to publish the change.
 
 A nest's rules are filters, not decisions about individual items. You never see what a rule blocks: for what reaches your members, the rules run on each member's own device, not on the nest. A rule never singles out an item; you remove or block a single item only by hand, under a legal obligation or on a report (above). Nothing a rule does is silent: a member sees a notice in a blocked post's or message's place naming your nest, with your reason beside it, and a hidden one sits behind a **Show** button. A nest's rules add to each member's own filters and never loosen them. Someone joining your nest sees your rules listed before they continue, and continuing accepts them. When you change rules you have already published, members see a one-line notice that leads them to the rules now in force; the first rules you publish come with no notice. The public web pages your nest publishes from people's public posts follow the same rules, with the same notice in a blocked post's place.
 - **Retire this server** — sits right beside the reset, and is its opposite: a
@@ -304,21 +317,27 @@ A nest's rules are filters, not decisions about individual items. You never see 
 
 ## Mail
 
-The mail *policy* page — the admin half of [Own your email](own-your-mail.md). The headline control is the **mail on/off toggle** (plus whether new members get mail enabled automatically). On a server created without email (the social-only choice in the [setup guide](nest-app-setup.md), or a server set up by hand with its mail parts left out ([Set up a nest on the internet](nest-internet-setup.md))), the toggle stays off and the page says mail can't be turned on there unless the server is set up again with email. Everything else is grouped policy, each group with its own save button, and the defaults are sensible enough that most admins never scroll past the toggle.
+The mail *policy* page — the admin half of [Own your email](own-your-mail.md). The headline control is the **mail on/off toggle** (plus whether new members get mail enabled automatically). On a server created without email (the social-only choice in the [setup guide](nest-app-setup.md), or a server set up by hand with its mail parts left out ([Set up a nest on the internet](nest-internet-setup.md))), the toggle stays off and the page says why: the server was set up without the virus scanner and spam filter that mail needs, so mail can't be turned on there unless the server is set up again with email. Everything else is grouped policy, each group with its own save button, and the defaults are sensible enough that most admins never scroll past the toggle.
 
 Right under the toggle, **Mail health** tells you whether mail is actually
 working. Its first line is the verdict — delivering, warming up, outgoing mail
-delayed, DNS records needing attention, the server address blocklisted, the
-mail service not connected, or simply off — followed by when mail was last
-delivered and last received. A quiet box is not a broken one: those two times
+delayed, outgoing mail unable to leave the server, DNS records needing
+attention, the server address blocklisted, the mail service not connected, or
+simply off — followed by when mail was last delivered and last received. A quiet box is not a broken one: those two times
 are there for you to read, never a reason for the verdict to turn red. Seven
 rows underneath show what the verdict rests on: the mail service connection,
 the blocklist check, the outgoing queue, your DNS and authentication records,
-the sending warm-up, and the two last-delivered/last-received times. Two
-buttons sit below them:
+the sending warm-up, and the two last-delivered/last-received times. If
+outgoing mail cannot leave the server because the server cannot connect to
+other mail servers at all, the outgoing queue row says so, even before any
+message is delayed: most cloud providers block outgoing mail by default, so ask
+yours to lift the block, then press **Check again** to confirm. Two buttons sit
+below them:
 
-- **Check again** runs a fresh blocklist check and records check now, instead
-  of waiting for the daily one, and updates the rows.
+- **Check again** runs the blocklist check and the deliverability checks — your
+  DNS and authentication records, and whether the server can connect to other
+  mail servers — now, instead of waiting for the daily run, and updates the
+  rows.
 - **Restart warm-up** starts the gentle sending ramp over at day 1 — do this
   only after your server's outgoing address changed, since a new address has no
   reputation yet. The first press only asks you to confirm; press again to
@@ -505,8 +524,10 @@ question that brings you here.
 Anyone with an account can set one of these up, and each one makes your nest
 reach out to an address they chose, on a schedule. Your nest already refuses
 the obviously bad cases on its own — there is a ceiling on how much any one
-arrangement may hold, a limit on how many any one person may have, and the
-space counts against that person's own storage allowance. This page is for
+arrangement may hold, a limit on how many any one person may have, and, on a
+nest run from the container image, what one person holds for others is capped
+at their own storage allowance. A nest the Windows installer set up doesn't apply
+per-person storage allowances, so there only the first two limits apply. This page is for
 the cases a limit doesn't cover: something you don't recognise, or someone
 using their whole allowance on it when you'd rather they didn't.
 

@@ -28,12 +28,19 @@ import com.fauna.app.R
 import com.fauna.app.core.ContactAskRender
 import com.fauna.app.ui.components.GuardianAskPair
 import com.fauna.app.ui.navigation.LocalAppMessages
+import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.viewmodel.ContactOverlaysVM
 import com.fauna.app.ui.viewmodel.ConversationsVM
 import com.fauna.app.ui.viewmodel.ProfilePrivateVM
 import com.fauna.app.ui.viewmodel.ProfileVM
 import social.fauna.generated.Ids
+import uniffi.fauna_core.Possibility
+import com.fauna.app.ui.controls.FilterChip
+import com.fauna.app.ui.controls.OutlinedButton
 
 /** Which Profile tab is showing. Posts is the default (`profile.md` § Layout & flow →
  *  *The Posts tab*). */
@@ -97,6 +104,7 @@ fun ProfileScreen(
     val privateForm by privateVm.form.collectAsState()
     val privateSaving by privateVm.saving.collectAsState()
     val privateError by privateVm.error.collectAsState()
+    val privateSaveAnswer by privateVm.saveAnswer.collectAsState()
     // An untouched section follows a sibling device's edit.
     LaunchedEffect(overlayEpoch) { privateVm.reload() }
     val following by vm.following.collectAsState()
@@ -104,7 +112,8 @@ fun ProfileScreen(
     val unfollowArmed by vm.unfollowArmed.collectAsState()
     val blocked by vm.blocked.collectAsState()
     val blockWorking by vm.blockWorking.collectAsState()
-    val blockKnown by vm.blockKnown.collectAsState()
+    val blockAnswer by vm.blockAnswer.collectAsState()
+    val followAnswer by vm.followAnswer.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
     // The page's actor-home slot — the value the follow carries; the OTHER Tiers
     // tab's rows subscribe (and pay) across nests at it, and its claim redeem
@@ -223,15 +232,21 @@ fun ProfileScreen(
                 // Not in Fauna Kids: following is a subscription (monetization),
                 // excised with the Tiers tab below (family-safety.md § The account
                 // age band, the kids-app bullet, item (4)).
-                OutlinedButton(
-                    onClick = { vm.follow() },
-                    enabled = !followWorking,
-                    modifier = Modifier.testTag(Ids.PROFILE_FOLLOW_BUTTON),
-                ) {
-                    Text(
-                        if (unfollowArmed) stringResource(R.string.profile_unfollow_confirm)
-                        else resolveLocalized(context, com.fauna.ffi.followToggleLabel(following)).orEmpty()
-                    )
+                // It waits on the open-time status read (`ProfileVM.followAnswer`,
+                // `profile.md` § Errors & edge cases → *Unread state is not
+                // possible*), its reason beside it (rule 2).
+                Column(horizontalAlignment = Alignment.End) {
+                    OutlinedButton(
+                        onClick = { vm.follow() },
+                        enabled = followAnswer.isPossible && !followWorking,
+                        modifier = Modifier.testTag(Ids.PROFILE_FOLLOW_BUTTON),
+                    ) {
+                        Text(
+                            if (unfollowArmed) stringResource(R.string.profile_unfollow_confirm)
+                            else resolveLocalized(context, com.fauna.ffi.followToggleLabel(following)).orEmpty()
+                        )
+                    }
+                    DisabledControlReasonText(localized(followAnswer.blockedReason))
                 }
             }
         }
@@ -241,7 +256,7 @@ fun ProfileScreen(
             ProfileSecondaryActionsRow(
                 blocked = blocked,
                 blockWorking = blockWorking,
-                blockKnown = blockKnown,
+                blockAnswer = blockAnswer,
                 onStartDm = {
                     // Pure nav glue: seed the shared Conversations new-thread
                     // composer with the viewed actor and open it (mirrors the
@@ -283,6 +298,7 @@ fun ProfileScreen(
                 onRemoveLabel = privateVm::removeLabel,
                 onSave = privateVm::save,
                 labelSuggestions = { typed -> privateVm.labelSuggestions(typed, privateForm.labels) },
+                saveAnswer = privateSaveAnswer,
             )
         }
 
@@ -357,9 +373,10 @@ fun ProfileScreen(
 fun ProfileSecondaryActionsRow(
     blocked: Boolean,
     blockWorking: Boolean,
-    // False until the open-time edge read lands: the toggle is disabled meanwhile
-    // (a press on the not-blocked default would re-send `knocks_block`).
-    blockKnown: Boolean = true,
+    // The toggle's answer (`ProfileVM.blockAnswer`): blocked still loading until
+    // the open-time edge read lands (a press on the not-blocked default would
+    // re-send `knocks_block`), its reason painted under the row.
+    blockAnswer: Possibility = Possibility.Possible,
     onStartDm: () -> Unit,
     onToggleBlock: () -> Unit,
     // The Block ⇄ Unblock wording comes from the shared `contact_toggle_block_label`
@@ -393,7 +410,7 @@ fun ProfileSecondaryActionsRow(
 
             OutlinedButton(
                 onClick = onToggleBlock,
-                enabled = blockKnown && !blockWorking,
+                enabled = blockAnswer.isPossible && !blockWorking,
                 modifier = Modifier.testTag(Ids.PROFILE_BLOCK_BUTTON),
             ) {
                 Text(blockLabel(blocked))
@@ -406,6 +423,7 @@ fun ProfileSecondaryActionsRow(
                 ) { Text(stringResource(R.string.profile_report)) }
             }
         }
+        DisabledControlReasonText(localized(blockAnswer.blockedReason))
         // Second line: the knock and, beside it, the ward's ask pair (a phone-width
         // row cannot hold four actions).
         Row(

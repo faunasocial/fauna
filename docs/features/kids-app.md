@@ -17,8 +17,8 @@ absences:
 
 ## What a user gets
 
-Fauna Kids is a planned app for a child whose account a guardian supervises; it
-is not yet available anywhere. It is the Fauna app for Android and iOS with the
+Fauna Kids is an app for a child whose account a guardian supervises; it is not
+available anywhere today. It is the Fauna app for Android and iOS with the
 open parts left out of the build itself: no feed, no searching for people you do
 not know, no bridges to other networks, no publishing to the web, no payments
 and no outside apps. A link in a message opens nothing, pictures from elsewhere

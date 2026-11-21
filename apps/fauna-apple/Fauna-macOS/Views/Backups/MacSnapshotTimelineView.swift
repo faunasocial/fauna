@@ -70,6 +70,9 @@ struct MacSnapshotTimelineView: View {
                 .automationActivate(Ids.snapshotDeleteButton) {
                     pendingDelete = snapshot
                 }
+                // Only an active row soft-deletes (a pending or soft-deleted one
+                // would have the nest schedule a second pending action).
+                .faunaPossible(vm.deletePossibility(id: snapshot.id))
 
                 // Owner-only immediate delete — OPENS the friction-bar modal,
                 // never a one-click delete (backups.md rule 4). Sibling of the
@@ -89,6 +92,8 @@ struct MacSnapshotTimelineView: View {
                 .automationActivate(Ids.snapshotImmediateDeleteButton) {
                     vm.openImmediateDelete(snapshotId: snapshot.id)
                 }
+                // Live in every row state; held only by the single-flight gate.
+                .faunaPossible(vm.immediateDeletePossibility(id: snapshot.id))
 
                 // Undelete — presence IS the state (§ Snapshot-list shape →
                 // *Soft-deleted rows*): renders ONLY on a SoftDeleted row, same
@@ -102,13 +107,12 @@ struct MacSnapshotTimelineView: View {
                     }
                     .buttonStyle(.borderless)
                     .controlSize(.small)
-                    .disabled(vm.busy)
                     .help(L.backups.snapshotUndeleteButton)
                     .accessibilityIdentifier(Ids.snapshotUndeleteButton)
-                    .automationActivate(Ids.snapshotUndeleteButton,
-                                        isEnabled: { !vm.busy }) {
+                    .automationActivate(Ids.snapshotUndeleteButton) {
                         Task { await vm.undeleteSnapshot(id: snapshot.id) }
                     }
+                    .faunaPossible(vm.idlePossibility)
                 }
             }
             .padding(.vertical, 2)

@@ -20,6 +20,8 @@ use fauna_protocol::spam::{SpamGetPreferencesRequest, SpamPreferences, SpamSetPr
 
 pub use fauna_protocol::spam;
 
+pub mod possibility;
+
 /// Typed `fauna.spam.*` call surface. Errors propagate as the transport's
 /// `R::Error` (native `NestClientError`, wasm rpc-wasm error); the namespaced
 /// `RpcError`s the handlers emit (`fauna.spam.invalid_params`,

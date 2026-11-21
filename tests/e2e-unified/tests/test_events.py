@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from helpers.app_surface import require_surface
 from i18n.strings import S
 
 # reclaim_cycle: the events area's representative in the post-reclaim gate — under
@@ -777,47 +778,58 @@ def test_pan_moves_one_visible_range_per_view(logged_in_app):
 
 
 @pytest.mark.feature("calendar-and-events")
-def test_pan_is_inert_in_the_date_unfiltered_agenda(logged_in_app):
-    """Panning in Agenda view does nothing — there is no range to pan.
+def test_pan_pair_is_disabled_with_its_reason_in_the_date_unfiltered_agenda(logged_in_app):
+    """In Agenda view the pan pair is shown, DISABLED, and says why.
 
-    The agenda list is date-unfiltered on every app, so a pan that moved the
-    anchor would mutate state the view cannot show: linux stepped seven days
-    behind a list that ignored the date, and tui advanced the month label above
-    a list that never changed. `caltime::pan_step` answers `None` here.
+    The agenda list is date-unfiltered on every app, so there is no range to
+    pan (`caltime::pan_step` answers `None`). An enabled button that does
+    nothing is a choice that is not possible (`docs/goal/ui/README.md`
+    § Offer only what is possible); switching view unblocks the pair from the
+    same toolbar, so rule 2 keeps it shown and disabled with its reason — the
+    shared `caltime::pan_possibility` answer (`events.md` § User actions).
 
-    The absence is anchored to a **causal barrier**, not a settle-sleep
-    (convention 14): the view-switch that follows is processed after the pan
-    click on the same queue, so waiting for the day-timeline marker proves the
-    pan click was consumed rather than merely still in flight.
-
-    ⚠ **The assertion reads the DAY label, not the agenda one, and that is
-    load-bearing.** Asserting on the agenda's own `calendar-date-label` is
-    vacuous: tui renders the *month* there, so an agenda pan of a week — the
-    exact pre-lift linux behaviour this test exists to forbid — moves the
-    anchor without moving the label whenever it stays inside one month. That
-    first cut survived its mutation. The day label is the finest-grained view
-    of the same anchor, so it witnesses a move of any size.
+    The press is refused before anything moves: the disabled-actuation
+    refusal is the driver's own, and the day label read afterwards is still
+    the pre-press anchor (the finest-grained view of the anchor, so a move of
+    any size would show). Switching to a ranged view brings the pair back.
     """
+    driver = logged_in_app.driver
+    require_surface(driver, "painted-reason")
     ev = logged_in_app.events
     ev.navigate()
 
-    # The anchor as the finest-grained view renders it, before anything moves.
     ev.switch_view("day")
     anchor_before = ev.date_label()
 
     ev.switch_view("agenda")
-    ev.pan_forward_without_waiting()
+    for element_id in ("events-prev-month", "events-next-month"):
+        assert driver.is_visible(element_id), (
+            f"{element_id} must stay shown in agenda (rule 2: the person can "
+            f"unblock it by switching view): {driver.diagnose(element_id)}"
+        )
+        assert not driver.is_enabled(element_id), (
+            f"{element_id} is LIVE in agenda, where it can do nothing"
+        )
+        reason = driver.painted_reason(element_id)
+        assert reason == S.events.pan_none_in_agenda, (
+            f"{element_id} is disabled but says {reason!r} beside it, not "
+            f"{S.events.pan_none_in_agenda!r}"
+        )
+        try:
+            driver.click(element_id)
+        except RuntimeError as refused:
+            assert "element is disabled" in str(refused), (
+                f"pressing {element_id} failed, but not as a refused disabled press: {refused}"
+            )
+        else:
+            raise AssertionError(f"pressing {element_id} was actuated in agenda")
 
-    # Barrier: this switch is queued behind the pan click, and its marker only
-    # appears once the click has been handled — so a still-unchanged label
-    # below means the pan did nothing, not that it has yet to be processed.
     ev.switch_view("day")
-    assert logged_in_app.driver.is_visible("calendar-day-timeline")
-
-    # The day label must settle back on exactly the pre-pan anchor. A pan that
-    # moved the anchor by any amount never reaches that value, so the
-    # deadline-poll discriminates while costing a correct app nothing.
     ev.wait_for_date_label(anchor_before)
+    for element_id in ("events-prev-month", "events-next-month"):
+        assert driver.is_enabled(element_id), (
+            f"{element_id} must be live again in day view: {driver.diagnose(element_id)}"
+        )
 
 
 def test_calendar_date_label_visible(logged_in_app):

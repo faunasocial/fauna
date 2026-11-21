@@ -37,7 +37,7 @@ pub(crate) mod atproto;
 pub(crate) mod devices;
 mod encryption;
 mod engagement_cues;
-mod folders;
+pub(crate) mod folders;
 mod general;
 pub(crate) mod labeler_catalog;
 mod sessions;
@@ -276,18 +276,19 @@ impl TuiPrefs {
     }
 
     /// Write `prefs.json` via tmp+rename, so a crash can never truncate it. A
-    /// failure is silent (the next launch just reads the prior file).
-    fn save(&self, path: &Path) {
-        let Ok(bytes) = serde_json::to_vec_pretty(self) else {
-            return;
-        };
+    /// failure comes back as its cause, for the page to say: the choice then
+    /// lasts this session only (`docs/goal/architecture/apps/tui.md`
+    /// § External media handoff; `docs/goal/ui/README.md` § Offer only what is
+    /// possible, rule 7).
+    fn save(&self, path: &Path) -> Result<(), String> {
+        let bytes = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("creating {}: {e}", parent.display()))?;
         }
         let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, &bytes).is_ok() {
-            let _ = std::fs::rename(&tmp, path);
-        }
+        std::fs::write(&tmp, &bytes).map_err(|e| format!("writing {}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, path).map_err(|e| format!("replacing {}: {e}", path.display()))
     }
 }
 
@@ -313,6 +314,8 @@ pub(crate) fn park_on_disabled_paywall_select_for_test(state: &mut SettingsState
         }],
         ..Default::default()
     });
+    // The read answered with none — "create a tier first", not "loading".
+    state.folders.own_tiers_read = fauna_core::possibility::ReadState::Resolved;
     assert!(
         state.folders.own_tiers.is_empty(),
         "premise: no own tiers is what disables the paywall picker"
@@ -626,9 +629,20 @@ pub struct SettingsState {
     /// real `$XDG_CONFIG_HOME/fauna-tui/prefs.json` — writes are skipped, reads
     /// default. The real App resolves it from [`crate::session::config_dir`].
     prefs_path: Option<PathBuf>,
-    /// `prefs.json` exists but this build could not read it at load: the page
-    /// runs on defaults and [`Self::save`] never writes over the file.
-    prefs_unreadable: bool,
+    /// `prefs.json` exists but this build could not read it at load (the
+    /// cause): the page runs on defaults and [`Self::save`] never writes over
+    /// the file, answering this cause instead.
+    prefs_unreadable: Option<String>,
+    /// The last device-local action on this page that failed — a prefs write
+    /// ([`Self::save`]) or a clipboard copy — as the line `error-message`
+    /// paints ([`page_error`]). Cleared by the next such action that succeeds
+    /// and by leaving the sub-page.
+    pub(crate) local_failure: Option<String>,
+    /// The Logs page's last successful copy — the text that reached the
+    /// clipboard — so `log-copy-button` reads "Copied!" and carries it as its
+    /// `copied` attr (the `account-actor-id-copy-btn` contract). Cleared when
+    /// the page is left.
+    pub(crate) logs_copied: Option<String>,
 
     // ── authenticated account surface (populated by `attach_session` at the
     //    post-auth hook; empty/None pre-login, so the Root renders no account IDs) ──
@@ -736,7 +750,7 @@ pub struct SettingsState {
     /// and renders them, and re-deriving any of it here is the documented way
     /// to get the plane wrong (`dynamic-features.md` § Implementation status
     /// item (c)).
-    features: Option<Vec<fauna_client_features::FeatureRow>>,
+    pub(crate) features: Option<Vec<fauna_client_features::FeatureRow>>,
     /// The shared Status snapshot's node leg (`ui/status.md` § State & data
     /// shape), or `None` until `fauna.nest.info` resolves on the landing op —
     /// the `quota`/`features` hydrate-gates-paint shape: the Node section does
@@ -783,6 +797,11 @@ pub struct SettingsState {
     /// The intent id whose discard is armed (`unsent-change-discard-button`
     /// pressed, `unsent-change-discard-confirm-button` showing on that row).
     pub(crate) unsent_discard_armed: Option<String>,
+    /// Bumped by every retry's or discard's own fold
+    /// ([`Outcome::UnsentChangeSettled`]); the unsent tick's read
+    /// (`session::spawn_unsent_refresh`) carries it, so a read taken before
+    /// the settle never brings the settled row back ([`fold_unsent_tick`]).
+    pub(crate) unsent_gen: GestureGen,
     /// The `new-handle` input buffer (`settings.md` § Handle change). A local
     /// buffer committed only on `change-handle`, like profile's edit buffers.
     handle_input: String,
@@ -846,6 +865,21 @@ pub struct SettingsState {
     /// roster display-name map they render through — `participants.md`
     /// § Task delegation).
     pub(crate) task_delegation: TaskDelegationState,
+    /// The Folders page's gesture generation — on this state rather than
+    /// [`folders::FoldersUiState`], which every visit resets, so a re-read
+    /// spawned before a visit still reads as outlived after it. Bumped by
+    /// every folder gesture's fold (a roster gesture or the expand's read,
+    /// the places, destinations, pending-share and default-policy writes);
+    /// the store-change re-read, the roster re-read and the device-activity
+    /// push re-read carry it and drop what a newer fold has outlived.
+    pub(crate) folders_gen: GestureGen,
+    /// The succession ledger's review planes' gesture generation — bumped by
+    /// every review verdict's and every filter mark's own fold (a member
+    /// review decided, a rule kept, a filter deleted); the store-change
+    /// re-reads ([`ledger_resync_ops`]) and the review page's visit read carry
+    /// it, so a late one never brings back a person or a mark a newer verdict
+    /// settled.
+    pub(crate) ledger_gen: GestureGen,
     /// The Connected apps sub-page's state — the shared `ConnectedAppsMachine`,
     /// its last snapshot, the typed-code draft and the armed revoke.
     pub(crate) connected_apps: ConnectedAppsState,
@@ -932,6 +966,12 @@ pub struct SettingsState {
     /// contract the profile/web-settings copy buttons keep. Cleared on
     /// [`Action::NavBack`] and with the session.
     pub(crate) actor_id_copied: bool,
+    /// Set once a `settings-terms-link` press put the terms URL on the
+    /// terminal: the link then reads "Copied!" before the URL and carries the
+    /// URL as its `copied` attr (the `account-actor-id-copy-btn` contract). A
+    /// failed write leaves it unset and says so on `error-message`. Cleared
+    /// with `actor_id_copied`.
+    pub(crate) terms_copied: bool,
     /// The About block's newer-version check (`settings/about.rs`): idle,
     /// in flight, or its last answer. Session-local; reset with the session.
     pub(crate) update_check: about::UpdateCheck,
@@ -1090,7 +1130,9 @@ impl Default for SettingsState {
             prefs: TuiPrefs::default(),
             log_filter: 0,
             prefs_path: None,
-            prefs_unreadable: false,
+            prefs_unreadable: None,
+            local_failure: None,
+            logs_copied: None,
             nest: None,
             account_store: None,
             account_runtime: AccountRuntimeSlot::default(),
@@ -1115,6 +1157,7 @@ impl Default for SettingsState {
             pending_actions: None,
             unsent_changes: None,
             unsent_discard_armed: None,
+            unsent_gen: GestureGen::default(),
             handle_input: String::new(),
             sign_out_pending: false,
             delete_confirm_input: String::new(),
@@ -1131,6 +1174,8 @@ impl Default for SettingsState {
             muted_words: MutedWordsState::default(),
             trained_topics: TrainedTopicsState::default(),
             task_delegation: TaskDelegationState::default(),
+            folders_gen: GestureGen::default(),
+            ledger_gen: GestureGen::default(),
             connected_apps: ConnectedAppsState::default(),
             mail_aliases: MailAliasesState::default(),
             mail_lists: MailListsState::default(),
@@ -1148,6 +1193,7 @@ impl Default for SettingsState {
             reauth_pending: None,
             open_new_instance_copied: None,
             actor_id_copied: false,
+            terms_copied: false,
             update_check: about::UpdateCheck::Idle,
         }
     }
@@ -1270,6 +1316,13 @@ struct PrivacyState {
     spam_threshold_input: String,
     /// The `phishing-threshold` buffer, same shape.
     phishing_threshold_input: String,
+    /// The preferences the nest last confirmed — the fetch's or a save's echo —
+    /// which `save-spam-prefs` compares the two buffers against
+    /// ([`fauna_client_spam::possibility::save_preferences_possibility`]).
+    saved_spam: Option<SpamPreferences>,
+    /// Where the spam half of the Privacy read stands: pending until the
+    /// nav-edge fetch answers, failed when its `get_preferences` did not.
+    spam_read: fauna_core::possibility::ReadState,
     /// The fetched filter list — the single source `filter-item`/`filter-name`/
     /// `filter-action`/`filter-delete` render from (flat indexed, matching the
     /// conversations-bubble-children convention — one id per row in
@@ -1314,6 +1367,8 @@ impl Default for PrivacyState {
             inbox_mode: None,
             spam_threshold_input: "0.5".to_string(),
             phishing_threshold_input: "0.3".to_string(),
+            saved_spam: None,
+            spam_read: fauna_core::possibility::ReadState::Pending,
             filters: Vec::new(),
             show_add_form: false,
             filter_name_input: String::new(),
@@ -1350,6 +1405,21 @@ impl PrivacyState {
         self.spam_threshold_input = per_mille_to_probability(prefs.spam_threshold).to_string();
         self.phishing_threshold_input =
             per_mille_to_probability(prefs.phishing_threshold).to_string();
+        self.saved_spam = Some(prefs.clone());
+        self.spam_read = fauna_core::possibility::ReadState::Resolved;
+    }
+
+    /// The shared answer for `save-spam-prefs` — painted on the button and
+    /// asked again by the save before it sends (`ui/README.md` § Offer only
+    /// what is possible, rules 4, 6 and 7): blocked "nothing to save" while
+    /// both buffers still hold what the nest confirmed.
+    pub(super) fn save_spam_possibility(&self) -> fauna_core::possibility::Possibility {
+        fauna_client_spam::possibility::save_preferences_possibility(
+            self.spam_read,
+            self.saved_spam.as_ref(),
+            &self.spam_threshold_input,
+            &self.phishing_threshold_input,
+        )
     }
 
     /// Parse the current buffers into the wire request `save-spam-prefs` sends
@@ -1470,6 +1540,19 @@ impl SettingsState {
         self.mail.machine.clone()
     }
 
+    /// Whether mail is usable for this account now — the shared
+    /// `MailSettingsSnapshot::mail_usable` over the machine's LIVE snapshot (so
+    /// an enable on the Mail page counts at once), or the unbuilt answer when
+    /// the machine's build failed. Every mail sub-page's rail row and entry is
+    /// gated on it (`ui/mail-settings.md` § Errors & edge cases, the
+    /// mail-usable gate).
+    pub(crate) fn mail_usable(&self) -> fauna_core::possibility::Possibility {
+        match self.mail.machine.as_ref() {
+            Some(machine) => machine.snapshot().mail_usable(),
+            None => fauna_client_mail_settings::mail_usable_unbuilt(),
+        }
+    }
+
     /// Re-read the Mail page's painted snapshot from its machine — for a change
     /// the page did not dispatch: the aftermath's mail burn runs on this same
     /// machine in the post-store-ready pass and refreshes its snapshot, but the
@@ -1585,6 +1668,14 @@ impl SettingsState {
         self.mail.machine = Some(machine);
     }
 
+    /// Fold a nest-confirmed spam-threshold read (`value`, `None` = follows
+    /// the admin default), so the Mail → Spam threshold input is past its read
+    /// gate — for other modules' unit tests that drive that input.
+    #[cfg(test)]
+    pub(crate) fn resolve_spam_threshold_read_for_test(&mut self, value: Option<u32>) {
+        self.mail_spam.apply_spam_threshold_override(value);
+    }
+
     /// Whether the Stage-2 account-switch re-auth prompt is currently showing.
     /// The key handler reads this to route Escape to a decline rather than the
     /// generic settings nav-back (`long-term-store.md` § Per-account re-auth:
@@ -1634,11 +1725,11 @@ impl SettingsState {
     pub fn load(config_dir: Option<PathBuf>) -> Self {
         let prefs_path = config_dir.map(|dir| dir.join(PREFS_FILE));
         let (prefs, prefs_unreadable) = match prefs_path.as_deref().map(TuiPrefs::load) {
-            None => (TuiPrefs::default(), false),
-            Some(Ok(prefs)) => (prefs, false),
+            None => (TuiPrefs::default(), None),
+            Some(Ok(prefs)) => (prefs, None),
             Some(Err(e)) => {
                 tracing::warn!("tui prefs: {e}; running on defaults and never saving over it");
-                (TuiPrefs::default(), true)
+                (TuiPrefs::default(), Some(e))
             }
         };
         SettingsState {
@@ -1650,15 +1741,20 @@ impl SettingsState {
     }
 
     /// Persist the current prefs (no-op when `prefs_path` is `None`, i.e. a unit
-    /// test's in-memory state, and when the file on disk could not be read at
-    /// load — a choice made this session then lasts the session only, and the
-    /// file stays as it was for a build that can read it).
-    fn save(&self) {
-        if self.prefs_unreadable {
-            return;
+    /// test's in-memory state or a process with no config dir, where the load
+    /// read nothing either). When the file on disk could not be read at load it
+    /// is never written over — the file stays as it was for a build that can
+    /// read it — so the choice lasts the session only and this answers that as
+    /// a failure, with the load's cause, like a write that failed: the page
+    /// says so on its `error-message` instead of appearing saved
+    /// (`docs/goal/architecture/apps/tui.md` § External media handoff).
+    fn save(&self) -> Result<(), String> {
+        if let Some(cause) = &self.prefs_unreadable {
+            return Err(cause.clone());
         }
-        if let Some(path) = &self.prefs_path {
-            self.prefs.save(path);
+        match &self.prefs_path {
+            Some(path) => self.prefs.save(path),
+            None => Ok(()),
         }
     }
 
@@ -2004,6 +2100,7 @@ impl SettingsState {
         // surviving row would read as the new actor's subscription.
         self.subscriptions = SubscriptionsState::default();
         self.actor_id_copied = false;
+        self.terms_copied = false;
         self.update_check = about::UpdateCheck::Idle;
         self.sub = SubPage::Root;
     }
@@ -2015,6 +2112,36 @@ impl SettingsState {
     /// custody drive (`app.rs`'s `spawn_custody_drive`) signs with it too.
     pub(crate) fn identity_secret(&self) -> Option<[u8; 32]> {
         fauna_core::hex32::decode(self.secret_hex.as_str()).ok()
+    }
+
+    /// Whether the folder follow/share ops have what they need from this page's
+    /// own state: the devices machine, the nest channel and the identity
+    /// secret. The share also needs the live conversations session, which
+    /// lives on the app ([`folder_share_answer`]).
+    pub(crate) fn folder_ops_ready(&self) -> bool {
+        self.devices.machine.is_some() && self.nest.is_some() && self.identity_secret().is_some()
+    }
+
+    /// `folder-follow-confirm`'s answer — the shared form predicate
+    /// (`fauna_client_folders::forms`) over the typed boxes and readiness.
+    pub(crate) fn folder_follow_answer(&self) -> fauna_core::possibility::Possibility {
+        fauna_client_folders::forms::follow_possibility(
+            &self.folders.follow_handle_input,
+            &self.folders.follow_name_input,
+            self.folder_ops_ready(),
+        )
+    }
+
+    /// `folder-share-confirm`'s answer, with `session_ready` the app's live
+    /// conversations session.
+    pub(crate) fn folder_share_answer(
+        &self,
+        session_ready: bool,
+    ) -> fauna_core::possibility::Possibility {
+        fauna_client_folders::forms::share_possibility(
+            &self.folders.share_recipient_input,
+            self.folder_ops_ready() && session_ready,
+        )
     }
 }
 
@@ -2274,6 +2401,7 @@ pub fn nav_enter_op(state: &SettingsState) -> Option<Op> {
     Some(Op::FetchLanding {
         nest: state.nest.clone()?,
         actor_id_hex: state.account_actor_id.clone(),
+        mail: state.mail.machine.clone(),
     })
 }
 
@@ -2368,13 +2496,22 @@ pub fn succession_kit_op(
 ///
 /// `None` before login (no machine), which is also when there is nothing a
 /// push could be about.
-pub fn atproto_resync_op(state: &SettingsState) -> Option<Op> {
+///
+/// `bridges_of` is the Bridges page's gesture generation
+/// (`crate::bridges::BridgesState::gesture_gen`) as the op is built: the
+/// resync re-reads the follows too, and is not page-gated, so its bridges half
+/// must not repaint a follow or unfollow that folded meanwhile.
+pub fn atproto_resync_op(state: &SettingsState, bridges_of: GestureGen) -> Option<Op> {
     let nest = state.nest.clone();
     state
         .atproto
         .machine
         .clone()
-        .map(|machine| Op::HydrateAtproto { machine, nest })
+        .map(|machine| Op::HydrateAtproto {
+            machine,
+            nest,
+            resync_of: Some(bridges_of),
+        })
 }
 
 /// Re-read the Spam sub-page's training history off a *push* (or a reconnect)
@@ -2391,7 +2528,11 @@ pub fn mail_spam_resync_op(state: &SettingsState) -> Option<Op> {
     }
     let machine = state.mail_spam.machine.clone()?;
     let nest = state.nest.clone()?;
-    Some(Op::HydrateMailSpam { machine, nest })
+    Some(Op::HydrateMailSpam {
+        machine,
+        nest,
+        resync_of: state.mail_spam.gesture_gen,
+    })
 }
 
 /// Re-read the Export wizard off a *push* (or a reconnect) rather than a visit
@@ -2488,6 +2629,7 @@ pub fn device_activity_resync_op(
     Some(Op::LoadFolderDeviceActivity {
         nest: state.nest.clone()?,
         name: fs.name.clone(),
+        resync_of: state.folders_gen,
     })
 }
 
@@ -2527,7 +2669,16 @@ pub fn roster_resync_op(state: &SettingsState, bound_set: &str) -> Option<Op> {
         mls_group_id: fs.mls_group_id.clone(),
         store: state.account_store.clone(),
         folder_id: fs.id,
+        resync_of: Some(state.folders_gen),
     })
+}
+
+/// The late-fold rule for a per-row Folders re-read: `true` when the read is
+/// outlived — a folder gesture folded after its op was built, or its row is no
+/// longer the expanded owner row on the Folders sub-page (collapsed, another
+/// row opened, the page left) — and must be dropped whole, its error included.
+fn folder_row_reread_outlived(state: &SettingsState, name: &str, carried: GestureGen) -> bool {
+    state.folders_gen.outlived(carried) || expanded_owner_row_where(state, |n| n == name).is_none()
 }
 
 /// The expanded Folders row, iff its name satisfies `names` and it is an owner
@@ -2865,6 +3016,7 @@ fn task_delegation_load_op_with(
         nest,
         store: state.preference_store(),
         self_ref,
+        resync_of: state.task_delegation.gesture_gen,
         // The roster the display names come from — read off the SAME shared
         // `DevicesMachine` the Devices sub-page already built, so there is no
         // second roster to drift.
@@ -2956,6 +3108,21 @@ fn paint_switch_refusal(app: &mut App, actor_id: &str, err: &fauna_client_accoun
     let line = fauna_client_accounts::switch_refused_copy(err, &label)
         .resolve(fauna_i18n::strings::lookup);
     app.errors.insert(Page::Settings, line);
+}
+
+/// Read the custody offer's host candidates (every 1:1 conversation) for the
+/// mint's entry gate (`devices::custody_mint_answer`). With no conversations
+/// session yet the read stays unmade, so the button is not enabled on a guess.
+fn refresh_custody_mint_candidates(app: &mut App) {
+    let Some(secret) = app.settings.identity_secret() else {
+        return;
+    };
+    let own = fauna_core::identity::ActorKeypair::from_secret(secret).actor_id();
+    if let Some(session) = app.conversations.real_session.as_ref() {
+        app.settings.devices.custody_mint_candidates =
+            fauna_client_conversations::custody_mint_candidates(session, &own);
+        app.settings.devices.custody_mint_candidates_read = true;
+    }
 }
 
 /// Refresh the account-switcher render snapshot from the shared `AccountRegistry`
@@ -4699,8 +4866,13 @@ impl Action {
             // `MailExportNest` seam), so it declares it, the Import shape.
             // Resume declares the warm `resume_export_session`: the cold path
             // (`restart_export_session`) shares its class. Download stays
-            // `None`: it is an HTTP GET of the session's `download_url`
-            // (§ Download flow), not a wire kind, and reads are never gated.
+            // `None` HERE because it is an HTTP GET of the session's
+            // `download_url` (§ Download flow), not a wire kind — but it still
+            // needs a live nest, so its control and its handler ask the shared
+            // carve-out answer instead
+            // (`fauna_protocol::offline_class::carve_out_affordance`, through
+            // [`mail_export_download_possibility`]), the backups page's
+            // `DownloadFile` shape.
             Action::MailExportSelectFormat(_)
             | Action::MailExportNext
             | Action::MailExportBack
@@ -5263,6 +5435,9 @@ pub fn apply(state: &mut SettingsState, action: Action) {
         Action::OpenGeneral => state.sub = SubPage::General,
         Action::NavBack => {
             state.actor_id_copied = false;
+            state.terms_copied = false;
+            state.local_failure = None;
+            state.logs_copied = None;
             state.sub = SubPage::Root;
         }
         // Copy the actor id to the terminal's clipboard via OSC 52 (the
@@ -5327,24 +5502,45 @@ pub fn apply(state: &mut SettingsState, action: Action) {
             crate::wizard::copy_to_clipboard(&command);
             state.open_new_instance_copied = Some((actor_id, command));
         }
+        // The choice applies at once; a write that fails (or a prefs file this
+        // build could not read, which is never written over) says so on the
+        // page's `error-message`, since the choice then lasts this session only
+        // (`apps/tui.md` § External media handoff; README rule 7).
         Action::SetExternalMedia(mode) => {
             state.prefs.external_media = mode;
-            state.save();
+            state.local_failure = state.save().err().map(|cause| {
+                fauna_i18n::strings::common::PREF_NOT_SAVED.replace("{error}", &cause)
+            });
         }
         Action::SetLogLevel(index) => state.log_filter = index,
         // Copy the currently-filtered lines, newest-first (the shared copy
         // payload), to the terminal's clipboard via OSC 52 — SSH-safe, the same
-        // path profile/contacts use for actor-id copy. Fire-and-forget.
+        // path profile/contacts use for actor-id copy. A copy with nothing
+        // shown is refused (the button is disabled by the same answer); a
+        // write that reached the terminal is confirmed on the button, one that
+        // failed is said on `error-message` (README rules 2 and 7).
         Action::CopyLogs => {
-            let text = fauna_log::format::rendered_text(
-                &filtered_log_entries(state.log_filter),
-                local_offset_secs(),
-            );
-            crate::wizard::copy_to_clipboard(&text);
+            let entries = filtered_log_entries(state.log_filter);
+            if let Some(reason) = logs::ring_action_possibility(entries.len()).reason() {
+                state.local_failure = Some(reason.resolve(fauna_i18n::strings::lookup));
+                return;
+            }
+            let text = fauna_log::format::rendered_text(&entries, local_offset_secs());
+            logs::record_copy_outcome(state, crate::wizard::try_copy_to_clipboard(&text), text);
         }
         // Drop the in-memory ring; the next render (elements()) reads the now-
         // empty snapshot. The on-disk rolling file is deliberately untouched.
-        Action::ClearLogs => fauna_log::clear(),
+        // An empty ring has nothing to clear: refused with the same answer
+        // that disables the button.
+        Action::ClearLogs => {
+            let shown = filtered_log_entries(state.log_filter).len();
+            if let Some(reason) = logs::ring_action_possibility(shown).reason() {
+                state.local_failure = Some(reason.resolve(fauna_i18n::strings::lookup));
+                return;
+            }
+            state.logs_copied = None;
+            fauna_log::clear();
+        }
         // Reveal/hide the inline add-filter form (linux's `form_box.set_visible`).
         // While an edit is open this always CLOSES (never toggles back open with
         // the stale edit buffers) — the same exit-edit-mode path `reset_form`
@@ -5374,6 +5570,13 @@ pub fn apply(state: &mut SettingsState, action: Action) {
         // reporting "on" until `DisableMail` lands, because the dialog is the
         // real decision point.
         Action::ToggleMailEnabled => {
+            // The answer the toggle painted from, asked again: no form opens
+            // on a guessed "off" before the first read, nor on a box that
+            // cannot enable mail (rules 5 and 6).
+            if let Some(reason) = state.mail.enable_answer().reason() {
+                state.mail.draft_refusal = Some(crate::wizard::localized(reason));
+                return;
+            }
             if state.mail.snapshot.as_ref().is_some_and(|s| s.enabled) {
                 state.mail.show_disable_confirm = true;
             } else {
@@ -5419,13 +5622,18 @@ pub fn apply(state: &mut SettingsState, action: Action) {
         // the way on, never a second rotation (`mail-settings.md`
         // § Architectural rules 5).
         Action::MailOpenRotateForm => {
-            let pending = state
-                .mail
-                .snapshot
-                .as_ref()
-                .is_some_and(|s| s.pending_rotation.is_some());
-            if !pending && state.mail.rotation_in_flight.is_none() {
-                state.mail.open_rotate_form();
+            // The answer the button painted from, asked again; a refusal says
+            // why on `error-message` (rules 6 and 7).
+            let in_flight = state.mail.rotation_in_flight.is_some();
+            let answer = state.mail.snapshot.as_ref().map_or_else(
+                || fauna_core::possibility::Possibility::once_read(false),
+                |s| s.rotate_keys_possibility(in_flight),
+            );
+            match answer.reason() {
+                Some(reason) => {
+                    state.mail.draft_refusal = Some(crate::wizard::localized(reason));
+                }
+                None => state.mail.open_rotate_form(),
             }
         }
         // Close the rotate form without rotating.
@@ -6243,13 +6451,48 @@ pub(crate) fn sign_out_confirm_unless(app: &mut App, blocked: impl FnOnce(&App) 
 /// linux page does the same at the same three gestures
 /// (`apps/fauna-linux/src/settings/mail_export.rs::dispatch_action`).
 fn mail_export_machine_with_current_handle(
-    app: &App,
+    app: &mut App,
 ) -> Option<Arc<fauna_client_mail_settings::MailExportMachine>> {
-    let machine = app.settings.mail_export.machine.clone()?;
+    let machine = mail_machine_or_refuse(app, |s| s.mail_export.machine.clone())?;
     if let Some(handle) = crate::session::session_account_handle(app) {
         machine.set_actor_handle(handle);
     }
     Some(machine)
+}
+
+/// The export Download's answer (`ui/README.md` § Offer only what is possible,
+/// rule 6): the GET of the session's `download_url` has no wire kind, so the
+/// offline gate's carve-out answer stands in for it — needs a live nest, the
+/// same words and reason as every other offline control.
+fn mail_export_download_possibility(app: &App) -> fauna_core::possibility::Possibility {
+    fauna_protocol::offline_class::carve_out_affordance(app.connection_state_word()).possibility()
+}
+
+/// A mail page's machine, or a refusal on the page's `error-message`
+/// (`ui/README.md` § Offer only what is possible, rule 7: never silent). A
+/// gesture reaching a mail page whose machine was never built — its build
+/// failed, so the entry gate answers `mail_usable_unbuilt()` — says so with
+/// that same reason instead of returning without a word.
+fn mail_machine_or_refuse<T>(
+    app: &mut App,
+    machine: impl FnOnce(&SettingsState) -> Option<T>,
+) -> Option<T> {
+    let found = machine(&app.settings);
+    if found.is_none() {
+        refuse_mail_unbuilt(app);
+    }
+    found
+}
+
+/// Put the unbuilt-mail-machine reason on the page's `error-message` (see
+/// [`mail_machine_or_refuse`]).
+fn refuse_mail_unbuilt(app: &mut App) {
+    if let fauna_core::possibility::Possibility::Blocked { reason } =
+        fauna_client_mail_settings::mail_usable_unbuilt()
+    {
+        app.errors
+            .insert(Page::Settings, reason.resolve(fauna_i18n::strings::lookup));
+    }
 }
 
 /// The dispatcher for a `Gesture::Settings` — the local/network split every
@@ -6381,7 +6624,8 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // from the display. Same unification as the onboarding kit screen
         // (`wizard::recovery_kit::kit_uri`).
         Action::CopyTermsUrl => {
-            crate::wizard::copy_to_clipboard(fauna_core::TERMS_URL);
+            let outcome = crate::wizard::try_copy_to_clipboard(fauna_core::TERMS_URL);
+            about::record_terms_copy(&mut app.settings, outcome);
             None
         }
         Action::RecoveryCopySecret => {
@@ -6408,8 +6652,15 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // falsehood `earned_verdict` exists to prevent).
         Action::MemberReviewRemove { person } => {
             app.errors.remove(&Page::Settings);
+            // The answer the button painted from, asked again: no session, no
+            // eviction — said on `error-message`, never a silent return.
+            let manager = app.conversations.manager.clone();
+            let answer = fauna_core::data::member_review_remove_possibility(manager.is_some());
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
             let store = app.ledger_store.clone()?;
-            let manager = app.conversations.manager.clone()?;
+            let manager = manager?;
             Some(Op::MemberReviewRemove {
                 manager,
                 store,
@@ -6654,7 +6905,14 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             Some(Op::Sessions(op))
         }
         // The two-press inline confirm: arming and cancelling are local.
+        // Arming asks the answer the button painted from: before the roster
+        // folds, or with no other sign-in listed, there is nothing to confirm
+        // (rules 2, 5 and 7).
         Action::SessionsRevokeOthersArm => {
+            let answer = sessions::revoke_others_answer(&app.settings.sessions);
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
             app.settings.sessions.revoke_others_armed = true;
             None
         }
@@ -6669,6 +6927,10 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 return None;
             }
             app.settings.sessions.revoke_others_armed = false;
+            let answer = sessions::revoke_others_answer(&app.settings.sessions);
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
             let op = sessions::op(&app.settings, Some(sessions::SessionsAct::RevokeOthers))?;
             app.settings.sessions.busy = true;
             Some(Op::Sessions(op))
@@ -6704,12 +6966,28 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             .map(|machine| Op::RemoveDevice { machine, index }),
         // `device-p2p-participation-toggle[i]` — the machine picks the arm
         // and re-snapshots; a refusal paints `error-message`.
-        Action::SetP2pParticipation { index, on } => app
-            .settings
-            .devices
-            .machine
-            .clone()
-            .map(|machine| Op::SetP2pParticipation { machine, index, on }),
+        Action::SetP2pParticipation { index, on } => {
+            // The action asks the answer the switch painted from and refuses
+            // with its reason (`ui/README.md` § Offer only what is possible,
+            // rule 6).
+            let answer = app
+                .settings
+                .devices
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.devices.get(index as usize))
+                .map(|d| d.participation_paint().possibility());
+            if let Some(answer) = answer
+                && app.errors.refuse(Page::Settings, &answer)
+            {
+                return None;
+            }
+            app.settings
+                .devices
+                .machine
+                .clone()
+                .map(|machine| Op::SetP2pParticipation { machine, index, on })
+        }
         // `device-member-remove-confirm-button[i]` — the member door's one
         // leg, by key. The arm clears whatever the door answers: a refusal
         // paints `error-message` with the card still there to re-arm.
@@ -6742,11 +7020,22 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 .clone()
                 .map(|machine| Op::RemoveMember { machine, device_id })
         }
-        // `device-rename-confirm-button` — the editor closes on the save; the
-        // machine decides what is sent (nothing for a blank or unchanged
-        // name) and paints any refusal on `error-message`.
+        // `device-rename-confirm-button` — the save asks the same draft
+        // answer the button paints from and refuses with its reason; the
+        // editor stays open until the save has gone through
+        // (`DeviceRenamed`), so a refusal or failure keeps what was typed
+        // (`docs/goal/ui/README.md` § Offer only what is possible, rules 4
+        // and 7).
         Action::ConfirmRenameDevice => {
-            let draft = app.settings.devices.rename.take()?;
+            let draft = app.settings.devices.rename.clone()?;
+            let answer = devices::rename_answer(&app.settings.devices, &draft);
+            if !answer.is_possible() {
+                if let Some(reason) = answer.reason() {
+                    app.errors
+                        .insert(Page::Settings, crate::wizard::localized(reason));
+                }
+                return None;
+            }
             app.settings
                 .devices
                 .machine
@@ -6888,24 +7177,19 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             })
         }
         Action::CustodyMintOpen => {
-            let own =
-                fauna_core::identity::ActorKeypair::from_secret(app.settings.identity_secret()?)
-                    .actor_id();
-            let candidates = match app.conversations.real_session.as_ref() {
-                Some(session) => fauna_client_conversations::custody_mint_candidates(session, &own),
-                None => Vec::new(),
-            };
-            if candidates.is_empty() {
-                // No 1:1 conversation to ride — say so, stay closed
-                // (convention 11: the gesture is answered, never dropped).
-                app.errors.insert(
-                    Page::Settings,
-                    fauna_i18n::strings::devices::CUSTODY_MINT_NO_CONTACTS.to_string(),
-                );
+            // The press asks the same answer the button paints from (rule 6),
+            // over a fresh read of the conversations; a refusal names the
+            // step on `error-message` (convention 11: never dropped).
+            refresh_custody_mint_candidates(app);
+            let answer = devices::custody_mint_answer(&app.settings.devices);
+            if !answer.is_possible() {
+                if let Some(reason) = answer.reason() {
+                    app.errors
+                        .insert(Page::Settings, crate::wizard::localized(reason));
+                }
                 return None;
             }
             app.errors.remove(&Page::Settings);
-            app.settings.devices.custody_mint_candidates = candidates;
             app.settings.devices.custody_mint_selected = None;
             app.settings.devices.custody_mint_open = true;
             None
@@ -7023,13 +7307,16 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         Action::ConfirmFolderFollow => {
             let handle = app.settings.folders.follow_handle_input.trim().to_string();
             let name = app.settings.folders.follow_name_input.trim().to_string();
-            if handle.is_empty() || name.is_empty() {
-                // Nothing to resolve. Refusing here rather than sending a blank
-                // address keeps the nest's one-answer refusal meaningful — an
-                // empty query would come back "not found" and read to the user
-                // as "no such folder" rather than "you left a box empty".
+            // Refusing a blank box here rather than sending a blank address
+            // keeps the nest's one-answer refusal meaningful — an empty query
+            // would come back "not found" and read as "no such folder" rather
+            // than "you left a box empty". The refusal is the shared
+            // predicate's reason on the page error, never a silent return.
+            let answer = app.settings.folder_follow_answer();
+            if app.errors.refuse(Page::Settings, &answer) {
                 return None;
             }
+            app.errors.remove(&Page::Settings);
             Some(Op::FollowPublicFolder {
                 machine: app.settings.devices.machine.clone()?,
                 nest: app.settings.nest.clone()?,
@@ -7179,7 +7466,22 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 on: !fs.exclusive_editing,
             })
         }
+        Action::OpenFolderWizard => {
+            // The press asks the button's own answer (rule 6): an unbuilt
+            // machine paints its reason on `error-message`, never silence.
+            let answer = folders::folder_add_possibility(&app.settings.devices);
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
+            apply(&mut app.settings, action);
+            None
+        }
         Action::ToggleFolderWebdav(row) => {
+            // The press asks the toggle's own answer (rule 6).
+            let answer = folders::webdav_possibility(&app.settings.folders);
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
             let fs = app.settings.devices.snapshot.as_ref()?.folders.get(row)?;
             Some(Op::ServeSetFolder {
                 folder_keys: folder_key_door(app.settings.account_runtime.clone()),
@@ -7294,6 +7596,10 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             if tier.is_empty() {
                 return None;
             }
+            let answer = folders::paywall_possibility(&app.settings.folders);
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
             Some(Op::PaywallSetFolder {
                 folder_keys: folder_key_door(app.settings.account_runtime.clone()),
                 grant_log: nests::ledger_door(app.settings.account_runtime.clone()),
@@ -7340,6 +7646,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 mls_group_id: fs.mls_group_id.clone(),
                 store: app.settings.account_store.clone(),
                 folder_id: fs.id,
+                resync_of: None,
             })
         }
         // `folder-share-confirm` — the typed recipient + the picked grant.
@@ -7355,28 +7662,34 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 .share_recipient_input
                 .trim()
                 .to_string();
-            // An empty picker shares nothing — linux's own guard. Leave the form
-            // open so the user can type rather than silently closing it.
-            if recipient.is_empty() {
+            let name = fs.name.clone();
+            // An empty picker, or an app with no session to admit the
+            // recipient through, shares nothing: the shared predicate refuses
+            // with its reason on the page error and the form stays open with
+            // what was typed (rule 7) — it closes only once the op is issued.
+            let session = app.conversations.real_session.clone();
+            let answer = app.settings.folder_share_answer(session.is_some());
+            if app.errors.refuse(Page::Settings, &answer) {
                 return None;
             }
-            let name = fs.name.clone();
+            app.errors.remove(&Page::Settings);
             // `None` for the Reader default (an absent role row IS reader);
             // `Some("writer")` for a read-write grant.
             let access = Some(app.settings.folders.share_access.clone()).filter(|a| a == "writer");
-            app.settings.folders.share_open = false;
-            app.settings.folders.share_recipient_input.clear();
-            Some(Op::ShareFolder {
+            let op = Op::ShareFolder {
                 folder_keys: folder_key_door(app.settings.account_runtime.clone()),
                 machine: app.settings.devices.machine.clone()?,
                 nest: app.settings.nest.clone()?,
                 secret: app.settings.identity_secret()?,
                 mail: app.settings.mail_store(),
-                session: app.conversations.real_session.clone()?,
+                session: session?,
                 name,
                 recipient,
                 access,
-            })
+            };
+            app.settings.folders.share_open = false;
+            app.settings.folders.share_recipient_input.clear();
+            Some(op)
         }
         // `folder-member-remove-button` — evict AND rotate the content key, so
         // the removed member cannot decrypt post-removal content (M2
@@ -7606,6 +7919,17 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // closes the wizard + refreshes the list once `submit()` reaches `Done`.
         Action::WizardCreate | Action::WizardConfirmPublic => {
             let wizard = wizard_of(&app.settings)?;
+            // Create asks the button's own answer (rule 6); answering the
+            // public confirm is the gesture that creates, so it is not refused
+            // for the confirm it answers.
+            if matches!(action, Action::WizardCreate) {
+                let answer = fauna_folders_machine::possibility::review_create_possibility(
+                    &wizard.review_snapshot(),
+                );
+                if app.errors.refuse(Page::Settings, &answer) {
+                    return None;
+                }
+            }
             let devices_machine = app.settings.devices.machine.clone()?;
             Some(Op::WizardCreate {
                 devices_machine,
@@ -7725,7 +8049,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             } else {
                 None
             };
-            let machine = app.settings.mail.machine.clone()?;
+            let machine = mail_machine_or_refuse(app, |s| s.mail.machine.clone())?;
             let display_name = app.settings.mail.name_input.trim().to_string();
             // The control that opened the form picks the action: the enable
             // toggle mints the first credential, which is what enables mail;
@@ -7743,7 +8067,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             })
         }
         Action::MailDisableConfirm => {
-            let machine = app.settings.mail.machine.clone()?;
+            let machine = mail_machine_or_refuse(app, |s| s.mail.machine.clone())?;
             app.settings.mail.show_disable_confirm = false;
             Some(Op::DisableMail { machine })
         }
@@ -7776,12 +8100,12 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             None
         }
         Action::MailAliasesSubmit { .. } => {
-            let machine = app.settings.mail_aliases.machine.clone()?;
+            let machine = mail_machine_or_refuse(app, |s| s.mail_aliases.machine.clone())?;
             let action = app.settings.mail_aliases.submit_action()?;
             Some(Op::MailAliasesDispatch { machine, action })
         }
         Action::MailAliasesGenerateDisposable => {
-            let machine = app.settings.mail_aliases.machine.clone()?;
+            let machine = mail_machine_or_refuse(app, |s| s.mail_aliases.machine.clone())?;
             Some(Op::MailAliasesDispatch {
                 machine,
                 // The per-user defaults (30 days / 1 use) — the sheet's ttl/uses
@@ -7798,7 +8122,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             None
         }
         Action::MailAliasesImportSubmit => {
-            let machine = app.settings.mail_aliases.machine.clone()?;
+            let machine = mail_machine_or_refuse(app, |s| s.mail_aliases.machine.clone())?;
             let a = &mut app.settings.mail_aliases;
             let lines: Vec<String> = a
                 .import_input
@@ -7827,7 +8151,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             alias_id_hex,
             enabling,
         } => {
-            let machine = app.settings.mail_aliases.machine.clone()?;
+            let machine = mail_machine_or_refuse(app, |s| s.mail_aliases.machine.clone())?;
             Some(Op::MailAliasesDispatch {
                 machine,
                 action: if enabling {
@@ -7841,7 +8165,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // shared machine refuses a row that is no longer extendable before any
         // round trip.
         Action::MailAliasesExtend(alias_id_hex) => {
-            let machine = app.settings.mail_aliases.machine.clone()?;
+            let machine = mail_machine_or_refuse(app, |s| s.mail_aliases.machine.clone())?;
             Some(Op::MailAliasesDispatch {
                 machine,
                 action: MailAliasesAction::Extend {
@@ -7856,7 +8180,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             alias_id_hex,
             opening,
         } => {
-            let machine = app.settings.mail_aliases.machine.clone()?;
+            let machine = mail_machine_or_refuse(app, |s| s.mail_aliases.machine.clone())?;
             Some(Op::MailAliasesDispatch {
                 machine,
                 action: if opening {
@@ -7876,7 +8200,10 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 a.delete_armed = None;
                 return None;
             }
-            let machine = a.machine.clone()?;
+            let Some(machine) = a.machine.clone() else {
+                refuse_mail_unbuilt(app);
+                return None;
+            };
             a.revoke_armed = None;
             Some(Op::MailAliasesDispatch {
                 machine,
@@ -7890,7 +8217,10 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 a.revoke_armed = None;
                 return None;
             }
-            let machine = a.machine.clone()?;
+            let Some(machine) = a.machine.clone() else {
+                refuse_mail_unbuilt(app);
+                return None;
+            };
             a.delete_armed = None;
             Some(Op::MailAliasesDispatch {
                 machine,
@@ -7911,12 +8241,18 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             }
             s.reset_armed = false;
             Some(Op::MailSpamDispatch {
-                machine: app.settings.mail_spam.machine.clone()?,
+                machine: mail_machine_or_refuse(app, |s| s.mail_spam.machine.clone())?,
                 nest: app.settings.nest.clone()?,
                 action: MailSpamAction::ResetModel,
             })
         }
         Action::MailSpamToggleContribute => {
+            // The answer the toggle painted from, asked again: no write before
+            // the classifier read (rule 5).
+            let answer = app.settings.mail_spam.contribute_answer();
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
             // Non-optimistic: the new value is derived from the last snapshot
             // and the dispatch is awaited, so the painted toggle flips only once
             // the nest confirmed (the `serve-here` toggle's reasoning).
@@ -7927,7 +8263,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 .as_ref()
                 .is_some_and(|s| s.contribute_baseline);
             Some(Op::MailSpamDispatch {
-                machine: app.settings.mail_spam.machine.clone()?,
+                machine: mail_machine_or_refuse(app, |s| s.mail_spam.machine.clone())?,
                 nest: app.settings.nest.clone()?,
                 action: MailSpamAction::SetContributeBaseline { contribute },
             })
@@ -7936,7 +8272,12 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             // Not a machine action — the transparency surface rides
             // `ModerationClient` directly (`report-sharing.md` Slice 4). Same
             // non-optimistic rule: the flip is computed from the last
-            // nest-confirmed value and only the re-read repaints the toggle.
+            // nest-confirmed value and only the re-read repaints the toggle —
+            // and never before that value was read (rule 5).
+            let answer = app.settings.mail_spam.share_answer();
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
             let share = !app.settings.mail_spam.share_reports;
             Some(Op::MailSpamSetReportShare {
                 nest: app.settings.nest.clone()?,
@@ -7944,7 +8285,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             })
         }
         Action::MailSpamUndo(history_id_hex) => Some(Op::MailSpamDispatch {
-            machine: app.settings.mail_spam.machine.clone()?,
+            machine: mail_machine_or_refuse(app, |s| s.mail_spam.machine.clone())?,
             nest: app.settings.nest.clone()?,
             action: MailSpamAction::UndoTraining { history_id_hex },
         }),
@@ -7954,7 +8295,13 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             // (an empty/invalid input is `None` = follow the admin default),
             // never about *parseable-but-invalid* — `parse_count`'s `u32`
             // parse rejects a negative by itself (the alias sibling's
-            // reasoning, `mail_aliases.rs::submit_action`).
+            // reasoning, `mail_aliases.rs::submit_action`). Never before the
+            // override was read: an empty pre-read draft would send `None` and
+            // clear an override the page never showed (rule 5).
+            let answer = app.settings.mail_spam.threshold_answer();
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
             let value =
                 fauna_core::format::parse_count(&app.settings.mail_spam.spam_threshold_input);
             Some(Op::MailSpamSetThresholdOverride {
@@ -7966,6 +8313,12 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // draft names its reason on `error-message` and sends nothing (the
         // nest would refuse it for the same reason — one rule, priority #2).
         Action::MailCommitForwardAllTo => {
+            // Never before the address was read: an empty pre-read draft would
+            // clear a forward the page never showed (rule 5).
+            if let Some(reason) = app.settings.mail.forward_all_answer().reason() {
+                app.settings.mail.draft_refusal = Some(crate::wizard::localized(reason));
+                return None;
+            }
             match fauna_client_mail_settings::parse_forward_all_to_draft(
                 &app.settings.mail.forward_all_to_input,
             ) {
@@ -7983,10 +8336,14 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             }
         }
         Action::MailCommitForwardPerHour => {
-            // No ceiling yet = the first read has not resolved: nothing to
-            // bound the value by, so the commit is inert (the field is empty
-            // until then too).
-            let ceiling = app.settings.mail.forward_per_hour_ceiling?;
+            // No ceiling yet = the read has not resolved: nothing to bound the
+            // value by, so the commit refuses with the read's answer (still
+            // loading, or failed to load) — never silent (rules 5 and 7).
+            let Some(ceiling) = app.settings.mail.forward_per_hour_ceiling else {
+                let answer = app.settings.mail.forward_per_hour_answer();
+                app.settings.mail.draft_refusal = answer.reason().map(crate::wizard::localized);
+                return None;
+            };
             match fauna_client_mail_settings::parse_forward_per_hour_draft(
                 &app.settings.mail.forward_per_hour_input,
                 ceiling,
@@ -8038,6 +8395,12 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             })
         }
         Action::MailToggleAutorespond | Action::MailCommitAutorespondMessage => {
+            // Never before the reply was read: the commit also turns the reply
+            // on, so a pre-read draft would write a filter on a guess (rule 5).
+            if let Some(reason) = app.settings.mail.autorespond_answer().reason() {
+                app.settings.mail.draft_refusal = Some(crate::wizard::localized(reason));
+                return None;
+            }
             match fauna_client_mail_settings::parse_autorespond_message_draft(
                 &app.settings.mail.autorespond_message_input,
             ) {
@@ -8063,12 +8426,21 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // and a second copy of "which step is next" living here is exactly the
         // per-app divergence `mail-export.md` § Where logic lives forbids.
         Action::MailExportSelectFormat(format) => Some(Op::MailExportDispatch {
-            machine: app.settings.mail_export.machine.clone()?,
+            machine: mail_machine_or_refuse(app, |s| s.mail_export.machine.clone())?,
             actions: vec![MailExportAction::SelectFormat { format }],
         }),
         Action::MailExportNext => {
             let e = &app.settings.mail_export;
-            let machine = e.machine.clone()?;
+            let Some(machine) = e.machine.clone() else {
+                refuse_mail_unbuilt(app);
+                return None;
+            };
+            // The answer the button painted from, asked again (rule 6).
+            let answer = e.next_answer();
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
+            let e = &app.settings.mail_export;
             // Off the Scope step, Next first commits both date drafts — one
             // awaited op, so the Confirm summary can never describe a scope the
             // machine has not got. Everywhere else it is a bare advance.
@@ -8084,11 +8456,11 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             Some(Op::MailExportDispatch { machine, actions })
         }
         Action::MailExportBack => Some(Op::MailExportDispatch {
-            machine: app.settings.mail_export.machine.clone()?,
+            machine: mail_machine_or_refuse(app, |s| s.mail_export.machine.clone())?,
             actions: vec![MailExportAction::Back],
         }),
         Action::MailExportToggleMailbox(mailbox) => Some(Op::MailExportDispatch {
-            machine: app.settings.mail_export.machine.clone()?,
+            machine: mail_machine_or_refuse(app, |s| s.mail_export.machine.clone())?,
             actions: vec![MailExportAction::ToggleMailbox { mailbox }],
         }),
         Action::MailExportToggleStripHeaders => {
@@ -8102,16 +8474,22 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 .as_ref()
                 .is_some_and(|s| s.strip_headers);
             Some(Op::MailExportDispatch {
-                machine: app.settings.mail_export.machine.clone()?,
+                machine: mail_machine_or_refuse(app, |s| s.mail_export.machine.clone())?,
                 actions: vec![MailExportAction::SetStripHeaders { on }],
             })
         }
-        Action::MailExportStart => Some(Op::MailExportDispatch {
-            machine: mail_export_machine_with_current_handle(app)?,
-            actions: vec![MailExportAction::Start],
-        }),
+        Action::MailExportStart => {
+            let answer = app.settings.mail_export.start_answer();
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
+            Some(Op::MailExportDispatch {
+                machine: mail_export_machine_with_current_handle(app)?,
+                actions: vec![MailExportAction::Start],
+            })
+        }
         Action::MailExportPause => Some(Op::MailExportDispatch {
-            machine: app.settings.mail_export.machine.clone()?,
+            machine: mail_machine_or_refuse(app, |s| s.mail_export.machine.clone())?,
             actions: vec![MailExportAction::Pause],
         }),
         Action::MailExportResume => Some(Op::MailExportDispatch {
@@ -8130,7 +8508,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             }
             e.cancel_armed = false;
             Some(Op::MailExportDispatch {
-                machine: app.settings.mail_export.machine.clone()?,
+                machine: mail_machine_or_refuse(app, |s| s.mail_export.machine.clone())?,
                 actions: vec![MailExportAction::Cancel],
             })
         }
@@ -8138,12 +8516,24 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // frames, save); a refused archive surfaces its reason on
         // `error-message` rather than silently saving nothing (testing.md
         // point 11), and leaves no file behind.
-        Action::MailExportDownload => Some(Op::MailExportDispatch {
-            machine: mail_export_machine_with_current_handle(app)?,
-            actions: vec![MailExportAction::Download],
-        }),
+        // The control's own answer is asked first (rule 6): offline, the GET
+        // cannot reach the nest, so the gesture refuses with the reason the
+        // button carries rather than failing inside the stream.
+        Action::MailExportDownload => {
+            if let fauna_core::possibility::Possibility::Blocked { reason } =
+                mail_export_download_possibility(app)
+            {
+                app.errors
+                    .insert(Page::Settings, reason.resolve(fauna_i18n::strings::lookup));
+                return None;
+            }
+            Some(Op::MailExportDispatch {
+                machine: mail_export_machine_with_current_handle(app)?,
+                actions: vec![MailExportAction::Download],
+            })
+        }
         Action::MailExportDiscard => Some(Op::MailExportDispatch {
-            machine: app.settings.mail_export.machine.clone()?,
+            machine: mail_machine_or_refuse(app, |s| s.mail_export.machine.clone())?,
             actions: vec![MailExportAction::Discard],
         }),
 
@@ -8152,11 +8542,11 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // including the client-side steps, since the FSM is shared Rust
         // (priority #2).
         Action::MailImportSelectSourceKind(kind) => Some(Op::MailImportDispatch {
-            machine: app.settings.mail_import.machine.clone()?,
+            machine: mail_machine_or_refuse(app, |s| s.mail_import.machine.clone())?,
             actions: vec![MailImportAction::SelectSourceKind { kind }],
         }),
         Action::MailImportSetTlsMode(mode) => Some(Op::MailImportDispatch {
-            machine: app.settings.mail_import.machine.clone()?,
+            machine: mail_machine_or_refuse(app, |s| s.mail_import.machine.clone())?,
             actions: vec![MailImportAction::SetTlsMode { mode }],
         }),
         // Sign in with Microsoft (the variant's doc comment). The executor
@@ -8173,7 +8563,13 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 fauna_client_mail_settings::microsoft_sign_in_actions(&e.username_input)
             };
             Some(Op::MailImportDispatch {
-                machine: e.machine.clone()?,
+                machine: match e.machine.clone() {
+                    Some(machine) => machine,
+                    None => {
+                        refuse_mail_unbuilt(app);
+                        return None;
+                    }
+                },
                 actions,
             })
         }
@@ -8205,16 +8601,16 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 .unwrap_or(ImportSourceKind::Gmail);
             let actions = app.settings.mail_import.connect_actions(kind);
             Some(Op::MailImportDispatch {
-                machine: app.settings.mail_import.machine.clone()?,
+                machine: mail_machine_or_refuse(app, |s| s.mail_import.machine.clone())?,
                 actions,
             })
         }
         Action::MailImportForgetSource => Some(Op::MailImportDispatch {
-            machine: app.settings.mail_import.machine.clone()?,
+            machine: mail_machine_or_refuse(app, |s| s.mail_import.machine.clone())?,
             actions: vec![MailImportAction::ForgetSource],
         }),
         Action::MailImportToggleMailbox(mailbox) => Some(Op::MailImportDispatch {
-            machine: app.settings.mail_import.machine.clone()?,
+            machine: mail_machine_or_refuse(app, |s| s.mail_import.machine.clone())?,
             actions: vec![MailImportAction::ToggleMailbox { mailbox }],
         }),
         Action::MailImportToggleImportDuplicates => {
@@ -8227,13 +8623,22 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 .as_ref()
                 .is_some_and(|s| s.import_duplicates);
             Some(Op::MailImportDispatch {
-                machine: app.settings.mail_import.machine.clone()?,
+                machine: mail_machine_or_refuse(app, |s| s.mail_import.machine.clone())?,
                 actions: vec![MailImportAction::SetImportDuplicates { value }],
             })
         }
         Action::MailImportNext => {
             let e = &app.settings.mail_import;
-            let machine = e.machine.clone()?;
+            let Some(machine) = e.machine.clone() else {
+                refuse_mail_unbuilt(app);
+                return None;
+            };
+            // The answer the button painted from, asked again (rule 6).
+            let answer = e.next_answer();
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
+            let e = &app.settings.mail_import;
             // Off the Scope step, Next first commits the date-from and
             // max-size drafts — one awaited op, so the Confirm summary can
             // never describe a scope the machine has not got.
@@ -8249,15 +8654,21 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             Some(Op::MailImportDispatch { machine, actions })
         }
         Action::MailImportBack => Some(Op::MailImportDispatch {
-            machine: app.settings.mail_import.machine.clone()?,
+            machine: mail_machine_or_refuse(app, |s| s.mail_import.machine.clone())?,
             actions: vec![MailImportAction::Back],
         }),
-        Action::MailImportStart => Some(Op::MailImportDispatch {
-            machine: app.settings.mail_import.machine.clone()?,
-            actions: vec![MailImportAction::Start],
-        }),
+        Action::MailImportStart => {
+            let answer = app.settings.mail_import.start_answer();
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
+            Some(Op::MailImportDispatch {
+                machine: mail_machine_or_refuse(app, |s| s.mail_import.machine.clone())?,
+                actions: vec![MailImportAction::Start],
+            })
+        }
         Action::MailImportPause => Some(Op::MailImportDispatch {
-            machine: app.settings.mail_import.machine.clone()?,
+            machine: mail_machine_or_refuse(app, |s| s.mail_import.machine.clone())?,
             actions: vec![MailImportAction::Pause],
         }),
         // The fetch-drive loop stops on Pause (module docs); resuming needs a
@@ -8267,11 +8678,11 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // On a session adopted after a restart, the credential the Progress
         // step painted is committed first (`MailImportState::resume_actions`).
         Action::MailImportResume => Some(Op::MailImportDispatch {
-            machine: app.settings.mail_import.machine.clone()?,
+            machine: mail_machine_or_refuse(app, |s| s.mail_import.machine.clone())?,
             actions: app.settings.mail_import.resume_actions(),
         }),
         Action::MailImportRestart => Some(Op::MailImportDispatch {
-            machine: app.settings.mail_import.machine.clone()?,
+            machine: mail_machine_or_refuse(app, |s| s.mail_import.machine.clone())?,
             actions: vec![MailImportAction::RestartRebuiltMailboxes],
         }),
         // The two-click inline confirm, the `MailExportCancel` shape: arming is
@@ -8285,18 +8696,18 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             }
             e.cancel_armed = false;
             Some(Op::MailImportDispatch {
-                machine: app.settings.mail_import.machine.clone()?,
+                machine: mail_machine_or_refuse(app, |s| s.mail_import.machine.clone())?,
                 actions: vec![MailImportAction::Cancel],
             })
         }
         // A run-starting action like Resume (`import_action_starts_run`),
         // so the same executor spawns the walk.
         Action::MailImportSkipRest => Some(Op::MailImportDispatch {
-            machine: app.settings.mail_import.machine.clone()?,
+            machine: mail_machine_or_refuse(app, |s| s.mail_import.machine.clone())?,
             actions: vec![MailImportAction::SkipRest],
         }),
         Action::MailImportDismiss => Some(Op::MailImportDispatch {
-            machine: app.settings.mail_import.machine.clone()?,
+            machine: mail_machine_or_refuse(app, |s| s.mail_import.machine.clone())?,
             actions: vec![MailImportAction::Dismiss],
         }),
         // Purely local — the skip log is already on the snapshot, so showing it
@@ -8364,6 +8775,11 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             round: None,
         }),
         Action::ArchiveImportNext => {
+            // The answer the button painted from, asked again (rule 6).
+            let answer = app.settings.archive_import.next_answer();
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
             let e = &app.settings.archive_import;
             let machine = e.machine.clone()?;
             // Off the Scope step, Next first commits both date drafts — one
@@ -8389,11 +8805,17 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             actions: vec![ArchiveImportAction::Back],
             round: None,
         }),
-        Action::ArchiveImportStart => Some(Op::ArchiveImportDispatch {
-            machine: app.settings.archive_import.machine.clone()?,
-            actions: vec![ArchiveImportAction::Start],
-            round: crate::archive_glue::LinkRound::of(app),
-        }),
+        Action::ArchiveImportStart => {
+            let answer = app.settings.archive_import.start_answer();
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
+            Some(Op::ArchiveImportDispatch {
+                machine: app.settings.archive_import.machine.clone()?,
+                actions: vec![ArchiveImportAction::Start],
+                round: crate::archive_glue::LinkRound::of(app),
+            })
+        }
         Action::ArchiveImportPause => Some(Op::ArchiveImportDispatch {
             machine: app.settings.archive_import.machine.clone()?,
             actions: vec![ArchiveImportAction::Pause],
@@ -8430,11 +8852,17 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             app.settings.archive_import.show_skipped ^= true;
             None
         }
-        Action::ArchiveImportProfilePrefill => Some(Op::ArchiveImportDispatch {
-            machine: app.settings.archive_import.machine.clone()?,
-            actions: vec![ArchiveImportAction::ApplyArchiveProfile],
-            round: None,
-        }),
+        Action::ArchiveImportProfilePrefill => {
+            let answer = app.settings.archive_import.prefill_answer();
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
+            Some(Op::ArchiveImportDispatch {
+                machine: app.settings.archive_import.machine.clone()?,
+                actions: vec![ArchiveImportAction::ApplyArchiveProfile],
+                round: None,
+            })
+        }
 
         // ── Mail → Lists. Every mutation funnels through the one
         // `MailListsDispatch` op, the `MailAliasesDispatch` reasoning: exactly
@@ -8465,7 +8893,17 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // nothing, a second press on the same link saves.
         Action::MailListsSubmit { .. } => {
             let l = &mut app.settings.mail_lists;
-            let machine = l.machine.clone()?;
+            let Some(machine) = l.machine.clone() else {
+                refuse_mail_unbuilt(app);
+                return None;
+            };
+            // The answer the submit painted from, asked again; a refusal says
+            // why instead of returning silently (rules 4, 6 and 7).
+            let answer = app.settings.mail_lists.submit_answer();
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
+            let l = &mut app.settings.mail_lists;
             let action = l.submit_action()?;
             if let Some(url) = l.archive_needing_confirm()
                 && l.archive_confirm_armed.as_deref() != Some(url.as_str())
@@ -8487,7 +8925,10 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 l.archive_confirm_armed = None;
                 return None;
             }
-            let machine = l.machine.clone()?;
+            let Some(machine) = l.machine.clone() else {
+                refuse_mail_unbuilt(app);
+                return None;
+            };
             l.delete_armed = None;
             Some(Op::MailListsDispatch {
                 machine,
@@ -8526,14 +8967,17 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             None
         }
         Action::MailListMembersAddSubmit => {
-            let machine = app.settings.mail_list_members.machine.clone()?;
+            let machine = mail_machine_or_refuse(app, |s| s.mail_list_members.machine.clone())?;
             let address = app
                 .settings
                 .mail_list_members
                 .address_input
                 .trim()
                 .to_string();
-            if address.is_empty() {
+            // The answer the submit painted from, asked again; a refusal says
+            // why instead of returning silently (rules 4, 6 and 7).
+            let answer = fauna_client_mail_settings::member_add_possibility(address.clone());
+            if app.errors.refuse(Page::Settings, &answer) {
                 return None;
             }
             Some(Op::MailListMembersDispatch {
@@ -8542,7 +8986,15 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             })
         }
         Action::MailListMembersImportSubmit => {
-            let machine = app.settings.mail_list_members.machine.clone()?;
+            let machine = mail_machine_or_refuse(app, |s| s.mail_list_members.machine.clone())?;
+            // The answer the submit painted from, asked again; a refusal says
+            // why instead of returning silently (rules 4, 6 and 7).
+            let answer = fauna_client_mail_settings::member_import_possibility(
+                app.settings.mail_list_members.import_input.clone(),
+            );
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
             let m = &mut app.settings.mail_list_members;
             if m.import_addresses().is_empty() {
                 return None;
@@ -8556,14 +9008,14 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             })
         }
         Action::MailListMembersUnsubscribe(address) => {
-            let machine = app.settings.mail_list_members.machine.clone()?;
+            let machine = mail_machine_or_refuse(app, |s| s.mail_list_members.machine.clone())?;
             Some(Op::MailListMembersDispatch {
                 machine,
                 action: MailListMembersAction::Unsubscribe { address },
             })
         }
         Action::MailListMembersResubscribe(address) => {
-            let machine = app.settings.mail_list_members.machine.clone()?;
+            let machine = mail_machine_or_refuse(app, |s| s.mail_list_members.machine.clone())?;
             Some(Op::MailListMembersDispatch {
                 machine,
                 action: MailListMembersAction::Resubscribe { address },
@@ -8581,7 +9033,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 .as_ref()
                 .map(|s| s.serving_enabled)
                 .unwrap_or(true);
-            let machine = app.settings.mail.machine.clone()?;
+            let machine = mail_machine_or_refuse(app, |s| s.mail.machine.clone())?;
             Some(Op::SetMailServing { machine, enabled })
         }
         // Confirm rotation → `StartRotation`. Drains the
@@ -8595,10 +9047,22 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // rotation"). Closing it on dispatch left nothing on screen while the
         // rotation ran.
         Action::MailRotateConfirm => {
-            if app.settings.mail.rotation_in_flight.is_some() {
+            // The confirm's answer, asked again; a refusal says why.
+            let in_flight = app.settings.mail.rotation_in_flight.is_some();
+            if let Some(reason) = app
+                .settings
+                .mail
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.rotate_keys_possibility(in_flight).reason().cloned())
+                .or_else(|| {
+                    in_flight.then(|| fauna_core::localized::LocalizedText::key("common.in_flight"))
+                })
+            {
+                app.settings.mail.draft_refusal = Some(crate::wizard::localized(&reason));
                 return None;
             }
-            let machine = app.settings.mail.machine.clone()?;
+            let machine = mail_machine_or_refuse(app, |s| s.mail.machine.clone())?;
             let excluded: Vec<String> = app.settings.mail.rotate_excluded.drain().collect();
             // The credentials `start_rotation` re-wraps: the live ones not excluded.
             let rewrapped = app.settings.mail.snapshot.as_ref().map_or(0, |s| {
@@ -8610,7 +9074,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // The banner's resume → `ResumeRotation`, picking up a rotation a prior
         // session left mid-flight.
         Action::MailResumeRotation => {
-            let machine = app.settings.mail.machine.clone()?;
+            let machine = mail_machine_or_refuse(app, |s| s.mail.machine.clone())?;
             Some(Op::ResumeMailRotation { machine })
         }
         // A rail-row click into Privacy — the same self-fetch entry the
@@ -8644,6 +9108,14 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         }
         Action::OpenConnectedApps => route_subpage(&mut app.settings, Some("connected-apps"), None),
         Action::ConnectedAppsSubmitCode => {
+            // The button's answer, asked again — the input's Enter reaches here
+            // too, so a blank code is refused with why, never sent (rule 4).
+            let answer = fauna_client_connected_apps::connect_code_possibility(
+                &app.settings.connected_apps.code_input,
+            );
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
             let c = &mut app.settings.connected_apps;
             let machine = c.machine.clone()?;
             let code = std::mem::take(&mut c.code_input);
@@ -8651,6 +9123,29 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 machine,
                 gesture: ConnectedAppsGesture::SubmitCode(code),
             })
+        }
+        // An approve asks the card's answer again: a folder card with no
+        // folder chosen refuses with why (rule 4). Decline is never gated.
+        Action::ConnectedAppsResolveRequest {
+            consent_id_hex,
+            approved: true,
+        } if app.errors.refuse(
+            Page::Settings,
+            &app.settings
+                .connected_apps
+                .snapshot
+                .as_ref()
+                .and_then(|s| {
+                    s.requests
+                        .iter()
+                        .find(|r| r.consent_id_hex == consent_id_hex)
+                })
+                .map_or(fauna_core::possibility::Possibility::Possible, |r| {
+                    r.approve_possibility()
+                }),
+        ) =>
+        {
+            None
         }
         Action::ConnectedAppsResolveRequest {
             consent_id_hex,
@@ -8766,10 +9261,17 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         }),
         // The switch → `set_external_apps_enabled` with the flipped value.
         // Non-optimistic, the `MailToggleServeHere` shape: the current value is
-        // read from the snapshot (an unread snapshot counts as ON, the flag's
-        // default) and the dispatch is awaited, so the `state` attr flips only
-        // once the nest confirms the write.
+        // read from the snapshot and the dispatch is awaited, so the `state`
+        // attr flips only once the nest confirms the write. Never before the
+        // read: the switch's answer is asked again, so an unread default is not
+        // written back as a choice (rules 5 and 6).
         Action::ConnectedAppsToggleExternalApps => {
+            let answer = fauna_client_connected_apps::external_apps_possibility(
+                app.settings.connected_apps.snapshot.as_ref(),
+            );
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
             let enabled = app
                 .settings
                 .connected_apps
@@ -8856,6 +9358,18 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             // Flip against the last NEST-CONFIRMED view, never a local optimism
             // bit: an un-hydrated page has nothing true to flip from, so it
             // re-hydrates instead of guessing `false`.
+            //
+            // The action asks the same shared answer the toggle paints from,
+            // and a refusal says why on `error-message` — never a silent drop.
+            let answer = web::subdomain_toggle_answer(&app.settings);
+            if !answer.is_possible() {
+                // A failed hydrate already holds its own, more specific error.
+                if web::web_read_state(&app.settings) != fauna_core::possibility::ReadState::Failed
+                {
+                    app.settings.web.error = answer.reason().map(crate::wizard::localized);
+                }
+                return None;
+            }
             let enabled = !app.settings.web.view.as_ref()?.enabled;
             Some(Op::SetWebSubdomain {
                 nest: app.settings.nest.clone()?,
@@ -8925,6 +9439,15 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 secret_hex: app.settings.secret_hex.clone(),
             },
         }),
+        // The answer the button is painted from, asked again (rule 6).
+        #[cfg(feature = "payments")]
+        Action::RedeemClaim
+            if app
+                .errors
+                .refuse(Page::Settings, &subscriptions::redeem_answer(&app.settings)) =>
+        {
+            None
+        }
         #[cfg(feature = "payments")]
         Action::RedeemClaim => Some(Op::SubscriptionsConsumer {
             nest: app.settings.nest.clone()?,
@@ -8946,6 +9469,12 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 })
         }
         Action::LabelerSubscribe(index) => {
+            // The row's answer, asked again: a labeler whose inspect already
+            // failed refuses with that reason, never a silent re-try (rule 6).
+            let answer = app.settings.labeler_catalog.subscribe_answer(index);
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
             app.settings
                 .labeler_catalog
                 .machine
@@ -8994,10 +9523,16 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // a blank never reaches the rows. `busy` blocks a second activation from
         // racing a read-modify-write cycle against the same config.
         Action::AddMutedWord => {
-            let term = app.settings.muted_words.input.trim().to_string();
-            if term.is_empty() {
+            // The answer the button painted from, asked again: a blank term
+            // or a change still in flight refuses with its reason (rules 4, 7).
+            let answer = fauna_client_config::muted_word_add_possibility(
+                &app.settings.muted_words.input,
+                app.settings.muted_words.busy,
+            );
+            if app.errors.refuse(Page::Settings, &answer) {
                 return None;
             }
+            let term = app.settings.muted_words.input.trim().to_string();
             // The DELTA, never the page's list wholesale: the seam re-reads
             // the stored list inside its own update, so a term another device
             // added since this page loaded survives this click.
@@ -9033,8 +9568,10 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         Action::CommitTrainedFactorName => {
             // A blank buffer spends no round trip, but it must still say why
             // nothing was created — the shared refusal's own sentence.
-            if let Some(refusal) = trained_topics::blank_name_refusal(&app.settings) {
-                app.errors.insert(Page::Settings, refusal);
+            // The answer the button painted from, asked again: a blank name or
+            // a change in flight refuses with its reason (rules 4 and 7).
+            let answer = trained_topics::name_answer(&app.settings.trained_topics);
+            if app.errors.refuse(Page::Settings, &answer) {
                 return None;
             }
             trained_topics::commit_name_op(&mut app.settings)
@@ -9059,6 +9596,16 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             // error contract the `TrainedTopicsLoaded` fold's guard cites).
             app.errors.remove(&Page::Settings);
             let manager = app.feed.manager.clone();
+            // The row's answer, asked again: no sheet opens onto a row with no
+            // model or a feed window that is not up (rules 2, 4 and 7).
+            let answer = trained_topics::publish_open_answer(
+                &app.settings.trained_topics,
+                index,
+                manager.is_some(),
+            );
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
             trained_topics::open_publish_op(&mut app.settings, index, manager)
         }
         // A kind swap re-reads through the same live manager, for the same
@@ -9073,14 +9620,28 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // nest-confirmed opt-in the Layer-B producer reads, and
         // `delete_cue_rollup` resets the in-memory cue engine. A manager built
         // here would do neither, and nothing about the page would look wrong.
+        // Each asks the answer its control painted from (rules 6 and 7): no
+        // manager, or an unread opt-in, refuses on `error-message` instead of
+        // returning without a word or writing a guess.
         Action::ToggleShareSignals => {
-            let manager = app.feed.manager.clone()?;
+            let manager = app.feed.manager.clone();
+            let answer = app.settings.engagement.share_answer(manager.is_some());
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
             let share = !app.settings.engagement.share_signals;
-            Some(Op::SetSignalSharing { manager, share })
+            Some(Op::SetSignalSharing {
+                manager: manager?,
+                share,
+            })
         }
         Action::ClearEngagementData => {
-            let manager = app.feed.manager.clone()?;
-            Some(Op::ClearEngagementData { manager })
+            let manager = app.feed.manager.clone();
+            let answer = engagement_cues::EngagementCuesState::clear_answer(manager.is_some());
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
+            Some(Op::ClearEngagementData { manager: manager? })
         }
         Action::TogglePushOptIn => {
             let nest = app.settings.nest.clone()?;
@@ -9090,7 +9651,14 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 on: !app.settings.push.opted_in,
             })
         }
-        Action::SubmitTrainedFactorPublish => trained_topics::submit_publish_op(&mut app.settings),
+        Action::SubmitTrainedFactorPublish => {
+            // The answer the submit painted from, asked again (rules 4, 7).
+            let answer = app.settings.trained_topics.publish.submit_answer();
+            if app.errors.refuse(Page::Settings, &answer) {
+                return None;
+            }
+            trained_topics::submit_publish_op(&mut app.settings)
+        }
         // Set the mode optimistically (instant feedback, matching linux) before
         // issuing the network call — the click path awaits it, but the local
         // state (and thus `data.settings.inbox_mode`) is already correct even if
@@ -9101,6 +9669,15 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             Some(Op::SetInboxMode { nest, mode })
         }
         Action::SaveSpamPrefs => {
+            // The button's own answer first: a press it would not offer is
+            // refused out loud, never sent to be echoed back unchanged.
+            if let fauna_core::possibility::Possibility::Blocked { reason } =
+                app.settings.privacy.save_spam_possibility()
+            {
+                app.errors
+                    .insert(Page::Settings, reason.resolve(fauna_i18n::strings::lookup));
+                return None;
+            }
             let req = match app.settings.privacy.build_spam_request() {
                 Ok(req) => req,
                 Err(msg) => {
@@ -9272,7 +9849,11 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 .atproto
                 .machine
                 .clone()
-                .map(|machine| Op::HydrateAtproto { machine, nest })
+                .map(|machine| Op::HydrateAtproto {
+                    machine,
+                    nest,
+                    resync_of: None,
+                })
         }
         // Mint a new app credential — auto-labeled; `dm_allowed` is the toggle's
         // staged value at the moment of the press (off by default).
@@ -9460,10 +10041,17 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // shapes differ only in which action it hands back (priority #2 — one
         // classifier, every app routes identically).
         Action::NestsSubmitAdd => {
-            let raw = app.settings.nests.add_input.trim().to_string();
-            if raw.is_empty() {
+            // The submit asks the same draft answer it paints from and
+            // refuses with its reason (rules 4 and 7).
+            let answer = fauna_client_pair::link_input_possibility(&app.settings.nests.add_input);
+            if !answer.is_possible() {
+                if let Some(reason) = answer.reason() {
+                    app.errors
+                        .insert(Page::Settings, crate::wizard::localized(reason));
+                }
                 return None;
             }
+            let raw = app.settings.nests.add_input.trim().to_string();
             let action = match fauna_client_pair::classify_link_input(&raw) {
                 fauna_client_pair::LinkInput::NestId { nest_id } => LinkedNestsAction::Link {
                     nest_id,
@@ -9479,9 +10067,9 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                     label: None,
                 },
             };
-            app.settings.nests.add_form_open = false;
-            app.settings.nests.add_input.clear();
-            nests_op(app, action)
+            // The form stays open with the address until the link went
+            // through (`NestsFormSubmitted`).
+            nests_form_op(app, action, NestsForm::Add)
         }
         Action::NestsUnlink(nest_id) => nests_op(app, LinkedNestsAction::Unlink { nest_id }),
         Action::NestsRetryForwards => nests_op(app, LinkedNestsAction::RetryForwards),
@@ -9550,9 +10138,17 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // the form so the re-render starts collapsed (linux's shape). A form
         // that isn't confirmable yields no action and stays open.
         Action::NestsConfirmMint => {
+            let answer = app.settings.nests.mint_answer()?;
+            if !answer.is_possible() {
+                if let Some(reason) = answer.reason() {
+                    app.errors
+                        .insert(Page::Settings, crate::wizard::localized(reason));
+                }
+                return None;
+            }
             let action = app.settings.nests.mint_action()?;
-            app.settings.nests.mint = None;
-            nests_op(app, action)
+            // The form stays open until the mint went through.
+            nests_form_op(app, action, NestsForm::Mint)
         }
         Action::NestsRevokeBackupSeal => nests_op(app, LinkedNestsAction::RevokeBackupSeal),
         Action::NestsRevokeBackupWriter(destination_id) => nests_op(
@@ -9592,6 +10188,30 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 editor: Box::new(editor),
                 remove,
             })
+        }
+        // Add password asks the credential section's own answer first
+        // (`ui/README.md` § Offer only what is possible, rules 6 and 7): a
+        // blocked section refuses with the reason its button carries, and an
+        // absent one opens nothing.
+        Action::MailOpenAddCredential => {
+            use fauna_core::possibility::Possibility;
+            let answer = app
+                .settings
+                .mail
+                .snapshot
+                .as_ref()
+                .map_or(Possibility::once_read(false), |s| {
+                    s.credential_management_possibility()
+                });
+            match answer {
+                Possibility::Possible => apply(&mut app.settings, action),
+                Possibility::Blocked { reason } => {
+                    app.errors
+                        .insert(Page::Settings, reason.resolve(fauna_i18n::strings::lookup));
+                }
+                Possibility::Absent => {}
+            }
+            None
         }
         // Everything else is state-only.
         other => {
@@ -9640,6 +10260,29 @@ async fn hydrate_nests(
         custody,
         reread,
     }
+}
+
+/// Which nests form a [`Op::SubmitNestsForm`] saves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NestsForm {
+    /// `nests-add-input` → `nests-add-submit-button`.
+    Add,
+    /// The trust mint form → `nest-trust-mint-confirm-button`.
+    Mint,
+}
+
+/// A nests form's save: dispatched like [`nests_op`], closing the form only
+/// once it went through.
+fn nests_form_op(app: &App, action: LinkedNestsAction, form: NestsForm) -> Option<Op> {
+    app.settings
+        .nests
+        .machine
+        .clone()
+        .map(|machine| Op::SubmitNestsForm {
+            machine,
+            action,
+            form,
+        })
 }
 
 fn nests_op(app: &App, action: LinkedNestsAction) -> Option<Op> {
@@ -9709,6 +10352,11 @@ pub enum Op {
     FetchLanding {
         nest: Arc<NestClient>,
         actor_id_hex: String,
+        /// The mail machine, read beside the landing's legs so the rail's
+        /// mail sub-page rows paint the nest's answer, never a guess
+        /// ([`SettingsState::mail_usable`]; `ui/mail-settings.md` § Errors &
+        /// edge cases, the mail-usable gate). `None` when it was never built.
+        mail: Option<Arc<MailSettingsMachine>>,
     },
     /// The self host's write — save the open editor's draft or remove the
     /// bearer's own document (`fauna.features.self_limits.update`), then re-read
@@ -9989,12 +10637,16 @@ pub enum Op {
     /// reads on a nav edge when the member lists deliberately do not.
     LoadMemberReviews {
         store: Arc<dyn fauna_client_config::SuccessionLedgerStore>,
+        /// [`SettingsState::ledger_gen`] as the op was built.
+        resync_of: GestureGen,
     },
     /// The inherited-filter marks' re-read off a store-change notice
     /// ([`ledger_resync_ops`]) — the filter plane's twin of
     /// [`Self::LoadMemberReviews`], folding onto [`Outcome::FilterMarks`].
     LoadFilterMarks {
         store: Arc<dyn fauna_client_config::SuccessionLedgerStore>,
+        /// [`SettingsState::ledger_gen`] as the op was built.
+        resync_of: GestureGen,
     },
     /// The Privacy sub-page's self-fetch (`fauna.inbox.mode.get` +
     /// `fauna.spam.get_preferences` + `fauna.email.filters.list`), awaited on
@@ -10151,6 +10803,9 @@ pub enum Op {
         store: fauna_sync_engine::account_runtime::SeatAccountStore,
         self_ref: fauna_core::data::ParticipantRef,
         labels: std::collections::HashMap<String, String>,
+        /// [`task_delegation::TaskDelegationState::gesture_gen`] as the op was
+        /// built — a visit's read or a store-change re-read.
+        resync_of: GestureGen,
     },
     /// Write one kind's assignment, then re-compose — the runner column is
     /// authoritative live state, so it is re-read rather than guessed.
@@ -10494,6 +11149,10 @@ pub enum Op {
     HydrateMailSpam {
         machine: Arc<MailSpamMachine>,
         nest: Arc<NestClient>,
+        /// The page's [`mail_spam::MailSpamState::gesture_gen`] as the op was
+        /// built — a push resync is spawned, and its read must not paint over
+        /// a gesture that folded meanwhile ([`GestureGen`]).
+        resync_of: GestureGen,
     },
     /// Every Spam classifier mutation: reset / contribute-toggle / undo. One op
     /// for all three, the `MailAliasesDispatch` reasoning — dispatch, then
@@ -10696,6 +11355,17 @@ pub enum Op {
         /// gesture's message survives it (the level rule, as
         /// [`Op::HydrateDevices`]'s `reread`).
         reread: bool,
+        /// `Some(SettingsState::folders_gen)` on the store-change re-read:
+        /// its nest halves (the default policy, the tiers, the pending
+        /// shares) are dropped when a folder gesture folded since.
+        resync_of: Option<GestureGen>,
+    },
+    /// The Folders page's mail-custody read (`folders::load_can_serve_webdav`),
+    /// owed by every [`Outcome::FoldersHydrated`] and run after the rows are
+    /// painted ([`take_folders_custody_op`]): `folder-webdav-toggle` is blocked
+    /// "still loading" while it is out.
+    LoadFolderWebdavCustody {
+        store: Option<fauna_sync_engine::account_runtime::AccountStoreHandle>,
     },
     /// `folder-follow-confirm` — resolve a public folder by (handle, name)
     /// against its home nest and pin the record, then re-hydrate so the new row
@@ -10846,12 +11516,21 @@ pub enum Op {
         store: Option<fauna_sync_engine::account_runtime::AccountStoreHandle>,
         /// The row's `FolderSummary::id` — the coverage join key.
         folder_id: i64,
+        /// `None` on the expand (a gesture, whose fold bumps
+        /// `SettingsState::folders_gen`); `Some(generation)` on a re-read
+        /// ([`roster_resync_op`]), whose fold drops what it has outlived.
+        resync_of: Option<GestureGen>,
     },
     /// A `fauna.sync.changed` push named the currently-expanded set — re-read
     /// JUST its device activity, never the roster (a push has nothing to do
     /// with membership, so re-fetching it would be wasted work and risks
     /// clobbering an in-flight share/remove). `crate::settings::device_activity_resync_op`.
-    LoadFolderDeviceActivity { nest: Arc<NestClient>, name: String },
+    LoadFolderDeviceActivity {
+        nest: Arc<NestClient>,
+        name: String,
+        /// `SettingsState::folders_gen` as the push re-read was built.
+        resync_of: GestureGen,
+    },
     /// `folder-destination-attach-button` — the shared
     /// `attach_folder_to_destination` (nest coverage row, then the
     /// `fauna.state.backup` write), then the coverage re-read so the section repaints nest truth
@@ -11027,6 +11706,10 @@ pub enum Op {
     HydrateAtproto {
         machine: Arc<AtprotoSettingsMachine>,
         nest: Option<Arc<NestClient>>,
+        /// `Some(bridges gesture generation)` on the push resync
+        /// ([`atproto_resync_op`]), `None` on a visit — rides to
+        /// [`Outcome::AtprotoHydrated`].
+        resync_of: Option<GestureGen>,
     },
     /// `AtprotoSettingsMachine::mint` — auto-labeled ("App credential N"),
     /// `dm_allowed` the staged mint-time toggle. The newly-minted credential's secret is captured
@@ -11111,6 +11794,15 @@ pub enum Op {
     DispatchNests {
         machine: Arc<LinkedNestsMachine>,
         action: LinkedNestsAction,
+    },
+    /// A nests FORM's save — the add-a-nest link or the trust mint: the
+    /// dispatch of [`Self::DispatchNests`], answering whether it went
+    /// through, so the form closes only then (`docs/goal/ui/README.md`
+    /// § Offer only what is possible, rule 4).
+    SubmitNestsForm {
+        machine: Arc<LinkedNestsMachine>,
+        action: LinkedNestsAction,
+        form: NestsForm,
     },
     /// The restore from a custodian nest (`nests.md` § Trust facet — restore
     /// from a custodian nest): `AccountStoreHandle::restore_from_custodian`,
@@ -11219,7 +11911,12 @@ pub enum Outcome {
     /// `message: None`, because nothing was decided and a reader of this arm
     /// should not have to work that out; both fold through [`fold_review_roster`],
     /// so the two paths cannot disagree about what a fresh roster does.
-    MemberReviewRoster(Option<Vec<fauna_core::data::MemberReview>>),
+    MemberReviewRoster {
+        roster: Option<Vec<fauna_core::data::MemberReview>>,
+        /// [`Op::LoadMemberReviews`]'s `resync_of`: a verdict folded since
+        /// outlives the read.
+        resync_of: GestureGen,
+    },
     /// The succession ceremony ended — see [`StolenOutcome`]; its `Landed` arm
     /// carries the [`LandedSuccession`].
     ///
@@ -11502,8 +12199,8 @@ pub enum Outcome {
         /// first-listing gate ([`hydrated_conflict_policy`]): the facet then
         /// holds no value, and the page says why instead of painting "unset".
         policy_refused: Option<String>,
-        can_serve_webdav: bool,
-        own_tiers: Vec<String>,
+        /// The tier read's state and names (`folders::load_own_tiers`).
+        own_tiers: (fauna_core::possibility::ReadState, Vec<String>),
         pending_shares: Vec<folders::PendingShareView>,
         /// The ceremony's consent cards + landed shared sets, read on the
         /// same edge (`p2p.md` § Offline share initiation).
@@ -11512,12 +12209,17 @@ pub enum Outcome {
         /// [`Op::HydrateFolders`]'s `reread`: the fold retires only the error
         /// a store-change re-read put up, never a gesture's.
         reread: bool,
+        /// [`Op::HydrateFolders`]'s `resync_of`.
+        resync_of: Option<GestureGen>,
     },
     /// A per-set author gesture (serve / paywall / share / evict / access) failed
     /// — the localized message for `error-message`. Success has no variant of its
     /// own: it resolves as a fresh [`Self::FoldersHydrated`] or
     /// [`Self::FolderRosterLoaded`], so the row can only ever show nest truth.
     FolderAuthorGestureFailed(String),
+    /// [`Op::LoadFolderWebdavCustody`]'s answer: where the custody read stands
+    /// and whether it found an MSEK.
+    FolderWebdavCustody((fauna_core::possibility::ReadState, bool)),
     /// The session's ceremony listener is up (rule 7's brake was off, or a
     /// door already bound it) — the panel whose opening asked for it. The seat
     /// itself sits in the session's slot (`OfflineShareState::seat`).
@@ -11583,6 +12285,9 @@ pub enum Outcome {
         /// owner-side bind was the asymmetry. Same carriage rule as the fields
         /// above: `Some` only from the producer that refreshed it.
         snapshot: Option<Box<DevicesSnapshot>>,
+        /// [`Op::LoadFolderRoster`]'s `resync_of`; `None` on the expand and
+        /// the three gestures.
+        resync_of: Option<GestureGen>,
     },
     /// The places editor's own refresh — a `fauna.folders.places.set` gesture
     /// settled and the device roster was re-read so the row repaints nest
@@ -11599,7 +12304,10 @@ pub enum Outcome {
     /// the nest's answer, never the optimistic flip).
     FolderDestinationsLoaded {
         name: String,
-        places: Vec<folders::FolderDestinationPlace>,
+        /// `None` when the re-read failed: the section's read is then
+        /// unanswered, never an empty list (`ui/folders.md` § Errors & edge
+        /// cases — an unanswered read is never "you have none").
+        places: Option<Vec<folders::FolderDestinationPlace>>,
     },
     /// A `fauna.sync.changed` push named the currently-expanded set — the
     /// narrow re-read `crate::settings::device_activity_resync_op` spawns
@@ -11612,6 +12320,8 @@ pub enum Outcome {
         /// The read's failure, painted as its own error; `None` retires the
         /// one it put up (`fauna_devices_machine::RowReadErrors`).
         error: Option<String>,
+        /// [`Op::LoadFolderDeviceActivity`]'s `resync_of`.
+        resync_of: GestureGen,
     },
     /// The recipient-side knock list after an accept or decline, with the machine
     /// snapshot the same op refreshed — folded together so the consumed knock and
@@ -11700,6 +12410,10 @@ pub enum Outcome {
     TaskDelegationLoaded {
         rows: Vec<fauna_client_delegation::TaskDelegationRow>,
         labels: std::collections::HashMap<String, String>,
+        /// `Some` on a load ([`Op::LoadTaskDelegation`]'s `resync_of`), dropped
+        /// when a pin folded since; `None` on a pin's own re-compose, whose
+        /// fold bumps the generation.
+        resync_of: Option<GestureGen>,
     },
     /// A Task-delegation load or pin write failed. Both reach `error-message`:
     /// the load is a nav-edge read the user is looking at (unlike the muted-word
@@ -11741,8 +12455,15 @@ pub enum Outcome {
         filters: Vec<EmailFilter>,
         marks: Option<Vec<i64>>,
     },
-    /// A fresh read of the open inherited-rule marks, after a *Keep*.
-    FilterMarks(Option<Vec<i64>>),
+    /// A fresh read of the open inherited-rule marks, after a *Keep* or off a
+    /// store-change notice.
+    FilterMarks {
+        marks: Option<Vec<i64>>,
+        /// `Some` on the notice's re-read ([`Op::LoadFilterMarks`]), dropped
+        /// when a verdict folded since; `None` after a *Keep*, whose fold bumps
+        /// [`SettingsState::ledger_gen`].
+        resync_of: Option<GestureGen>,
+    },
     /// The filter-edit fetch resolved and decoded — the shared rule and action
     /// inputs, the order and the `continue` flag the create/edit form
     /// pre-populates from, entering edit mode (`editing_filter_id = Some(id)`).
@@ -11770,6 +12491,15 @@ pub enum Outcome {
     /// one variant, one fold, one place the error can bridge onto
     /// `error-message`. `Box`ed for the same `large_enum_variant` reason.
     DevicesSnapshot(Box<DevicesSnapshot>),
+    /// A rename save resolved: the fold of [`Self::DevicesSnapshot`], and
+    /// whether the save went through — only then does the editor over
+    /// `device_id` close (`docs/goal/ui/README.md` § Offer only what is
+    /// possible, rule 4); a refusal or failure keeps it open with the text.
+    DeviceRenamed {
+        snapshot: Box<DevicesSnapshot>,
+        device_id: String,
+        saved: bool,
+    },
     /// The Nests nav-edge hydrate's combined answer: the machine snapshot
     /// plus the escrow-holder set (None keeps the previous set).
     NestsPage {
@@ -11829,6 +12559,10 @@ pub enum Outcome {
     AtprotoHydrated {
         snapshot: Box<AtprotoSettingsSnapshot>,
         bridges: crate::bridges::Outcome,
+        /// [`Op::HydrateAtproto`]'s `resync_of`: a push resync's bridges half
+        /// is dropped when a Bridges gesture folded since
+        /// (`crate::bridges::apply_resync`).
+        resync_of: Option<GestureGen>,
     },
     /// A mint resolved. Carries the same snapshot the [`Self::AtprotoSnapshot`]
     /// fold applies (via `apply_atproto_snapshot`, so the error still bridges
@@ -11855,6 +12589,14 @@ pub enum Outcome {
     /// machine's error bridges onto `error-message`. Boxed like the other
     /// machine snapshots: it carries every row's whole trust facet.
     NestsSnapshot(Box<LinkedNestsSnapshot>),
+    /// A nests form's save resolved: the fold of [`Self::NestsSnapshot`],
+    /// and the form closed only when `saved`; a refusal keeps it open with
+    /// what was typed or picked.
+    NestsFormSubmitted {
+        snapshot: Box<LinkedNestsSnapshot>,
+        form: NestsForm,
+        saved: bool,
+    },
     /// [`Op::RestoreFromCustodian`]'s answer: the runtime's outcome (`Err` =
     /// the gesture could not run), then the Nests re-read when a machine was
     /// there to hydrate.
@@ -11904,7 +12646,11 @@ async fn list_pending_actions(
 impl Op {
     pub async fn run(self) -> Outcome {
         match self {
-            Op::FetchLanding { nest, actor_id_hex } => {
+            Op::FetchLanding {
+                nest,
+                actor_id_hex,
+                mail,
+            } => {
                 let account = AccountClient::new(Arc::clone(&nest));
                 let status = fauna_client_status::StatusClient::new(Arc::clone(&nest));
                 let conversations =
@@ -11936,10 +12682,22 @@ impl Op {
                         Ok(fauna_client_status::NodeLeg::from(&info)),
                     )
                 };
-                let (quota, (features, own_limits, node), key_packages) = tokio::join!(
+                // The mail read is the heal-free hydrate: the landing writes
+                // nothing; the Mail page's own visit heals. A failure is
+                // stamped on the snapshot, which leaves `read` unset, so the
+                // rail keeps the mail rows waiting rather than guessing.
+                let mail_read = async {
+                    if let Some(machine) = mail
+                        && let Err(e) = machine.hydrate_without_heal().await
+                    {
+                        tracing::warn!("[settings/landing] mail read: {e:?}");
+                    }
+                };
+                let (quota, (features, own_limits, node), key_packages, ()) = tokio::join!(
                     account.quota_get(),
                     identity_legs,
                     conversations.keypackage_count(actor_id_hex),
+                    mail_read,
                 );
                 Outcome::LandingLoaded {
                     quota: quota
@@ -12415,10 +13173,14 @@ impl Op {
             // fails leaves the cached roster alone rather than blanking it,
             // because an empty page is indistinguishable from "you are done"
             // and this one must never say that by accident.
-            Op::LoadMemberReviews { store } => {
-                Outcome::MemberReviewRoster(reread_member_reviews(store.as_ref()).await)
-            }
-            Op::LoadFilterMarks { store } => Outcome::FilterMarks(read_filter_marks(&store).await),
+            Op::LoadMemberReviews { store, resync_of } => Outcome::MemberReviewRoster {
+                roster: reread_member_reviews(store.as_ref()).await,
+                resync_of,
+            },
+            Op::LoadFilterMarks { store, resync_of } => Outcome::FilterMarks {
+                marks: read_filter_marks(&store).await,
+                resync_of: Some(resync_of),
+            },
             Op::MemberReviewRemove {
                 manager,
                 store,
@@ -12564,8 +13326,13 @@ impl Op {
                 store,
                 self_ref,
                 labels,
+                resync_of,
             } => match task_delegation::load_rows(&store, nest, self_ref).await {
-                Ok(rows) => Outcome::TaskDelegationLoaded { rows, labels },
+                Ok(rows) => Outcome::TaskDelegationLoaded {
+                    rows,
+                    labels,
+                    resync_of: Some(resync_of),
+                },
                 Err(e) => Outcome::TaskDelegationFailed(e),
             },
             Op::SetTaskAssignment {
@@ -12595,6 +13362,7 @@ impl Op {
                                 // the fold below keeps the existing map when this is
                                 // empty, so a re-read of the roster is not owed here.
                                 labels: std::collections::HashMap::new(),
+                                resync_of: None,
                             },
                             Err(e) => Outcome::TaskDelegationFailed(e),
                         }
@@ -12855,7 +13623,10 @@ impl Op {
                         "recording that you recognise this rule failed: {e}"
                     ));
                 }
-                Outcome::FilterMarks(read_filter_marks(&store).await)
+                Outcome::FilterMarks {
+                    marks: read_filter_marks(&store).await,
+                    resync_of: None,
+                }
             }
             Op::FetchFilterForEdit { nest, id } => {
                 match EmailClient::new(nest).filters_get(id).await {
@@ -13322,7 +14093,11 @@ impl Op {
                 let _ = machine.dispatch(action).await;
                 Outcome::MailListMembersSnapshot(Box::new(machine.snapshot()))
             }
-            Op::HydrateMailSpam { machine, nest } => {
+            Op::HydrateMailSpam {
+                machine,
+                nest,
+                resync_of,
+            } => {
                 // All three parts in one awaited op — see the variant's docs. A
                 // hydrate failure is not fatal: the machine keeps its last-known
                 // snapshot and stamps the error onto it (the `HydrateMail`
@@ -13336,6 +14111,7 @@ impl Op {
                     snapshot: Some(machine.snapshot()),
                     share: mail_spam::read_report_share(nest).await,
                     threshold_override: Some(threshold_override),
+                    resync_of: Some(resync_of),
                 }))
             }
             Op::MailSpamDispatch {
@@ -13354,6 +14130,7 @@ impl Op {
                     // last read painted, so a click on Reset/Contribute/Undo
                     // cannot clobber an in-progress, uncommitted threshold edit.
                     threshold_override: None,
+                    resync_of: None,
                 }))
             }
             Op::MailSpamSetThresholdOverride { nest, value } => {
@@ -13365,6 +14142,7 @@ impl Op {
                     snapshot: None,
                     share: mail_spam::read_report_share(nest).await,
                     threshold_override: Some(threshold_override),
+                    resync_of: None,
                 }))
             }
             Op::MailSpamSetReportShare { nest, share } => {
@@ -13375,6 +14153,7 @@ impl Op {
                     share: mail_spam::set_report_share(nest, share).await,
                     // Untouched by a report-share flip either.
                     threshold_override: None,
+                    resync_of: None,
                 }))
             }
             Op::SubmitMailCredential {
@@ -13546,8 +14325,12 @@ impl Op {
                 device_id,
                 label,
             } => {
-                machine.rename_device(device_id, label).await;
-                Outcome::DevicesSnapshot(Box::new(machine.snapshot()))
+                let saved = machine.save_device_name(device_id.clone(), label).await;
+                Outcome::DeviceRenamed {
+                    snapshot: Box::new(machine.snapshot()),
+                    device_id,
+                    saved,
+                }
             }
             Op::WizardCreate {
                 devices_machine,
@@ -13623,6 +14406,7 @@ impl Op {
                 #[cfg(feature = "p2p-share")]
                 session_seat,
                 reread,
+                resync_of,
             } => {
                 machine.refresh().await;
                 let snapshot = Box::new(machine.snapshot());
@@ -13633,8 +14417,7 @@ impl Op {
                 // background self-fetch on a nav edge (the `LoadMutedWords` shape).
                 let mut default_conflict_policy = None;
                 let mut policy_refused = None;
-                let mut can_serve_webdav = false;
-                let mut own_tiers = Vec::new();
+                let mut own_tiers = (fauna_core::possibility::ReadState::Pending, Vec::new());
                 let mut pending_shares = Vec::new();
                 #[cfg(feature = "p2p-share")]
                 let mut group_shares = crate::offline_share::GroupShareViews::default();
@@ -13653,7 +14436,6 @@ impl Op {
                         )
                         .await;
                     }
-                    can_serve_webdav = folders::load_can_serve_webdav(store.clone()).await;
                     (default_conflict_policy, policy_refused) = hydrated_conflict_policy(
                         folders::load_default_conflict_policy(&preferences).await,
                     );
@@ -13668,13 +14450,16 @@ impl Op {
                     snapshot,
                     default_conflict_policy,
                     policy_refused,
-                    can_serve_webdav,
                     own_tiers,
                     pending_shares,
                     #[cfg(feature = "p2p-share")]
                     group_shares,
                     reread,
+                    resync_of,
                 }
+            }
+            Op::LoadFolderWebdavCustody { store } => {
+                Outcome::FolderWebdavCustody(folders::load_can_serve_webdav(store).await)
             }
             Op::FollowPublicFolder {
                 machine,
@@ -13759,15 +14544,18 @@ impl Op {
                         // Repaint from the nest's answer — never the
                         // optimistic flip (the `SetFolderPlace` posture).
                         match folders::load_folder_destinations(nest, &store, folder_id).await {
-                            Ok(places) => Outcome::FolderDestinationsLoaded { name, places },
+                            Ok(places) => Outcome::FolderDestinationsLoaded {
+                                name,
+                                places: Some(places),
+                            },
                             Err(error) => {
                                 tracing::debug!(
                                     "[settings/folders] coverage re-read failed: {error}"
                                 );
-                                Outcome::FolderDestinationsLoaded {
-                                    name,
-                                    places: Vec::new(),
-                                }
+                                // Unanswered, never "no destination": the
+                                // fold drops the fresh guard, so neither the
+                                // pair nor the enrol-one step paints.
+                                Outcome::FolderDestinationsLoaded { name, places: None }
                             }
                         }
                     }
@@ -13803,15 +14591,18 @@ impl Op {
                 match detached {
                     Ok(_) => {
                         match folders::load_folder_destinations(nest, &store, folder_id).await {
-                            Ok(places) => Outcome::FolderDestinationsLoaded { name, places },
+                            Ok(places) => Outcome::FolderDestinationsLoaded {
+                                name,
+                                places: Some(places),
+                            },
                             Err(error) => {
                                 tracing::debug!(
                                     "[settings/folders] coverage re-read failed: {error}"
                                 );
-                                Outcome::FolderDestinationsLoaded {
-                                    name,
-                                    places: Vec::new(),
-                                }
+                                // Unanswered, never "no destination": the
+                                // fold drops the fresh guard, so neither the
+                                // pair nor the enrol-one step paints.
+                                Outcome::FolderDestinationsLoaded { name, places: None }
                             }
                         }
                     }
@@ -13976,6 +14767,7 @@ impl Op {
                 mls_group_id,
                 store,
                 folder_id,
+                resync_of,
             } => {
                 // The destination-places read rides this SAME awaited round
                 // trip (backup-destinations.md § Ordinary-folder coverage).
@@ -14057,6 +14849,7 @@ impl Op {
                     destinations,
                     snapshot: None,
                     reads: Some(reads),
+                    resync_of,
                 }
             }
             // The push-refresh half (`file-sync.md` § Implementation status
@@ -14066,20 +14859,24 @@ impl Op {
             // in-flight share/remove or blank a roster it has nothing to do
             // with. Same fail-safe-empty posture as the arm above, and the same
             // read's own error slot: it is one read on two cadences.
-            Op::LoadFolderDeviceActivity { nest, name } => {
-                match folders::load_device_activity(nest, name.clone()).await {
-                    Ok(devices) => Outcome::FolderDeviceActivityLoaded {
-                        name,
-                        devices,
-                        error: None,
-                    },
-                    Err(error) => Outcome::FolderDeviceActivityLoaded {
-                        name,
-                        devices: Vec::new(),
-                        error: Some(error),
-                    },
-                }
-            }
+            Op::LoadFolderDeviceActivity {
+                nest,
+                name,
+                resync_of,
+            } => match folders::load_device_activity(nest, name.clone()).await {
+                Ok(devices) => Outcome::FolderDeviceActivityLoaded {
+                    name,
+                    devices,
+                    error: None,
+                    resync_of,
+                },
+                Err(error) => Outcome::FolderDeviceActivityLoaded {
+                    name,
+                    devices: Vec::new(),
+                    error: Some(error),
+                    resync_of,
+                },
+            },
             Op::ShareFolder {
                 folder_keys,
                 machine,
@@ -14314,7 +15111,11 @@ impl Op {
                 machine.use_other_version(conflict_id, device_id).await;
                 Outcome::DevicesSnapshot(Box::new(machine.snapshot()))
             }
-            Op::HydrateAtproto { machine, nest } => {
+            Op::HydrateAtproto {
+                machine,
+                nest,
+                resync_of,
+            } => {
                 machine.refresh().await;
                 let snapshot = Box::new(machine.snapshot());
                 let bridges = match nest {
@@ -14327,7 +15128,11 @@ impl Op {
                         plugin_cards: None,
                     },
                 };
-                Outcome::AtprotoHydrated { snapshot, bridges }
+                Outcome::AtprotoHydrated {
+                    snapshot,
+                    bridges,
+                    resync_of,
+                }
             }
             Op::MintAtproto {
                 machine,
@@ -14441,6 +15246,18 @@ impl Op {
                 let _ = machine.dispatch(action).await;
                 Outcome::NestsSnapshot(Box::new(machine.snapshot()))
             }
+            Op::SubmitNestsForm {
+                machine,
+                action,
+                form,
+            } => {
+                let saved = machine.dispatch(action).await.is_ok();
+                Outcome::NestsFormSubmitted {
+                    snapshot: Box::new(machine.snapshot()),
+                    form,
+                    saved,
+                }
+            }
             Op::HydrateEncryption { nest, actor_id_hex } => Outcome::EncryptionKeyPackageCount(
                 fauna_client_conversations::ConversationsClient::new(nest)
                     .keypackage_count(actor_id_hex)
@@ -14500,17 +15317,41 @@ fn apply_mail_snapshot(app: &mut App, snapshot: MailSettingsSnapshot) {
 /// whose training history loaded fine but whose report-share read was refused
 /// must still say so (a dropped error reads downstream as a real product bug —
 /// testing.md point 11).
-fn apply_mail_spam_read(app: &mut App, read: mail_spam::MailSpamRead) {
+///
+/// The late-fold rule, both halves: the classifier snapshot is the machine's,
+/// read at fold time ([`machine_now`]); the report share and the threshold
+/// override only the nest holds, so a re-read a gesture fold has outlived
+/// ([`GestureGen`]) drops them — the gesture's own outcome re-read both after
+/// its write.
+fn apply_mail_spam_read(app: &mut App, mut read: mail_spam::MailSpamRead) {
+    let s = &mut app.settings.mail_spam;
+    read.snapshot = read
+        .snapshot
+        .map(|carried| machine_now(s.machine.as_ref(), carried, MailSpamMachine::snapshot));
+    let share = match read.resync_of {
+        Some(carried) if s.gesture_gen.outlived(carried) => {
+            read.threshold_override = None;
+            None
+        }
+        Some(_) => Some(read.share),
+        None => {
+            s.gesture_gen.bump();
+            Some(read.share)
+        }
+    };
     let error = read
         .snapshot
         .as_ref()
         .and_then(|s| s.error.clone())
-        .or_else(|| read.share.as_ref().err().cloned())
+        .or_else(|| share.as_ref()?.as_ref().err().cloned())
         .or_else(|| read.threshold_override.as_ref()?.as_ref().err().cloned());
     match error {
         Some(message) => {
             app.errors.insert(Page::Settings, message);
         }
+        // An outlived re-read clears nothing: the newer gesture's fold set the
+        // slot from halves this read no longer speaks for.
+        None if share.is_none() => {}
         None => {
             app.errors.remove(&Page::Settings);
         }
@@ -14523,11 +15364,15 @@ fn apply_mail_spam_read(app: &mut App, read: mail_spam::MailSpamRead) {
     if let Some(snapshot) = read.snapshot {
         s.snapshot = Some(snapshot);
     }
-    if let Ok(status) = read.share {
-        s.apply_report_share(status);
+    match share {
+        Some(Ok(status)) => s.apply_report_share(status),
+        Some(Err(_)) => s.share_read = mail_spam::read_failed(s.share_read),
+        None => {}
     }
-    if let Some(Ok(value)) = read.threshold_override {
-        s.apply_spam_threshold_override(value);
+    match read.threshold_override {
+        Some(Ok(value)) => s.apply_spam_threshold_override(value),
+        Some(Err(_)) => s.threshold_read = mail_spam::read_failed(s.threshold_read),
+        None => {}
     }
 }
 
@@ -14627,6 +15472,80 @@ fn apply_mail_lists_snapshot(app: &mut App, snapshot: MailListsSnapshot) {
     l.delete_armed = None;
     l.archive_confirm_armed = None;
     l.snapshot = Some(snapshot);
+}
+
+/// The snapshot a wizard outcome folds: its machine's own, read as the outcome
+/// folds — never the copy the op carried. With no machine (a fixture, or a
+/// glue refusal) the carried copy is all there is.
+///
+/// Outcomes do not fold in the order their ops read the machine. An op off the
+/// gesture path (the push resync, the 1 s progress tick) sends its outcome over
+/// the channel, which the main loop drains only between agent requests, while
+/// an awaited gesture folds its own inline. So a re-read that finished just
+/// before a press folds just after it, and its copy repainted the step, format
+/// or scope the press had already moved past: measured on Windows as the export
+/// wizard's picker going back to mbox after Maildir++ was chosen, and the Scope
+/// step's mailbox rows vanishing between two reads. The machine's snapshot now
+/// is never older than any outcome in flight, and the op still reads its own
+/// copy for what it decides (the run spawn after a `Start`).
+fn machine_now<M, S>(machine: Option<&Arc<M>>, carried: S, snapshot: impl FnOnce(&M) -> S) -> S {
+    machine.map_or(carried, |m| snapshot(m))
+}
+
+/// Fold the unsent tick's read of the account page's list
+/// (`session::spawn_unsent_refresh`, `DataMessage::UnsentChangesRead`) — the
+/// late-fold rule's generation half: the tick is spawned, so a read taken
+/// before a retry or a discard folded is dropped, never repainting the row the
+/// settle removed. A failed read stays off `error-message` (a background read;
+/// the last rows stay).
+pub(crate) fn fold_unsent_tick(
+    state: &mut SettingsState,
+    read: Result<Vec<fauna_core::offline_intent::UnsentChange>, String>,
+    resync_of: GestureGen,
+) {
+    if state.unsent_gen.outlived(resync_of) {
+        return;
+    }
+    match read {
+        Ok(rows) => {
+            if state.unsent_changes.as_ref() != Some(&rows) {
+                // A discard armed on a row that has left the list has nothing
+                // left to confirm.
+                if let Some(armed) = state.unsent_discard_armed.as_deref()
+                    && !rows.iter().any(|r| r.intent_id == armed)
+                {
+                    state.unsent_discard_armed = None;
+                }
+                state.unsent_changes = Some(rows);
+            }
+        }
+        Err(why) => tracing::debug!("unsent changes not re-read: {why}"),
+    }
+}
+
+/// A page's gesture generation — the half of the late-fold rule for state only
+/// the nest holds, where there is no machine to read at fold time
+/// ([`machine_now`] is the other half).
+///
+/// Every gesture fold on the page bumps it; a re-read that cannot be awaited
+/// (a push resync) carries the value it saw when its op was built, and its fold
+/// drops what it read when a gesture has folded since ([`Self::outlived`]). The
+/// gesture's own outcome re-read the nest after its write, so it is never older
+/// than the dropped read; the next push or visit re-reads anyway.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GestureGen(u64);
+
+impl GestureGen {
+    /// A gesture's outcome folded on the page.
+    pub(crate) fn bump(&mut self) {
+        self.0 += 1;
+    }
+
+    /// Whether a gesture folded after an op that carried `carried` was built —
+    /// its read is then older than what the page shows.
+    pub(crate) fn outlived(self, carried: GestureGen) -> bool {
+        self.0 > carried.0
+    }
 }
 
 /// Bridge a shared-machine `MailExportSnapshot` onto the page — the SINGLE
@@ -15037,8 +15956,15 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         // and the contacts badge read the same field), so it lands on `App` and
         // every surface drops the person in the same frame.
         // A nav-edge read, no verdict behind it — roster only.
-        Outcome::MemberReviewRoster(roster) => fold_review_roster(app, roster),
+        // The visit's read or a store-change re-read: a verdict folded since
+        // it was built outlives it (the late-fold rule's generation half).
+        Outcome::MemberReviewRoster { roster, resync_of } => {
+            if !app.settings.ledger_gen.outlived(resync_of) {
+                fold_review_roster(app, roster);
+            }
+        }
         Outcome::MemberReviewDecided { roster, message } => {
+            app.settings.ledger_gen.bump();
             fold_review_roster(app, roster);
             // Surfaced on the page's own `error-message` (convention 2) rather
             // than as chrome: these arms are the cases where the gesture did NOT
@@ -15174,8 +16100,15 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         Outcome::MailAliasesSnapshot(snapshot) => {
             apply_mail_aliases_snapshot(app, *snapshot);
         }
+        // The push resync (`connected_apps_resync_op`) lands here as well as
+        // every gesture: paint the machine as it stands now (`machine_now`).
         Outcome::ConnectedAppsSnapshot(snapshot) => {
-            apply_connected_apps_snapshot(app, *snapshot);
+            let snapshot = machine_now(
+                app.settings.connected_apps.machine.as_ref(),
+                *snapshot,
+                |m: &fauna_client_connected_apps::ConnectedAppsMachine| m.snapshot(),
+            );
+            apply_connected_apps_snapshot(app, snapshot);
         }
         // The secret read resolved. Either paint it (the row stores it) or copy
         // it and let it drop — never both: copy is the "don't show it on my
@@ -15198,11 +16131,23 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         Outcome::MailListsSnapshot(snapshot) => {
             apply_mail_lists_snapshot(app, *snapshot);
         }
+        // The three wizards fold their machine's snapshot as it is NOW, never
+        // the copy the op carried — see `machine_now`.
         Outcome::MailExportSnapshot(snapshot) => {
-            apply_mail_export_snapshot(app, *snapshot, true);
+            let snapshot = machine_now(
+                app.settings.mail_export.machine.as_ref(),
+                *snapshot,
+                MailExportMachine::snapshot,
+            );
+            apply_mail_export_snapshot(app, snapshot, true);
         }
         Outcome::MailImportSnapshot(snapshot) => {
-            apply_mail_import_snapshot(app, *snapshot, true);
+            let snapshot = machine_now(
+                app.settings.mail_import.machine.as_ref(),
+                *snapshot,
+                MailImportMachine::snapshot,
+            );
+            apply_mail_import_snapshot(app, snapshot, true);
         }
         // Re-seed the Source-step drafts from the snapshot the kind-change
         // dispatch just wrote (`syncDraftsFromSnapshot`'s apple shape) before
@@ -15211,24 +16156,49 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         // `Generic` preset to overwrite it with) rather than blanking the
         // field — a known, accepted quirk, not something to special-case here.
         Outcome::MailImportSnapshotKindChanged(snapshot) => {
+            let snapshot = machine_now(
+                app.settings.mail_import.machine.as_ref(),
+                *snapshot,
+                MailImportMachine::snapshot,
+            );
             app.settings.mail_import.host_input = snapshot.host.clone();
             app.settings.mail_import.port_input = snapshot.port.to_string();
-            apply_mail_import_snapshot(app, *snapshot, true);
+            apply_mail_import_snapshot(app, snapshot, true);
         }
         // A repaint, not a gesture: it may not disarm an armed Cancel.
         Outcome::MailExportProgress(snapshot) => {
-            apply_mail_export_snapshot(app, *snapshot, false);
+            let snapshot = machine_now(
+                app.settings.mail_export.machine.as_ref(),
+                *snapshot,
+                MailExportMachine::snapshot,
+            );
+            apply_mail_export_snapshot(app, snapshot, false);
         }
         // A repaint, not a gesture: it may not disarm an armed Cancel.
         Outcome::MailImportProgress(snapshot) => {
-            apply_mail_import_snapshot(app, *snapshot, false);
+            let snapshot = machine_now(
+                app.settings.mail_import.machine.as_ref(),
+                *snapshot,
+                MailImportMachine::snapshot,
+            );
+            apply_mail_import_snapshot(app, snapshot, false);
         }
         Outcome::ArchiveImportSnapshot(snapshot) => {
-            apply_archive_import_snapshot(app, *snapshot, true);
+            let snapshot = machine_now(
+                app.settings.archive_import.machine.as_ref(),
+                *snapshot,
+                ArchiveImportMachine::snapshot,
+            );
+            apply_archive_import_snapshot(app, snapshot, true);
         }
         // A repaint, not a gesture — the `MailImportProgress` reasoning.
         Outcome::ArchiveImportProgress(snapshot) => {
-            apply_archive_import_snapshot(app, *snapshot, false);
+            let snapshot = machine_now(
+                app.settings.archive_import.machine.as_ref(),
+                *snapshot,
+                ArchiveImportMachine::snapshot,
+            );
+            apply_archive_import_snapshot(app, snapshot, false);
         }
         Outcome::WebView(result) => match result {
             // A successful read/write clears any prior error — the DAV-page
@@ -15298,6 +16268,8 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             match result {
                 Ok(mine) => {
                     app.settings.subscriptions.mine = mine;
+                    app.settings.subscriptions.mine_read =
+                        fauna_core::possibility::ReadState::Resolved;
                     // A clean read clears the page's error — the DAV-page
                     // discipline the Web fold above follows.
                     app.errors.remove(&Page::Settings);
@@ -15311,6 +16283,8 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
                 // must not blank a page whose whole job is naming what the user
                 // pays for.
                 Err(message) => {
+                    app.settings.subscriptions.mine_read =
+                        mail_spam::read_failed(app.settings.subscriptions.mine_read);
                     app.errors.insert(Page::Settings, message);
                 }
             }
@@ -15567,6 +16541,7 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         }
         Outcome::UnsentChangeSettled(changes) => match changes {
             Ok(rows) => {
+                app.settings.unsent_gen.bump();
                 app.errors.remove(&Page::Settings);
                 app.settings.unsent_changes = Some(rows);
             }
@@ -15592,6 +16567,8 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             if let Some(mode) = inbox_mode {
                 app.settings.privacy.inbox_mode = Some(mode);
             }
+            let privacy = &mut app.settings.privacy;
+            privacy.spam_read = privacy.spam_read.after(spam.is_some());
             if let Some(prefs) = spam {
                 app.settings.privacy.apply_spam_prefs(&prefs);
                 // This page's read is the freshest view of the viewer's own
@@ -15606,7 +16583,20 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         // One fold for load and save alike: the persisted, normalized list is the
         // render source AND the collapse's read path, so both surfaces move
         // together and there is no second copy to drift.
-        Outcome::TaskDelegationLoaded { rows, labels } => {
+        Outcome::TaskDelegationLoaded {
+            rows,
+            labels,
+            resync_of,
+        } => {
+            // A store-change re-read is spawned: one a pin write outlived would
+            // repaint the rows the pin re-composed.
+            match resync_of {
+                Some(carried) if app.settings.task_delegation.gesture_gen.outlived(carried) => {
+                    return;
+                }
+                Some(_) => {}
+                None => app.settings.task_delegation.gesture_gen.bump(),
+            }
             app.settings.task_delegation.rows = rows;
             // A pin write re-composes with an empty map (names are client-side
             // and a pin cannot change them) — keep the ones already resolved
@@ -15623,21 +16613,38 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             snapshot,
             default_conflict_policy,
             policy_refused,
-            can_serve_webdav,
             own_tiers,
             pending_shares,
             #[cfg(feature = "p2p-share")]
             group_shares,
             reread,
+            resync_of,
         } => {
             // Through the one devices fold: this op awaits four more reads
             // after its refresh, so its reading is the likeliest of all to be
             // older than what is already painted (a wizard create that landed
             // meanwhile). The error slot is this outcome's own, set below.
             fold_devices_snapshot(app, snapshot, reread);
+            // The rows are the machine's, read at fold time above; the rest is
+            // nest state the page's gestures also write. A store-change
+            // re-read a folder gesture has outlived keeps only the rows and
+            // leaves the error slot alone (the late-fold rule).
+            // The rows are committed; the custody read is now owed and out —
+            // the toggle is "still loading" until its own op answers
+            // ([`take_folders_custody_op`]), never the last visit's answer.
+            app.settings.folders.webdav_read = fauna_core::possibility::ReadState::Pending;
+            app.settings.folders.can_serve_webdav = false;
+            app.settings.folders.custody_read_owed = true;
+            match resync_of {
+                Some(carried) if app.settings.folders_gen.outlived(carried) => return,
+                Some(_) => {}
+                None => app.settings.folders_gen.bump(),
+            }
             app.settings.folders.default_conflict_policy = default_conflict_policy;
-            app.settings.folders.can_serve_webdav = can_serve_webdav;
-            app.settings.folders.own_tiers = own_tiers;
+            (
+                app.settings.folders.own_tiers_read,
+                app.settings.folders.own_tiers,
+            ) = own_tiers;
             app.settings.folders.pending_shares = pending_shares;
             #[cfg(feature = "p2p-share")]
             {
@@ -15662,6 +16669,12 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         }
         Outcome::FolderAuthorGestureFailed(error) => {
             app.errors.insert(Page::Settings, error);
+        }
+        Outcome::FolderWebdavCustody(answer) => {
+            (
+                app.settings.folders.webdav_read,
+                app.settings.folders.can_serve_webdav,
+            ) = answer;
         }
         #[cfg(feature = "p2p-share")]
         Outcome::OfflineShareSeatBound { panel } => {
@@ -15707,7 +16720,18 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             destinations,
             snapshot,
             reads,
+            resync_of,
         } => {
+            // A re-read lands only on the row it was issued for, and only if
+            // no folder gesture folded after it was built; the expand and the
+            // three gestures bump the generation.
+            match resync_of {
+                Some(carried) if folder_row_reread_outlived(&app.settings, &name, carried) => {
+                    return;
+                }
+                Some(_) => {}
+                None => app.settings.folders_gen.bump(),
+            }
             // The cap buffers are rebuilt from the NEST's authoritative
             // `byte_cap` on every roster fold, positionally aligned with the
             // RENDERED (member-filtered) list — so a local edit never outlives a
@@ -15764,7 +16788,13 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             name,
             devices,
             error,
+            resync_of,
         } => {
+            // A push re-read: never retarget `device_activity_for` at a row the
+            // user has since left, nor repaint over a newer gesture's fold.
+            if folder_row_reread_outlived(&app.settings, &name, resync_of) {
+                return;
+            }
             app.settings.folders.device_activity = devices;
             app.settings.folders.device_activity_for = Some(name.clone());
             let reads = match error {
@@ -15780,17 +16810,28 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             fold_folder_row_reads(app, &name, reads);
         }
         Outcome::FolderPlacesLoaded { name, places } => {
+            app.settings.folders_gen.bump();
             app.settings.folders.device_places = places;
             app.settings.folders.device_places_for = Some(name);
             app.errors.remove(&Page::Settings);
         }
         Outcome::FolderDestinationsLoaded { name, places } => {
-            app.settings.folders.destination_places = places;
-            app.settings.folders.destination_places_for = Some(name);
+            app.settings.folders_gen.bump();
+            match places {
+                Some(places) => {
+                    app.settings.folders.destination_places = places;
+                    app.settings.folders.destination_places_for = Some(name);
+                }
+                None => {
+                    app.settings.folders.destination_places.clear();
+                    app.settings.folders.destination_places_for = None;
+                }
+            }
             app.settings.folders.destination_attach_selection.clear();
             app.errors.remove(&Page::Settings);
         }
         Outcome::FolderPendingSharesLoaded { pending, snapshot } => {
+            app.settings.folders_gen.bump();
             app.settings.folders.pending_shares = pending;
             if let Some(snapshot) = snapshot {
                 app.settings.devices.snapshot = Some(*snapshot);
@@ -15798,6 +16839,7 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             app.errors.remove(&Page::Settings);
         }
         Outcome::FolderDefaultConflictPolicyLoaded(policy) => {
+            app.settings.folders_gen.bump();
             app.settings.folders.default_conflict_policy = policy;
             app.errors.remove(&Page::Settings);
         }
@@ -15976,6 +17018,7 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
                 // rather than surfaced. The pane renders its empty state, which
                 // is honest — below k there is genuinely nothing published.
                 Some(Err(error)) => {
+                    app.settings.engagement.read_failed();
                     tracing::warn!("[settings/engagement-cues] nav-edge load: {error}");
                 }
                 None => {}
@@ -16032,13 +17075,19 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             app.errors.remove(&Page::Settings);
         }
         Outcome::FilterDeleted { filters, marks } => {
+            app.settings.ledger_gen.bump();
             app.settings.privacy.filters = filters;
             if let Some(marks) = marks {
                 app.filter_marks = marks;
             }
             app.errors.remove(&Page::Settings);
         }
-        Outcome::FilterMarks(marks) => {
+        Outcome::FilterMarks { marks, resync_of } => {
+            match resync_of {
+                Some(carried) if app.settings.ledger_gen.outlived(carried) => return,
+                Some(_) => {}
+                None => app.settings.ledger_gen.bump(),
+            }
             if let Some(marks) = marks {
                 app.filter_marks = marks;
             }
@@ -16075,6 +17124,23 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         // `DevicesSnapshot.error` is a `LocalizedText` (unlike Mail's own
         // already-resolved `String`), so it's resolved here before insertion.
         Outcome::DevicesSnapshot(snapshot) => fold_devices_snapshot(app, snapshot, false),
+        Outcome::DeviceRenamed {
+            snapshot,
+            device_id,
+            saved,
+        } => {
+            if saved
+                && app
+                    .settings
+                    .devices
+                    .rename
+                    .as_ref()
+                    .is_some_and(|d| d.device_id == device_id)
+            {
+                app.settings.devices.rename = None;
+            }
+            fold_devices_snapshot(app, snapshot, false)
+        }
         // The Devices nav-edge hydrate: the roster fold above plus the T16
         // custody facet. A `None` facet keeps the previous one (the config
         // was unreadable this pass — never paint empty over live rows).
@@ -16097,6 +17163,8 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             // is the remedy having landed.
             app.settings.devices.enrollment_refusal = enrollment_refusal;
             fold_devices_snapshot(app, snapshot, reread);
+            // The mint's entry gate reads the 1:1 conversations each visit.
+            refresh_custody_mint_candidates(app);
             if let Some(facet) = custody {
                 if reread {
                     devices::fold_reread_custody(&mut app.settings.devices, facet);
@@ -16160,9 +17228,27 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         // itself renders from, so the Linked panel and that page can never
         // disagree. A bridges-fetch failure lands on `Page::Bridges`'s own
         // error slot, never this page's `error-message`.
-        Outcome::AtprotoHydrated { snapshot, bridges } => {
-            apply_atproto_snapshot(app, *snapshot);
-            crate::bridges::apply_outcome(app, bridges);
+        Outcome::AtprotoHydrated {
+            snapshot,
+            bridges,
+            resync_of,
+        } => {
+            // The push resync (`atproto_resync_op`) is spawned: paint the
+            // machine as it stands now, never the copy the op carried
+            // (`machine_now`).
+            let snapshot = machine_now(
+                app.settings.atproto.machine.as_ref(),
+                *snapshot,
+                |m: &AtprotoSettingsMachine| m.snapshot(),
+            );
+            apply_atproto_snapshot(app, snapshot);
+            // The bridges half is nest state the Bridges page's gestures also
+            // write: a push resync carries that page's generation and drops
+            // what a follow or unfollow folded since has outlived.
+            match resync_of {
+                Some(carried) => crate::bridges::apply_resync(app, bridges, carried),
+                None => crate::bridges::apply_outcome(app, bridges),
+            }
         }
         // The page is backed by a shared machine, so this fold MUST bridge the
         // machine's error onto `error-message` — the same dropped-command
@@ -16188,6 +17274,13 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
                 devices::fold_reread_custody(&mut app.settings.devices, facet);
             }
             if reread {
+                // A store-change re-read is spawned: paint the machine as it
+                // stands now, never the copy the op carried (`machine_now`).
+                let snapshot = machine_now(
+                    app.settings.nests.machine.as_ref(),
+                    *snapshot,
+                    LinkedNestsMachine::snapshot,
+                );
                 // The level rule: this notice's own error is written and
                 // retired alone, so a gesture's message survives it.
                 let own = &mut app.settings.nests.read_error;
@@ -16195,7 +17288,7 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
                     Some(text) => app.errors.insert_own(Page::Settings, text.clone(), own),
                     None => app.errors.retire_own(&Page::Settings, own),
                 }
-                app.settings.nests.snapshot = Some(*snapshot);
+                app.settings.nests.snapshot = Some(snapshot);
             } else {
                 apply_outcome(app, Outcome::NestsSnapshot(snapshot));
             }
@@ -16222,6 +17315,22 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
                     app.errors.insert(Page::Settings, reason);
                 }
             }
+        }
+        Outcome::NestsFormSubmitted {
+            snapshot,
+            form,
+            saved,
+        } => {
+            if saved {
+                match form {
+                    NestsForm::Add => {
+                        app.settings.nests.add_form_open = false;
+                        app.settings.nests.add_input.clear();
+                    }
+                    NestsForm::Mint => app.settings.nests.mint = None,
+                }
+            }
+            apply_outcome(app, Outcome::NestsSnapshot(snapshot));
         }
         Outcome::NestsSnapshot(snapshot) => {
             app.settings.nests.read_error = None;
@@ -16316,6 +17425,8 @@ pub fn route_subpage(
     // filter (always opens showing every entry) and the Account page's armed
     // sign-out confirm + revealed QR (never carried across a fresh visit).
     state.log_filter = 0;
+    state.local_failure = None;
+    state.logs_copied = None;
     state.sign_out_pending = false;
     state.devices.member_remove_pending = None;
     state.devices.rename = None;
@@ -16485,7 +17596,11 @@ pub fn route_subpage(
             .atproto
             .machine
             .clone()
-            .map(|machine| Op::HydrateAtproto { machine, nest });
+            .map(|machine| Op::HydrateAtproto {
+                machine,
+                nest,
+                resync_of: None,
+            });
     }
     // Nests self-hydrates the same way — the nest list AND the whole trust
     // facet (grants, history, mint catalog, backup rows) are the machine's
@@ -16555,7 +17670,11 @@ pub fn route_subpage(
         state.mail_spam.reset_form();
         let machine = state.mail_spam.machine.clone()?;
         let nest = state.nest.clone()?;
-        return Some(Op::HydrateMailSpam { machine, nest });
+        return Some(Op::HydrateMailSpam {
+            machine,
+            nest,
+            resync_of: state.mail_spam.gesture_gen,
+        });
     }
     // Export self-hydrates on every visit, the Lists shape and for two reasons:
     // the scope step's mailbox options are the machine's snapshot (a visit
@@ -16839,20 +17958,75 @@ pub fn elements(app: &App) -> Vec<Element> {
         SubPage::Logs => logs_elements(state),
         SubPage::Devices => devices_elements(&state.devices),
         SubPage::Sessions => sessions::sessions_elements(state),
-        SubPage::Folders => folders_elements(state, &app.sync_agent.rendered_locations()),
+        SubPage::Folders => {
+            let mut els = folders_elements(state, &app.sync_agent.rendered_locations());
+            // The two form submits are painted from the shared form predicates
+            // (`fauna_client_folders::forms`); the share also needs the live
+            // conversations session, which the page's own state does not hold.
+            let session_ready = app.conversations.real_session.is_some();
+            for el in els.iter_mut() {
+                if el.id == fauna_ui_ids::FOLDER_FOLLOW_CONFIRM {
+                    el.possibility = Some(state.folder_follow_answer());
+                } else if el.id == fauna_ui_ids::FOLDER_SHARE_CONFIRM {
+                    el.possibility = Some(state.folder_share_answer(session_ready));
+                }
+            }
+            els
+        }
         SubPage::Atproto => atproto_elements(app, &state.atproto),
         SubPage::Nests => nests_elements(&state.nests, state.devices.custody.as_ref()),
         SubPage::MutedWords => muted_words_elements(state),
         SubPage::TaskDelegation => task_delegation_elements(state),
         SubPage::ConnectedApps => connected_apps_elements(state),
-        SubPage::MailAliases => mail_aliases_elements(state),
-        SubPage::MailSpam => mail_spam_elements(state),
-        SubPage::MailExport => mail_export_elements(state),
-        SubPage::MailImport => mail_import_elements(state),
+        SubPage::MailAliases => gate_mail_subpage(state, mail_aliases_elements(state)),
+        SubPage::MailSpam => gate_mail_subpage(state, mail_spam_elements(state)),
+        SubPage::MailExport => {
+            // Download has no wire kind for the offline gate to classify — its
+            // bytes ride the session's `GET download_url` — but it still needs
+            // a live nest, so it declares the shared carve-out answer, which
+            // the page's own state cannot (it holds no connection word).
+            let mut els = mail_export_elements(state);
+            for el in els.iter_mut() {
+                if el.id == fauna_ui_ids::MAIL_EXPORT_DOWNLOAD_BUTTON {
+                    el.possibility = Some(mail_export_download_possibility(app));
+                }
+            }
+            gate_mail_subpage(state, els)
+        }
+        SubPage::MailImport => gate_mail_subpage(state, mail_import_elements(state)),
         SubPage::ArchiveImport => archive_import_elements(state),
-        SubPage::MailLists => mail_lists_elements(state),
-        SubPage::MailListMembers => mail_list_members_elements(state),
-        SubPage::Personalization => personalization_elements(state),
+        SubPage::MailLists => gate_mail_subpage(state, mail_lists_elements(state)),
+        SubPage::MailListMembers => gate_mail_subpage(state, mail_list_members_elements(state)),
+        SubPage::Personalization => {
+            // The engagement-cue controls act through `App`'s live feed
+            // manager, which the page's own state does not hold, so their
+            // answers are declared here over it (the Folders arm's shape).
+            let manager_ready = app.feed.manager.is_some();
+            let mut els = personalization_elements(state);
+            for el in els.iter_mut() {
+                if el.id == fauna_ui_ids::PERSONALIZATION_SHARE_SIGNALS_TOGGLE {
+                    el.possibility = Some(state.engagement.share_answer(manager_ready));
+                } else if el.id == fauna_ui_ids::PERSONALIZATION_CLEAR_ENGAGEMENT_DATA_BUTTON {
+                    el.possibility = Some(engagement_cues::EngagementCuesState::clear_answer(
+                        manager_ready,
+                    ));
+                }
+            }
+            // Each row's Publish… opens onto the live manager's window too;
+            // the buttons are flat, one per row in row order.
+            for (row, el) in els
+                .iter_mut()
+                .filter(|e| e.id == fauna_ui_ids::PERSONALIZATION_TRAINED_FACTOR_PUBLISH_BUTTON)
+                .enumerate()
+            {
+                el.possibility = Some(trained_topics::publish_open_answer(
+                    &state.trained_topics,
+                    row,
+                    manager_ready,
+                ));
+            }
+            els
+        }
         SubPage::LabelerCatalog => labeler_catalog_elements(state),
         SubPage::Web => web::web_elements(state),
         SubPage::Subscriptions => subscriptions_elements(app),
@@ -16865,6 +18039,74 @@ pub fn elements(app: &App) -> Vec<Element> {
             app.conversations.manager.as_ref(),
         ),
     }
+}
+
+/// The mail-usable gate at a mail sub-page's ENTRY (`ui/mail-settings.md`
+/// § Errors & edge cases, the mail-usable gate; `ui/README.md` § Offer only
+/// what is possible, rule 4): while [`SettingsState::mail_usable`] is not
+/// possible the page opens on its heading, the reason (`mail-subpage-gate-reason`,
+/// so a driver reads it) and Back — none of its
+/// forms or wizards, whose submit could not succeed (an export minting no
+/// session key, an import the nest refuses at Start, an alias with no
+/// domain). The rail row is gated on the same answer; this covers every
+/// other door in (the agent's nav, a page left open while mail was turned
+/// off). A box that can never serve mail paints the Mail & Calendar page's
+/// own unavailable notice, the fact the person reads there too.
+fn gate_mail_subpage(state: &SettingsState, els: Vec<Element>) -> Vec<Element> {
+    use fauna_core::possibility::Possibility;
+    let reason = match state.mail_usable() {
+        Possibility::Possible => return els,
+        Possibility::Blocked { reason } => reason.resolve(fauna_i18n::strings::lookup),
+        Possibility::Absent => fauna_i18n::strings::mail_settings::UNAVAILABLE_NOTICE.to_string(),
+    };
+    let mut gated: Vec<Element> = els
+        .iter()
+        .filter(|e| e.id == fauna_ui_ids::PAGE_HEADING)
+        .cloned()
+        .collect();
+    gated.push(Element::label(
+        fauna_ui_ids::MAIL_SUBPAGE_GATE_REASON,
+        reason,
+    ));
+    gated.extend(
+        els.into_iter()
+            .filter(|e| e.id == fauna_ui_ids::SETTINGS_NAV_BACK),
+    );
+    gated
+}
+
+/// A mail machine over the shared fakes, in one of the four states the
+/// mail-usable gate tells apart: never read, read with mail off, read
+/// with mail on, read on a box that can never serve mail.
+#[cfg(test)]
+pub(crate) fn mail_machine_in_for_test(state: &str) -> Arc<MailSettingsMachine> {
+    use fauna_client_mail_settings::testing::{
+        FakeMailStore, FakeNestClient, FakeSigner, FakeSuccessionLedgerStore,
+    };
+    let nest = FakeNestClient::new();
+    if state == "unavailable" {
+        nest.state().mail_unavailable_here = true;
+    }
+    let machine = MailSettingsMachine::new(
+        [0x11; 32],
+        Arc::new(nest),
+        Arc::new(FakeSuccessionLedgerStore::empty(ActorId([0x11; 32]))),
+        Arc::new(FakeMailStore::empty()),
+        Arc::new(FakeSigner::new([0x22; 32])),
+        fauna_client_mail_settings::MuaInstructions::placeholder(),
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    if state != "unread" {
+        rt.block_on(machine.hydrate()).expect("hydrate");
+    }
+    if state == "on" {
+        rt.block_on(machine.enable_mail_with_generated_password("Default".into()))
+            .expect("enable");
+    }
+    Arc::new(machine)
 }
 
 /// The `member_review` page's nav-edge read, for **both** doors into it.
@@ -16886,6 +18128,7 @@ pub fn elements(app: &App) -> Vec<Element> {
 pub(crate) fn member_review_hydrate_op(app: &App) -> Option<Op> {
     Some(Op::LoadMemberReviews {
         store: app.ledger_store.clone()?,
+        resync_of: app.settings.ledger_gen,
     })
 }
 
@@ -16895,10 +18138,13 @@ pub(crate) fn member_review_hydrate_op(app: &App) -> Option<Op> {
 /// `thread-member-chip` marks and the contact badges; the filter marks paint the
 /// Privacy sub-page's rows and the root's inherited-filter count. Both are
 /// App-wide render sources, like the reporter-side hide list beside them in the
-/// handler — not one sub-page's load. Each is one local store read, and both
-/// folds are level-safe as they stand: a successful read replaces the list
-/// wholesale (an equal answer paints the same frame), a failed one keeps it, and
-/// neither touches a draft, a busy flag or `error-message`. Empty pre-auth.
+/// handler — not one sub-page's load. Each is one local store read: a successful
+/// read replaces the list wholesale (an equal answer paints the same frame), a
+/// failed one keeps it, and neither touches a draft, a busy flag or
+/// `error-message`. Both carry [`SettingsState::ledger_gen`]: the lists are the
+/// ones a review verdict or a *Keep* writes, so a re-read taken before such a
+/// verdict folded is dropped rather than bringing the settled entry back.
+/// Empty pre-auth.
 pub(crate) fn ledger_resync_ops(app: &App) -> Vec<Op> {
     let Some(store) = app.ledger_store.clone() else {
         return Vec::new();
@@ -16906,8 +18152,12 @@ pub(crate) fn ledger_resync_ops(app: &App) -> Vec<Op> {
     vec![
         Op::LoadMemberReviews {
             store: Arc::clone(&store),
+            resync_of: app.settings.ledger_gen,
         },
-        Op::LoadFilterMarks { store },
+        Op::LoadFilterMarks {
+            store,
+            resync_of: app.settings.ledger_gen,
+        },
     ]
 }
 
@@ -16995,6 +18245,13 @@ pub(crate) fn subpage_kind(sub: SubPage) -> u8 {
 /// from a held snapshot instead of folding it onto `App::errors` — read by
 /// `App::page_snapshot_error`, which carries the contract this serves.
 pub(crate) fn page_error(state: &SettingsState) -> Option<String> {
+    // A device-local action of this page that just failed — a prefs write, a
+    // clipboard copy, a refused copy/clear — leads: it answers the gesture the
+    // person just made (`docs/goal/ui/README.md` § Offer only what is
+    // possible, rule 7).
+    if let Some(failure) = state.local_failure.as_deref() {
+        return Some(failure.to_string());
+    }
     match state.sub {
         SubPage::Web => web::page_error(state),
         SubPage::Encryption => encryption::page_error(state),
@@ -17546,6 +18803,7 @@ fn folders_roster_outcome(
             destinations: None,
             snapshot,
             reads: None,
+            resync_of: None,
         },
         Err(error) => {
             let message = failure(&error);
@@ -17594,7 +18852,6 @@ async fn folders_regesture_outcome(
         snapshot: Box::new(machine.snapshot()),
         default_conflict_policy,
         policy_refused,
-        can_serve_webdav: folders::load_can_serve_webdav(store.clone()).await,
         own_tiers: folders::load_own_tiers(Arc::clone(&nest)).await,
         // Re-read, never defaulted: this outcome REPLACES the page's whole
         // folders state, so handing back an empty ceremony surface here would
@@ -17613,6 +18870,7 @@ async fn folders_regesture_outcome(
         pending_shares: folders::load_pending_shares(nest).await,
         // A gesture's own re-read: it replaces the error slot like a visit.
         reread: false,
+        resync_of: None,
     }
 }
 
@@ -17632,6 +18890,18 @@ fn folders_hydrate_op(state: &SettingsState, reread: bool) -> Option<Op> {
         #[cfg(feature = "p2p-share")]
         session_seat: state.offline_share.session_seat.clone(),
         reread,
+        resync_of: reread.then_some(state.folders_gen),
+    })
+}
+
+/// The custody read a [`Outcome::FoldersHydrated`] left owed, as its own op —
+/// taken once. Run after the rows are painted, so `folder-webdav-toggle` reads
+/// "still loading" while it is out (`folders.md` § Errors & edge cases,
+/// *Own-tier and mail gates*); an e2e journey parks it with
+/// `fauna_client_folders::webdav_provision::hold_custody_reads_for_test`.
+pub fn take_folders_custody_op(state: &mut SettingsState) -> Option<Op> {
+    std::mem::take(&mut state.folders.custody_read_owed).then(|| Op::LoadFolderWebdavCustody {
+        store: state.account_store.clone(),
     })
 }
 
@@ -18000,12 +19270,12 @@ mod tests {
             snapshot: Box::default(),
             default_conflict_policy: None,
             policy_refused: policy_refused.map(str::to_owned),
-            can_serve_webdav: false,
-            own_tiers: Vec::new(),
+            own_tiers: Default::default(),
             pending_shares: Vec::new(),
             #[cfg(feature = "p2p-share")]
             group_shares: Default::default(),
             reread,
+            resync_of: None,
         }
     }
 
@@ -18032,17 +19302,170 @@ mod tests {
         assert!(app.errors.get(&Page::Settings).is_none());
     }
 
+    /// The rows paint before the mail-custody read answers (`folders.md` §
+    /// Errors & edge cases, *Own-tier and mail gates*): a folders hydrate
+    /// leaves the read owed and the toggle "still loading" — never the last
+    /// visit's answer — and only the read's own op settles it.
+    #[test]
+    fn a_folders_hydrate_paints_rows_and_owes_the_custody_read() {
+        use fauna_core::possibility::ReadState;
+        let mut app = crate::app::tests::test_app();
+        app.settings.folders.webdav_read = ReadState::Resolved;
+        app.settings.folders.can_serve_webdav = true;
+        apply_outcome(&mut app, folders_page(None, false));
+        assert_eq!(app.settings.folders.webdav_read, ReadState::Pending);
+        assert!(!app.settings.folders.can_serve_webdav);
+        assert_eq!(
+            folders::webdav_possibility(&app.settings.folders),
+            fauna_core::possibility::Possibility::from_read(ReadState::Pending),
+        );
+        assert!(matches!(
+            take_folders_custody_op(&mut app.settings),
+            Some(Op::LoadFolderWebdavCustody { .. })
+        ));
+        // Taken once.
+        assert!(take_folders_custody_op(&mut app.settings).is_none());
+        apply_outcome(
+            &mut app,
+            Outcome::FolderWebdavCustody((ReadState::Resolved, true)),
+        );
+        assert_eq!(app.settings.folders.webdav_read, ReadState::Resolved);
+        assert!(app.settings.folders.can_serve_webdav);
+    }
+
     fn device_activity(error: Option<&str>) -> Outcome {
         Outcome::FolderDeviceActivityLoaded {
             name: "Photos".into(),
             devices: Vec::new(),
             error: error.map(str::to_owned),
+            resync_of: GestureGen::default(),
         }
+    }
+
+    /// The Folders sub-page with `name` as its one, expanded owner row — what a
+    /// per-row re-read must find to land.
+    fn expand_folder_row_for_test(app: &mut crate::app::App, name: &str) {
+        app.settings.sub = SubPage::Folders;
+        app.settings.folders.expanded = Some(0);
+        app.settings.devices.snapshot = Some(fauna_devices_machine::DevicesSnapshot {
+            folders: vec![fauna_devices_machine::FolderSummary {
+                id: 1,
+                name: name.to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+    }
+
+    fn roster(channel: Option<&str>, resync_of: Option<GestureGen>) -> Outcome {
+        Outcome::FolderRosterLoaded {
+            name: "Photos".into(),
+            members: Vec::new(),
+            channel_id: channel.map(str::to_owned),
+            reads: None,
+            devices: None,
+            places: None,
+            destinations: None,
+            snapshot: None,
+            resync_of,
+        }
+    }
+
+    /// The roster re-read (`roster_resync_op`, the reconnect sweep's
+    /// `expanded_row_reread_op`) is spawned: a share/remove/set-access fold
+    /// that landed after it was built stands against it.
+    #[test]
+    fn a_late_folder_roster_re_read_never_paints_over_a_newer_gesture() {
+        let mut app = crate::app::tests::test_app();
+        expand_folder_row_for_test(&mut app, "Photos");
+        let carried = app.settings.folders_gen;
+        apply_outcome(&mut app, roster(Some("after-share"), None));
+        apply_outcome(&mut app, roster(None, Some(carried)));
+        assert_eq!(
+            app.settings.folders.roster_channel_id.as_deref(),
+            Some("after-share"),
+            "a re-read older than the share painted over it"
+        );
+    }
+
+    /// A roster re-read no gesture outlived still lands on its own row.
+    #[test]
+    fn a_folder_roster_re_read_no_gesture_outlived_still_lands() {
+        let mut app = crate::app::tests::test_app();
+        expand_folder_row_for_test(&mut app, "Photos");
+        let carried = app.settings.folders_gen;
+        apply_outcome(&mut app, roster(Some("fresh"), Some(carried)));
+        assert_eq!(
+            app.settings.folders.roster_channel_id.as_deref(),
+            Some("fresh")
+        );
+    }
+
+    /// The device-activity push re-read (`device_activity_resync_op`) never
+    /// retargets `device_activity_for` at a row the user has since left, and
+    /// drops a read a folder gesture folded after — its error included.
+    #[test]
+    fn a_late_device_activity_re_read_never_paints_over_a_newer_gesture() {
+        let mut app = crate::app::tests::test_app();
+        expand_folder_row_for_test(&mut app, "Docs");
+        apply_outcome(&mut app, device_activity(None));
+        assert_ne!(
+            app.settings.folders.device_activity_for.as_deref(),
+            Some("Photos"),
+            "a re-read for a row the user left retargeted the open row"
+        );
+
+        expand_folder_row_for_test(&mut app, "Photos");
+        let carried = app.settings.folders_gen;
+        apply_outcome(
+            &mut app,
+            Outcome::FolderPlacesLoaded {
+                name: "Photos".into(),
+                places: Vec::new(),
+            },
+        );
+        apply_outcome(
+            &mut app,
+            Outcome::FolderDeviceActivityLoaded {
+                name: "Photos".into(),
+                devices: Vec::new(),
+                error: Some("a read the gesture outlived".into()),
+                resync_of: carried,
+            },
+        );
+        assert!(
+            app.errors.get(&Page::Settings).is_none(),
+            "an outlived re-read painted its error"
+        );
+    }
+
+    /// The Folders store-change re-read (`store_resync_op`'s
+    /// `Op::HydrateFolders`, `reread: true`) drops its nest halves when a
+    /// folder gesture folded since: the default-policy save stands.
+    #[test]
+    fn a_late_folders_store_re_read_never_paints_over_a_newer_gesture() {
+        let mut app = crate::app::tests::test_app();
+        let carried = app.settings.folders_gen;
+        apply_outcome(
+            &mut app,
+            Outcome::FolderDefaultConflictPolicyLoaded(Some("keep-both".into())),
+        );
+        let mut late = folders_page(None, true);
+        if let Outcome::FoldersHydrated { resync_of, .. } = &mut late {
+            *resync_of = Some(carried);
+        }
+        apply_outcome(&mut app, late);
+        assert_eq!(
+            app.settings.folders.default_conflict_policy.as_deref(),
+            Some("keep-both"),
+            "a re-read older than the policy save painted over it"
+        );
     }
 
     #[test]
     fn a_folder_row_read_paints_its_failure_and_its_good_answer_retires_it() {
         let mut app = crate::app::tests::test_app();
+        expand_folder_row_for_test(&mut app, "Photos");
         apply_outcome(&mut app, device_activity(Some("connection lost")));
         assert_eq!(
             app.errors.get(&Page::Settings).map(String::as_str),
@@ -18055,6 +19478,7 @@ mod tests {
     #[test]
     fn a_folder_row_reads_good_answer_leaves_a_gesture_error_standing() {
         let mut app = crate::app::tests::test_app();
+        expand_folder_row_for_test(&mut app, "Photos");
         apply_outcome(&mut app, device_activity(Some("connection lost")));
         app.errors.insert(Page::Settings, "serve failed".into());
         apply_outcome(&mut app, device_activity(None));
@@ -18067,6 +19491,7 @@ mod tests {
     #[test]
     fn a_closed_folder_row_retires_what_its_reads_put_up() {
         let mut app = crate::app::tests::test_app();
+        expand_folder_row_for_test(&mut app, "Photos");
         apply_outcome(&mut app, device_activity(Some("connection lost")));
         retire_closed_folder_row(&mut app, "Photos");
         assert!(app.errors.get(&Page::Settings).is_none());
@@ -18383,6 +19808,86 @@ mod tests {
             std::fs::read(dir.path().join(PREFS_FILE)).unwrap(),
             newer.to_vec()
         );
+        // The choice lasts this session only, and the page says so rather
+        // than appearing saved (README § Offer only what is possible, rule 7).
+        let line = page_error(&state).expect("the unsaved choice is said");
+        assert!(
+            line.starts_with(&fauna_i18n::strings::common::PREF_NOT_SAVED.replace("{error}", "")),
+            "{line}"
+        );
+    }
+
+    /// A prefs write that fails — here a DIRECTORY sits where the temp file
+    /// goes, so the write cannot land — is said on `error-message`; the next
+    /// save that lands clears it.
+    #[test]
+    fn a_failed_prefs_write_is_said_on_the_page_and_a_later_save_clears_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join(PREFS_FILE).with_extension("json.tmp");
+        std::fs::create_dir(&blocker).unwrap();
+        let mut state = SettingsState::load(Some(dir.path().to_path_buf()));
+        state.sub = SubPage::TuiSettings;
+        apply(
+            &mut state,
+            Action::SetExternalMedia(ExternalMediaMode::Always),
+        );
+        let line = page_error(&state).expect("the failed write is said");
+        assert!(line.contains("prefs.json.tmp"), "{line}");
+
+        std::fs::remove_dir(&blocker).unwrap();
+        apply(
+            &mut state,
+            Action::SetExternalMedia(ExternalMediaMode::Never),
+        );
+        assert_eq!(
+            page_error(&state),
+            None,
+            "a save that lands clears the line"
+        );
+        assert!(dir.path().join(PREFS_FILE).exists());
+    }
+
+    /// The Logs copy confirms like `account-actor-id-copy-btn` when the write
+    /// reached the terminal, and says a failed write on `error-message`.
+    #[test]
+    fn a_logs_copy_is_confirmed_or_its_failure_said() {
+        let mut state = SettingsState {
+            sub: SubPage::Logs,
+            ..SettingsState::default()
+        };
+        logs::record_copy_outcome(&mut state, Ok(()), "INFO · line".to_string());
+        assert_eq!(state.logs_copied.as_deref(), Some("INFO · line"));
+        assert_eq!(page_error(&state), None);
+
+        logs::record_copy_outcome(
+            &mut state,
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "closed",
+            )),
+            "INFO · line".to_string(),
+        );
+        assert_eq!(state.logs_copied, None, "a failed copy confirms nothing");
+        let line = page_error(&state).expect("the failed copy is said");
+        assert!(line.contains("closed"), "{line}");
+
+        apply(&mut state, Action::NavBack);
+        assert_eq!(page_error(&state), None, "leaving the page clears it");
+    }
+
+    /// Copy and clear read one answer: blocked by the page's own empty line
+    /// on an empty ring, possible once anything is shown.
+    #[test]
+    fn logs_copy_and_clear_are_blocked_by_the_empty_line_on_an_empty_ring() {
+        let empty = logs::ring_action_possibility(0);
+        assert!(!empty.is_possible());
+        assert_eq!(
+            empty
+                .reason()
+                .map(|r| r.resolve(fauna_i18n::strings::lookup)),
+            Some(logs_strings::EMPTY.to_string())
+        );
+        assert!(logs::ring_action_possibility(1).is_possible());
     }
 
     /// The open arm of `transport.md` § Rule 3 in full on [`ExternalMediaMode`],
@@ -18418,7 +19923,7 @@ mod tests {
         assert_eq!(mode.label(), ExternalMediaMode::Never.label());
         assert!(!ExternalMediaMode::ALL.contains(mode), "never an option");
 
-        state.save();
+        state.save().expect("the readable prefs file is written");
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         let original: serde_json::Value = serde_json::from_slice(&newer).unwrap();
@@ -19928,6 +21433,7 @@ mod tests {
             mls_group_id: None,
             store: None,
             folder_id: 1,
+            resync_of: None,
         };
         assert!(
             crate::app::PageOp::Settings(op).outlives_click(),
@@ -20999,11 +22505,18 @@ mod tests {
 
         let outcome = Op::LoadMemberReviews {
             store: store.clone(),
+            resync_of: app.settings.ledger_gen,
         }
         .run()
         .await;
         assert!(
-            matches!(outcome, Outcome::MemberReviewRoster(Some(_))),
+            matches!(
+                outcome,
+                Outcome::MemberReviewRoster {
+                    roster: Some(_),
+                    ..
+                }
+            ),
             "a plain read folds through its own variant, not a decided one"
         );
         apply_outcome(&mut app, outcome);
@@ -21020,7 +22533,14 @@ mod tests {
             person,
             reasons: vec![fauna_core::data::MemberUnattestedReason::CompromiseWindow],
         }];
-        apply_outcome(&mut app, Outcome::MemberReviewRoster(None));
+        let resync_of = app.settings.ledger_gen;
+        apply_outcome(
+            &mut app,
+            Outcome::MemberReviewRoster {
+                roster: None,
+                resync_of,
+            },
+        );
         assert_eq!(
             app.member_reviews
                 .iter()
@@ -22928,17 +24448,134 @@ mod tests {
             "desk".into(),
         );
         assert_eq!(field(&app.settings, &SettingsField::DeviceRename), "desk");
-        let op = apply_local(&mut app, Action::ConfirmRenameDevice);
+        // The roster lists no such device, so the shared answer is absent:
+        // the save sends nothing and the editor keeps what was typed.
+        assert!(apply_local(&mut app, Action::ConfirmRenameDevice).is_none());
+        assert_eq!(
+            app.settings
+                .devices
+                .rename
+                .as_ref()
+                .map(|d| d.text.as_str()),
+            Some("desk"),
+            "a refused save never closes the editor"
+        );
+    }
+
+    /// Rule 4: the nests add form refuses a blank draft out loud and closes
+    /// only once its link went through; the mint form likewise.
+    #[test]
+    fn the_nests_forms_close_only_on_a_saved_dispatch() {
+        let mut app = crate::app::tests::authed_app();
+        app.settings.nests.add_form_open = true;
+        assert!(apply_local(&mut app, Action::NestsSubmitAdd).is_none());
+        assert_eq!(
+            app.errors.get(&Page::Settings).map(String::as_str),
+            Some(fauna_i18n::strings::nests::ADD_INPUT_BLANK)
+        );
+        app.settings.nests.add_input = "https://other.example".into();
+        app.settings.nests.mint = Some(nests::MintForm::default());
+        let snapshot = Box::new(LinkedNestsSnapshot {
+            home: None,
+            pairings: Vec::new(),
+            status: fauna_client_pair::LinkedNestStatus::Idle,
+            error: None,
+            restore_outcome: None,
+            forward_queue: None,
+        });
+        apply_outcome(
+            &mut app,
+            Outcome::NestsFormSubmitted {
+                snapshot: snapshot.clone(),
+                form: NestsForm::Add,
+                saved: false,
+            },
+        );
         assert!(
-            matches!(&op, Some(Op::RenameDevice { device_id, label, .. })
-                if *device_id == id && label == "desk"),
-            "the save forwards the draft's id and text"
+            app.settings.nests.add_form_open,
+            "a refused link keeps the form"
+        );
+        assert_eq!(app.settings.nests.add_input, "https://other.example");
+        apply_outcome(
+            &mut app,
+            Outcome::NestsFormSubmitted {
+                snapshot: snapshot.clone(),
+                form: NestsForm::Add,
+                saved: true,
+            },
+        );
+        assert!(!app.settings.nests.add_form_open);
+        assert!(app.settings.nests.add_input.is_empty());
+        assert!(
+            app.settings.nests.mint.is_some(),
+            "the add's save leaves the mint form"
+        );
+        apply_outcome(
+            &mut app,
+            Outcome::NestsFormSubmitted {
+                snapshot,
+                form: NestsForm::Mint,
+                saved: true,
+            },
+        );
+        assert!(app.settings.nests.mint.is_none());
+    }
+
+    /// The custody mint is gated at its entry: not enabled before the
+    /// conversations are read, blocked with the step when there is no 1:1
+    /// conversation.
+    #[test]
+    fn the_custody_mint_button_is_gated_at_the_entry() {
+        let mut state = devices::DevicesState::default();
+        assert!(!devices::custody_mint_answer(&state).is_possible());
+        state.custody_mint_candidates_read = true;
+        assert_eq!(
+            devices::custody_mint_answer(&state)
+                .reason()
+                .map(crate::wizard::localized),
+            Some(fauna_i18n::strings::devices::CUSTODY_MINT_NO_CONTACTS.to_string())
+        );
+    }
+
+    /// Rule 4: the editor closes only once the save went through; a refused
+    /// or failed save keeps it open with the text.
+    #[test]
+    fn the_rename_editor_closes_only_on_a_saved_rename() {
+        let mut app = crate::app::tests::authed_app();
+        app.settings.devices =
+            devices::DevicesState::build(nest_for_test(), "", &[], Default::default());
+        let id = "ab".repeat(32);
+        apply(&mut app.settings, Action::RenameDevice(id.clone()));
+        set_field(
+            &mut app.settings,
+            SettingsField::DeviceRename,
+            "desk".into(),
+        );
+        let snapshot = app.settings.devices.machine.as_ref().unwrap().snapshot();
+        apply_outcome(
+            &mut app,
+            Outcome::DeviceRenamed {
+                snapshot: Box::new(snapshot.clone()),
+                device_id: id.clone(),
+                saved: false,
+            },
+        );
+        assert!(
+            app.settings.devices.rename.is_some(),
+            "a failed save keeps the editor"
+        );
+        apply_outcome(
+            &mut app,
+            Outcome::DeviceRenamed {
+                snapshot: Box::new(snapshot),
+                device_id: id,
+                saved: true,
+            },
         );
         assert_eq!(
             app.settings.devices.rename, None,
-            "the save closes the editor"
+            "a saved rename closes it"
         );
-        assert!(apply_local(&mut app, Action::ConfirmRenameDevice).is_none());
     }
 
     #[test]
@@ -22980,13 +24617,85 @@ mod tests {
     fn save_spam_prefs_surfaces_a_parse_error_and_makes_no_call() {
         let mut app = crate::app::tests::authed_app();
         app.settings.nest = Some(nest_for_test());
+        app.settings.privacy.apply_spam_prefs(&SpamPreferences {
+            spam_threshold: 700,
+            phishing_threshold: 400,
+            extra: Default::default(),
+        });
         app.settings.privacy.spam_threshold_input = "not-a-number".to_string();
         let op = apply_local(&mut app, Action::SaveSpamPrefs);
         assert!(
             op.is_none(),
             "an unparseable threshold makes no network call"
         );
-        assert!(app.errors.contains_key(&Page::Settings));
+        assert!(
+            app.errors
+                .get(&Page::Settings)
+                .is_some_and(|m| m.contains("invalid spam threshold")),
+            "the press names the bad threshold"
+        );
+    }
+
+    fn save_spam_button(app: &App) -> Element {
+        elements(app)
+            .into_iter()
+            .find(|e| e.id == fauna_ui_ids::SAVE_SPAM_PREFS)
+            .expect("save-spam-prefs is painted")
+    }
+
+    /// The prefilled thresholds are what the nest holds: a Save then would be
+    /// echoed back with nothing on the page moving, so it is not offered and
+    /// says why (`settings.md`, the spam-moderation row; `ui/README.md`
+    /// § Offer only what is possible, rules 4 and 7).
+    #[test]
+    fn save_spam_prefs_is_not_offered_until_a_threshold_changes() {
+        let mut app = crate::app::tests::authed_app();
+        app.settings.sub = SubPage::Privacy;
+        app.settings.nest = Some(nest_for_test());
+        app.settings.privacy.apply_spam_prefs(&SpamPreferences {
+            spam_threshold: 700,
+            phishing_threshold: 400,
+            extra: Default::default(),
+        });
+        let button = save_spam_button(&app);
+        assert!(
+            !button.offered(),
+            "unchanged thresholds have nothing to save"
+        );
+        assert_eq!(
+            button.label.as_deref(),
+            Some(fauna_i18n::strings::common::NOTHING_TO_SAVE),
+            "the reason is painted on the button"
+        );
+
+        // A blocked press is refused out loud, never sent.
+        let op = apply_local(&mut app, Action::SaveSpamPrefs);
+        assert!(op.is_none(), "nothing to save makes no network call");
+        assert_eq!(
+            app.errors.get(&Page::Settings).map(String::as_str),
+            Some(fauna_i18n::strings::common::NOTHING_TO_SAVE)
+        );
+
+        // An edit makes it possible, and the press sends.
+        set_field(
+            &mut app.settings,
+            SettingsField::SpamThreshold,
+            "0.8".into(),
+        );
+        assert!(save_spam_button(&app).offered());
+        let op = apply_local(&mut app, Action::SaveSpamPrefs);
+        assert!(
+            matches!(&op, Some(Op::SaveSpamPrefs { req, .. }) if req.spam_threshold == Some(800)),
+            "an edited threshold is saved"
+        );
+
+        // The save's echo becomes the new baseline: nothing to save again.
+        app.settings.privacy.apply_spam_prefs(&SpamPreferences {
+            spam_threshold: 800,
+            phishing_threshold: 400,
+            extra: Default::default(),
+        });
+        assert!(!save_spam_button(&app).offered());
     }
 
     /// Each richer action and condition shows only its own inputs, and the
@@ -23538,6 +25247,7 @@ mod tests {
     /// a snapshot field added later doesn't break this fixture.
     fn enabled_snapshot() -> MailSettingsSnapshot {
         MailSettingsSnapshot {
+            read: true,
             enabled: true,
             credential_management_reachable: true,
             credentials: vec![MailCredentialSummary {
@@ -23959,6 +25669,250 @@ mod tests {
         assert_eq!(m.forward_all_to_input, "");
     }
 
+    /// Rules 4 and 7 on the mail lists, members, forwarding limit and rotate
+    /// keys: every refused submit sends nothing and says why — never a silent
+    /// return.
+    #[test]
+    fn refused_mail_form_submits_say_why() {
+        let mut app = crate::app::tests::authed_app();
+        app.page = Page::Settings;
+        app.settings.nest = Some(nest_for_test());
+        let lists = fauna_i18n::strings::mail_lists::LOCAL_PART_REQUIRED;
+        let lists_machine = app.settings.mail_lists.machine.is_some();
+        if lists_machine {
+            assert!(apply_local(&mut app, Action::MailListsSubmit { editing: false }).is_none());
+            assert_eq!(app.error_line_text().as_deref(), Some(lists));
+        }
+        assert_eq!(
+            app.settings
+                .mail_lists
+                .submit_answer()
+                .reason()
+                .map(|r| r.key.as_str()),
+            Some("mail_lists.local_part_required")
+        );
+        // The forwarding limit before its read refuses with the read's answer.
+        assert!(apply_local(&mut app, Action::MailCommitForwardPerHour).is_none());
+        assert_eq!(
+            app.settings.mail.draft_refusal.as_deref(),
+            Some(fauna_i18n::strings::common::STILL_LOADING)
+        );
+        // Rotate keys with a rotation waiting names the banner's Resume.
+        let mut state = SettingsState::default();
+        let mut snap = enabled_snapshot();
+        snap.pending_rotation = Some(fauna_client_mail_settings::PendingRotationStatus {
+            credentials_remaining: vec!["default".into()],
+        });
+        mail_state(&mut state, snap);
+        apply(&mut state, Action::MailOpenRotateForm);
+        assert!(!state.mail.show_rotate_form);
+        assert_eq!(
+            state.mail.draft_refusal.as_deref(),
+            Some(fauna_i18n::strings::mail_settings::ROTATE_PENDING)
+        );
+        let els = mail_elements(&state);
+        let rotate = el(&els, "mail-settings-rotate-keys-button").expect("painted");
+        assert!(!rotate.enabled);
+        assert_eq!(
+            rotate.label.as_deref(),
+            Some(fauna_i18n::strings::mail_settings::ROTATE_PENDING)
+        );
+    }
+
+    /// Rules 5 and 7 on the personal settings pages (apps 6162): each control
+    /// refuses before its read or with nothing to act on, says why on the
+    /// page's error, and issues nothing.
+    #[test]
+    fn personal_controls_refuse_before_their_reads_and_say_why() {
+        use fauna_core::possibility::ReadState;
+        let mut app = crate::app::tests::authed_app();
+        app.page = Page::Settings;
+        app.feed.manager = None;
+        app.conversations.manager = None;
+        let feed_not_ready = fauna_i18n::strings::errors::FEED_NOT_READY;
+
+        // Personalization: no live feed manager is said, not swallowed.
+        app.settings.engagement.share_read = ReadState::Resolved;
+        assert!(apply_local(&mut app, Action::ToggleShareSignals).is_none());
+        assert_eq!(
+            app.errors.get(&Page::Settings).map(String::as_str),
+            Some(feed_not_ready)
+        );
+        app.errors.remove(&Page::Settings);
+        assert!(apply_local(&mut app, Action::ClearEngagementData).is_none());
+        assert_eq!(
+            app.errors.get(&Page::Settings).map(String::as_str),
+            Some(feed_not_ready)
+        );
+        app.settings.engagement.share_read = ReadState::Pending;
+        assert_eq!(
+            app.settings
+                .engagement
+                .share_answer(true)
+                .reason()
+                .map(|r| r.key.as_str()),
+            Some("common.still_loading")
+        );
+
+        // Connected apps: the switch is not written before the read.
+        app.errors.remove(&Page::Settings);
+        app.settings.connected_apps.snapshot = None;
+        assert!(apply_local(&mut app, Action::ConnectedAppsToggleExternalApps).is_none());
+        assert_eq!(
+            app.errors.get(&Page::Settings).map(String::as_str),
+            Some(fauna_i18n::strings::common::STILL_LOADING)
+        );
+
+        // Sessions: nothing to arm before the roster, nor when only this
+        // app's own sign-in is listed.
+        app.errors.remove(&Page::Settings);
+        app.settings.sessions.snapshot = None;
+        assert!(apply_local(&mut app, Action::SessionsRevokeOthersArm).is_none());
+        assert!(!app.settings.sessions.revoke_others_armed);
+        assert!(app.errors.get(&Page::Settings).is_some());
+
+        // Member review: Remove without the conversations session says so.
+        app.errors.remove(&Page::Settings);
+        let person = fauna_core::identity::ActorId([7u8; 32]);
+        assert!(apply_local(&mut app, Action::MemberReviewRemove { person }).is_none());
+        assert_eq!(
+            app.errors.get(&Page::Settings).map(String::as_str),
+            Some(fauna_i18n::strings::settings::recovery_kit::REVIEW_REMOVE_NOT_READY)
+        );
+    }
+
+    /// Rule 4 on the personal settings forms (apps 6163): a blank draft is
+    /// refused with its reason on the page's error and nothing is issued.
+    #[test]
+    fn personal_form_submits_refuse_a_blank_draft_and_say_why() {
+        let mut app = crate::app::tests::authed_app();
+        app.page = Page::Settings;
+        let error = |app: &App| app.errors.get(&Page::Settings).cloned();
+
+        app.settings.muted_words.input = "  ".into();
+        assert!(apply_local(&mut app, Action::AddMutedWord).is_none());
+        assert_eq!(
+            error(&app).as_deref(),
+            Some(fauna_i18n::strings::muted_words::TERM_REQUIRED)
+        );
+
+        app.errors.remove(&Page::Settings);
+        app.settings.trained_topics.input.clear();
+        assert!(apply_local(&mut app, Action::CommitTrainedFactorName).is_none());
+        assert_eq!(
+            error(&app).as_deref(),
+            Some(fauna_i18n::strings::personalization::TRAINED_FACTOR_BLANK_NAME)
+        );
+
+        app.errors.remove(&Page::Settings);
+        assert!(apply_local(&mut app, Action::SubmitTrainedFactorPublish).is_none());
+        assert_eq!(
+            error(&app).as_deref(),
+            Some(fauna_i18n::strings::personalization::PUBLISH_NAME_BLANK)
+        );
+
+        // Over the bound: the same press (the name input's Enter commits it)
+        // refuses with the bound's own sentence.
+        app.errors.remove(&Page::Settings);
+        app.settings.trained_topics.publish.name = "x".repeat(200);
+        assert!(apply_local(&mut app, Action::SubmitTrainedFactorPublish).is_none());
+        assert_eq!(
+            error(&app),
+            Some(fauna_i18n::strings::personalization::publish_name_too_long(
+                "128"
+            ))
+        );
+
+        app.errors.remove(&Page::Settings);
+        app.settings.connected_apps.code_input.clear();
+        assert!(apply_local(&mut app, Action::ConnectedAppsSubmitCode).is_none());
+        assert_eq!(
+            error(&app).as_deref(),
+            Some(fauna_i18n::strings::connected_apps::CODE_REQUIRED)
+        );
+    }
+
+    /// Rule 5 on the Mail page: the enable toggle, the forward-all input and
+    /// the automatic reply's message wait for their reads, and a commit made
+    /// before the read sends nothing and says why.
+    #[test]
+    fn mail_controls_wait_for_their_reads() {
+        use fauna_core::possibility::Possibility;
+        let key = |p: Possibility| p.reason().map(|r| r.key.clone());
+        let loading = Some("common.still_loading".to_string());
+        let mut app = crate::app::tests::authed_app();
+        app.page = Page::Settings;
+        let m = &app.settings.mail;
+        assert_eq!(key(m.enable_answer()), loading);
+        assert_eq!(key(m.forward_all_answer()), loading);
+        assert_eq!(key(m.autorespond_answer()), loading);
+        app.settings.mail.forward_all_to_input.clear();
+        assert!(apply_local(&mut app, Action::MailCommitForwardAllTo).is_none());
+        assert_eq!(
+            app.settings.mail.draft_refusal.as_deref(),
+            Some(fauna_i18n::strings::common::STILL_LOADING)
+        );
+        assert!(apply_local(&mut app, Action::MailCommitAutorespondMessage).is_none());
+        // A read resolves each; a failed one says so, a failure after a
+        // success keeps it resolved.
+        app.settings.mail.apply_account_read(mail::MailAccountRead {
+            forward_all_to: Some(Ok(None)),
+            autorespond: Some(Err("offline".into())),
+            ..mail::MailAccountRead::none()
+        });
+        assert!(app.settings.mail.forward_all_answer().is_possible());
+        assert_eq!(
+            key(app.settings.mail.autorespond_answer()),
+            Some("common.load_failed".to_string())
+        );
+        app.settings.mail.apply_account_read(mail::MailAccountRead {
+            forward_all_to: Some(Err("offline".into())),
+            ..mail::MailAccountRead::none()
+        });
+        assert!(app.settings.mail.forward_all_answer().is_possible());
+    }
+
+    /// Rule 7 on the mail pages: a gesture whose machine was never built says
+    /// so on the page's `error-message` (the entry gate's unbuilt reason)
+    /// instead of returning without a word; and the export Download, which has
+    /// no wire kind, asks the offline carve-out answer — offline it refuses
+    /// with the offline reason (`ui/README.md` § Offer only what is possible,
+    /// rules 6 and 7).
+    #[test]
+    fn mail_gestures_without_a_machine_say_why_and_download_needs_a_live_nest() {
+        let mut app = crate::app::tests::authed_app();
+        app.page = Page::Settings;
+        let unbuilt = fauna_i18n::strings::mail_settings::USABLE_UNBUILT;
+        for action in [
+            Action::MailExportPause,
+            Action::MailImportBack,
+            Action::MailSpamUndo("00".into()),
+            Action::MailListMembersAddSubmit,
+        ] {
+            app.errors.remove(&Page::Settings);
+            assert!(
+                apply_local(&mut app, action.clone()).is_none(),
+                "{action:?}"
+            );
+            assert_eq!(
+                app.error_line_text().as_deref(),
+                Some(unbuilt),
+                "{action:?}"
+            );
+        }
+
+        app.errors.remove(&Page::Settings);
+        app.connection = fauna_ws_substrate::supervisor::ConnectionState::Connected;
+        assert!(mail_export_download_possibility(&app).is_possible());
+        app.connection = fauna_ws_substrate::supervisor::ConnectionState::Disconnected;
+        assert!(!mail_export_download_possibility(&app).is_possible());
+        assert!(apply_local(&mut app, Action::MailExportDownload).is_none());
+        assert_eq!(
+            app.error_line_text().as_deref(),
+            Some(fauna_i18n::strings::common::NEEDS_NEST)
+        );
+    }
+
     /// The shared parser decides before anything is sent: a malformed address
     /// names its reason and issues no op; a blank one stops forwarding.
     #[test]
@@ -23967,6 +25921,7 @@ mod tests {
         app.page = Page::Settings;
         app.settings.sub = SubPage::Mail;
         app.settings.nest = Some(nest_for_test());
+        app.settings.mail.forward_all_read = fauna_core::possibility::ReadState::Resolved;
 
         app.settings.mail.forward_all_to_input = "me@nodot".into();
         assert!(apply_local(&mut app, Action::MailCommitForwardAllTo).is_none());
@@ -24233,7 +26188,13 @@ mod tests {
     fn the_toggle_reveals_the_form_when_off_and_arms_the_confirm_when_on() {
         let mut state = SettingsState::default();
 
-        mail_state(&mut state, MailSettingsSnapshot::default());
+        mail_state(
+            &mut state,
+            MailSettingsSnapshot {
+                read: true,
+                ..Default::default()
+            },
+        );
         apply(&mut state, Action::ToggleMailEnabled);
         assert!(state.mail.show_add_form);
         assert!(!state.mail.show_disable_confirm);
@@ -24300,6 +26261,54 @@ mod tests {
         assert_eq!(
             app.settings.folders.include_paths_input, "half-typed",
             "a refresh must not wipe unsaved selective-sync path edits"
+        );
+    }
+
+    /// `folder-add-button` row 6700: painted disabled with the still-loading
+    /// reason while the devices machine is unbuilt, enabled once it exists, and
+    /// a press while unbuilt paints the refusal on `error-message` and opens no
+    /// wizard (`ui/README.md` § Offer only what is possible, rules 5-7).
+    #[tokio::test]
+    async fn folder_add_waits_for_the_devices_machine_and_refuses_an_early_press() {
+        let mut app = crate::app::tests::authed_app();
+        app.page = Page::Settings;
+        app.settings.devices.machine = None;
+        app.settings.devices.snapshot = None;
+        let add = |app: &crate::app::App| {
+            folders::folders_elements(&app.settings, &[])
+                .into_iter()
+                .find(|e| e.id == fauna_ui_ids::FOLDER_ADD_BUTTON)
+                .expect("folder-add-button is painted")
+        };
+        let el = add(&app);
+        assert!(!el.offered(), "unbuilt machine: the button is disabled");
+        assert_eq!(
+            folders::folder_add_possibility(&app.settings.devices)
+                .reason()
+                .map(|r| r.key.as_str()),
+            Some("common.still_loading")
+        );
+
+        assert!(apply_local(&mut app, Action::OpenFolderWizard).is_none());
+        assert_eq!(
+            app.error_line_text().as_deref(),
+            Some(fauna_i18n::strings::common::STILL_LOADING)
+        );
+        assert!(
+            app.settings
+                .devices
+                .snapshot
+                .as_ref()
+                .is_none_or(|s| s.wizard.is_none())
+        );
+
+        let (machine, _nest) = devices_machine_over_fake();
+        app.settings.devices.machine = Some(Arc::clone(&machine));
+        assert!(add(&app).offered(), "built machine: the button is enabled");
+        assert!(apply_local(&mut app, Action::OpenFolderWizard).is_none());
+        assert!(
+            machine.wizard().is_some(),
+            "a built machine opens the wizard"
         );
     }
 
@@ -24472,12 +26481,12 @@ mod tests {
                 snapshot: Box::new(stale),
                 default_conflict_policy: Default::default(),
                 policy_refused: None,
-                can_serve_webdav: false,
-                own_tiers: Vec::new(),
+                own_tiers: Default::default(),
                 pending_shares: Vec::new(),
                 #[cfg(feature = "p2p-share")]
                 group_shares: Default::default(),
                 reread: false,
+                resync_of: None,
             },
         );
         assert_eq!(
@@ -24801,6 +26810,7 @@ mod tests {
         mail_state(
             &mut state,
             MailSettingsSnapshot {
+                read: true,
                 enabled: false,
                 caldav_enabled: true,
                 credential_management_reachable: true,
@@ -24852,11 +26862,40 @@ mod tests {
         let els = mail_elements(&state);
         assert!(el(&els, "mail-add-credential-submit-button").is_some());
 
-        // A disabled mailbox offers no add-credential button — the credential
-        // section is gated, and enabling goes through the toggle.
-        mail_state(&mut state, MailSettingsSnapshot::default());
+        // A disabled mailbox shows add-credential BLOCKED with the reason that
+        // names the toggle (`credential_management_possibility`, rule 2), and
+        // the rest of the section waits for it; a box that can never serve
+        // mail paints none of it.
+        use fauna_core::possibility::Possibility;
+        let off = MailSettingsSnapshot {
+            read: true,
+            ..Default::default()
+        };
+        mail_state(&mut state, off);
+        let els = mail_elements(&state);
+        let add = el(&els, "mail-settings-add-credential-button").expect("shown, blocked");
+        assert_eq!(
+            add.possibility
+                .as_ref()
+                .and_then(|p| p.reason())
+                .map(|r| r.key.as_str()),
+            Some("mail_settings.credentials_need_mail_on")
+        );
+        assert!(el(&els, "mail-settings-serve-here-toggle").is_none());
+        let never = MailSettingsSnapshot {
+            read: true,
+            mail_unavailable_here: true,
+            ..Default::default()
+        };
+        mail_state(&mut state, never);
         let els = mail_elements(&state);
         assert!(el(&els, "mail-settings-add-credential-button").is_none());
+        assert_eq!(
+            MailSettingsSnapshot::default().credential_management_possibility(),
+            Possibility::blocked(fauna_core::localized::LocalizedText::key(
+                "mail_settings.usable_reading"
+            ))
+        );
     }
 
     /// Sign-out drops the machine — a stale one must never outlive its session.
@@ -25219,6 +27258,145 @@ mod tests {
                 true,
             )),
         );
+    }
+
+    const MAIL_SUBPAGE_ROWS: [&str; 6] = [
+        "mail-aliases",
+        "mail-spam",
+        "mail-export",
+        "mail-import",
+        "mail-lists",
+        "mail-list-members",
+    ];
+
+    fn rail_row<'a>(els: &'a [Element], key: &str) -> Option<&'a Element> {
+        let id = format!("{}[{key}]", fauna_ui_ids::SETTINGS_NAV_ROW);
+        els.iter().find(|e| e.id == id)
+    }
+
+    /// `ui/mail-settings.md` § Errors & edge cases, the mail-usable gate: the
+    /// rail's mail sub-page rows follow the shared `mail_usable()` answer
+    /// through the possibility seam — disabled with the reason while mail is
+    /// off or unread, live once it is on, absent on a box that can never
+    /// serve mail — and the Mail & Calendar row, the one unblocking step,
+    /// stays live throughout.
+    ///
+    /// Red-verify by dropping the rows' `.possible(mail_usable.clone())`: the
+    /// "off" arm finds them enabled.
+    #[test]
+    fn the_rail_gates_every_mail_subpage_row_on_mail_usable() {
+        for (state, expect) in [
+            (
+                "unread",
+                Some(fauna_i18n::strings::mail_settings::USABLE_READING),
+            ),
+            (
+                "off",
+                Some(fauna_i18n::strings::mail_settings::USABLE_NEEDS_MAIL_ON),
+            ),
+            ("on", None),
+        ] {
+            let mut app = crate::app::tests::authed_app();
+            app.page = Page::Settings;
+            app.settings.sub = SubPage::Root;
+            app.settings
+                .set_mail_machine_for_test(mail_machine_in_for_test(state));
+            let els = app.page_elements();
+            assert!(
+                rail_row(&els, "mail-settings").is_some_and(|e| e.enabled),
+                "{state}: the Mail & Calendar row stays live"
+            );
+            for key in MAIL_SUBPAGE_ROWS {
+                let row = rail_row(&els, key).unwrap_or_else(|| panic!("{state}: {key} painted"));
+                match expect {
+                    None => assert!(row.enabled, "{state}: {key} live"),
+                    Some(reason) => {
+                        assert!(!row.enabled, "{state}: {key} disabled");
+                        assert_eq!(row.label.as_deref(), Some(reason), "{state}: {key} reason");
+                    }
+                }
+            }
+        }
+        let mut app = crate::app::tests::authed_app();
+        app.page = Page::Settings;
+        app.settings.sub = SubPage::Root;
+        app.settings
+            .set_mail_machine_for_test(mail_machine_in_for_test("unavailable"));
+        let els = app.page_elements();
+        assert!(rail_row(&els, "mail-settings").is_some());
+        for key in MAIL_SUBPAGE_ROWS {
+            assert!(rail_row(&els, key).is_none(), "unavailable: {key} absent");
+        }
+    }
+
+    /// With no mail machine at all (its build failed) the rows are disabled
+    /// with the unbuilt reason — never silent controls whose handlers end on
+    /// a bare `machine.clone()?` (`ui/README.md` § Offer only what is
+    /// possible, rule 7).
+    #[test]
+    fn an_unbuilt_mail_machine_blocks_the_rows_with_its_reason() {
+        let mut app = crate::app::tests::authed_app();
+        app.page = Page::Settings;
+        app.settings.sub = SubPage::Root;
+        assert!(app.settings.mail_machine().is_none());
+        let els = app.page_elements();
+        for key in MAIL_SUBPAGE_ROWS {
+            let row = rail_row(&els, key).expect("painted");
+            assert!(!row.enabled, "{key} disabled");
+            assert_eq!(
+                row.label.as_deref(),
+                Some(fauna_i18n::strings::mail_settings::USABLE_UNBUILT)
+            );
+        }
+    }
+
+    /// The gate is at the entry (rule 4): a mail sub-page opened by any other
+    /// door while mail is off paints its heading, the reason and Back — none
+    /// of its forms or wizards — and the whole page once mail is on.
+    #[test]
+    fn a_mail_subpage_entered_while_mail_is_off_opens_on_its_reason_only() {
+        for sub in [
+            SubPage::MailAliases,
+            SubPage::MailSpam,
+            SubPage::MailExport,
+            SubPage::MailImport,
+            SubPage::MailLists,
+            SubPage::MailListMembers,
+        ] {
+            let mut app = crate::app::tests::authed_app();
+            app.page = Page::Settings;
+            app.settings.sub = sub;
+            app.settings
+                .set_mail_machine_for_test(mail_machine_in_for_test("off"));
+            let ids: Vec<String> = elements(&app)
+                .into_iter()
+                .map(|e| if e.id.is_empty() { e.text } else { e.id })
+                .collect();
+            assert_eq!(
+                ids,
+                vec![
+                    fauna_ui_ids::PAGE_HEADING.to_string(),
+                    fauna_ui_ids::MAIL_SUBPAGE_GATE_REASON.to_string(),
+                    fauna_ui_ids::SETTINGS_NAV_BACK.to_string(),
+                ],
+                "{sub:?}"
+            );
+            let reason = elements(&app)
+                .into_iter()
+                .find(|e| e.id == fauna_ui_ids::MAIL_SUBPAGE_GATE_REASON)
+                .expect("the reason line");
+            assert_eq!(
+                reason.text,
+                fauna_i18n::strings::mail_settings::USABLE_NEEDS_MAIL_ON,
+                "{sub:?}: the line a driver reads is the blocked answer's reason"
+            );
+            app.settings
+                .set_mail_machine_for_test(mail_machine_in_for_test("on"));
+            assert!(
+                elements(&app).len() > 3,
+                "{sub:?}: the whole page once mail is on"
+            );
+        }
     }
 
     /// Confirming keeps the form open, painting its progress line with the
@@ -25988,6 +28166,487 @@ mod tests {
         assert!(
             !app.settings.mail_import.cancel_armed,
             "a gesture must still disarm — otherwise a stale arm outlives the session"
+        );
+    }
+
+    /// A dummy nest for a wizard machine whose test dispatches only client-side
+    /// actions: building the machine reads nothing over it.
+    fn unreachable_nest() -> Arc<fauna_client::NestClient> {
+        fauna_client::NestClient::new(
+            "http://127.0.0.1:9".to_string(),
+            fauna_core::identity::ActorKeypair::from_secret([7u8; 32]),
+        )
+    }
+
+    /// An export outcome read before a gesture moved the machine, and folded
+    /// after that gesture's own, never paints the format, step or scope the
+    /// gesture already moved past. An off-gesture re-read (the push resync, the
+    /// progress tick) reaches the main loop over the channel, which the loop
+    /// drains only between agent requests, while an awaited gesture folds its
+    /// own outcome inline — so a re-read that finished just before a press
+    /// lands just after it. Measured on Windows: the picker went back to mbox after
+    /// Maildir++ was chosen, and the Scope step's rows vanished between two reads.
+    #[tokio::test]
+    async fn a_late_export_re_read_never_paints_over_a_newer_gesture() {
+        let mut app = crate::app::tests::authed_app();
+        let machine = Arc::new(
+            crate::mail_glue::build_mail_export_machine_without_key_custody(unreachable_nest()),
+        );
+        app.settings.mail_export.machine = Some(Arc::clone(&machine));
+        let read_before = machine.snapshot();
+        assert_eq!(
+            read_before.format,
+            ExportFormat::Mbox,
+            "mbox is the default"
+        );
+
+        machine
+            .dispatch(MailExportAction::SelectFormat {
+                format: ExportFormat::MaildirPlus,
+            })
+            .await
+            .expect("choosing a format is client-side");
+        apply_outcome(
+            &mut app,
+            Outcome::MailExportSnapshot(Box::new(machine.snapshot())),
+        );
+        apply_outcome(&mut app, Outcome::MailExportProgress(Box::new(read_before)));
+
+        assert_eq!(
+            app.settings.mail_export.snapshot.as_ref().map(|s| s.format),
+            Some(ExportFormat::MaildirPlus),
+            "a re-read older than the chosen format painted over it"
+        );
+    }
+
+    /// The import twin of [`a_late_export_re_read_never_paints_over_a_newer_gesture`]:
+    /// one fold rule for both wizards (priority #1).
+    #[tokio::test]
+    async fn a_late_import_re_read_never_paints_over_a_newer_gesture() {
+        let mut app = crate::app::tests::authed_app();
+        let machine = Arc::new(crate::mail_glue::build_mail_import_machine(
+            unreachable_nest(),
+        ));
+        app.settings.mail_import.machine = Some(Arc::clone(&machine));
+        let read_before = machine.snapshot();
+
+        machine
+            .dispatch(MailImportAction::SetHost {
+                value: "imap.example.test".to_string(),
+            })
+            .await
+            .expect("a Source-step field is client-side");
+        apply_outcome(
+            &mut app,
+            Outcome::MailImportSnapshot(Box::new(machine.snapshot())),
+        );
+        apply_outcome(&mut app, Outcome::MailImportProgress(Box::new(read_before)));
+
+        assert_eq!(
+            app.settings
+                .mail_import
+                .snapshot
+                .as_ref()
+                .map(|s| s.host.as_str()),
+            Some("imap.example.test"),
+            "a re-read older than the typed host painted over it"
+        );
+    }
+
+    /// The Connected apps twin of the wizards' rule: the push resync
+    /// (`connected_apps_resync_op`, `StaleSurfaces::atproto`) is spawned and its
+    /// outcome waits on the channel, so a read taken before the handoff open
+    /// folds after it. The machine's snapshot at fold time wins.
+    #[tokio::test]
+    async fn a_late_connected_apps_re_read_never_paints_over_a_newer_gesture() {
+        const HANDLE: &str = "urn:ietf:params:oauth:request_uri:late";
+        let fake = Arc::new(fauna_client_connected_apps::FakeConnectedAppsNestApi::new());
+        fake.add_handoff(
+            HANDLE,
+            fauna_atproto_settings_machine::NestConsentRow {
+                consent_id: vec![7; 16],
+                code: "CODE7".into(),
+                client_id: "https://cli.example/c.json".into(),
+                client_name: Some("Requester".into()),
+                scopes: vec!["atproto".into()],
+                ..Default::default()
+            },
+        );
+        let machine = fauna_client_connected_apps::ConnectedAppsMachine::new(
+            Arc::new(fauna_client_connected_apps::observer::NullObserver),
+            fake,
+        );
+        let mut app = crate::app::tests::authed_app();
+        app.settings.connected_apps.machine = Some(Arc::clone(&machine));
+        let read_before = machine.snapshot();
+
+        ConnectedAppsGesture::OpenHandoff(HANDLE.into())
+            .run(&machine)
+            .await;
+        apply_outcome(
+            &mut app,
+            Outcome::ConnectedAppsSnapshot(Box::new(machine.snapshot())),
+        );
+        apply_outcome(
+            &mut app,
+            Outcome::ConnectedAppsSnapshot(Box::new(read_before)),
+        );
+
+        assert_eq!(
+            app.settings
+                .connected_apps
+                .snapshot
+                .as_ref()
+                .map(|s| s.requests.len()),
+            Some(1),
+            "a re-read older than the opened request painted over it"
+        );
+    }
+
+    /// The Nests store-change re-read (`store_resync_op`'s `Op::HydrateNests`,
+    /// `reread: true`) paints the machine as it stands at fold time, never the
+    /// copy the op carried — the [`fold_devices_snapshot`] rule on the page beside it.
+    #[tokio::test]
+    async fn a_late_nests_re_read_never_paints_over_a_newer_gesture() {
+        let machine = Arc::new(fauna_client_pair::build_linked_nests_machine(
+            nest_for_test(),
+        ));
+        let mut app = crate::app::tests::authed_app();
+        app.settings.nests.machine = Some(Arc::clone(&machine));
+        let mut carried = machine.snapshot();
+        carried.error = Some("a reading the machine has moved past".into());
+
+        apply_outcome(
+            &mut app,
+            Outcome::NestsPage {
+                snapshot: Box::new(carried),
+                escrow_holders: None,
+                custody: None,
+                reread: true,
+            },
+        );
+
+        assert_eq!(
+            app.settings.nests.snapshot.as_ref(),
+            Some(&machine.snapshot()),
+            "the re-read painted the copy its op carried, not the machine now"
+        );
+    }
+
+    /// The AT Protocol push resync (`atproto_resync_op`) paints the machine as
+    /// it stands at fold time, never the copy the op carried.
+    #[tokio::test]
+    async fn a_late_atproto_re_read_never_paints_over_a_newer_gesture() {
+        let machine = crate::mail_glue::build_atproto_settings_machine(
+            nest_for_test(),
+            &"11".repeat(32),
+            Arc::new(fauna_atproto_settings_machine::observer::NullObserver),
+            Arc::new(fauna_client_alerts::CriticalAlerts::new()),
+        )
+        .expect("a well-formed secret builds the machine");
+        let mut app = crate::app::tests::authed_app();
+        app.settings.atproto.machine = Some(Arc::clone(&machine));
+        let mut carried = machine.snapshot();
+        carried.handle_preview = "a-reading-the-machine-moved-past".into();
+
+        apply_outcome(
+            &mut app,
+            Outcome::AtprotoHydrated {
+                snapshot: Box::new(carried),
+                bridges: crate::bridges::Outcome::Loaded {
+                    bridges: Vec::new(),
+                    follows: Default::default(),
+                    follow_requests: Default::default(),
+                    plugins: None,
+                    plugin_cards: None,
+                },
+                resync_of: None,
+            },
+        );
+
+        assert_eq!(
+            app.settings
+                .atproto
+                .snapshot
+                .as_ref()
+                .map(|s| s.handle_preview.clone()),
+            Some(machine.snapshot().handle_preview),
+            "the re-read painted the copy its op carried, not the machine now"
+        );
+    }
+
+    fn report_share(share: bool) -> fauna_protocol::moderation::ModerationReportShareStatusReply {
+        fauna_protocol::moderation::ModerationReportShareStatusReply {
+            share,
+            published: Vec::new(),
+            extra: Default::default(),
+        }
+    }
+
+    /// The Spam push resync (`mail_spam_resync_op`) reads two halves only the
+    /// nest holds — the report share and the threshold override — so it carries
+    /// the page's gesture generation, and a read older than the newest gesture
+    /// fold is dropped: here the share toggle's confirmed `on` stands against a
+    /// late `off` read before it.
+    #[test]
+    fn a_late_spam_re_read_never_paints_over_a_newer_gesture() {
+        let mut app = crate::app::tests::authed_app();
+        let carried = app.settings.mail_spam.gesture_gen;
+
+        apply_outcome(
+            &mut app,
+            Outcome::MailSpamRead(Box::new(mail_spam::MailSpamRead {
+                snapshot: None,
+                share: Ok(report_share(true)),
+                threshold_override: Some(Ok(Some(7))),
+                resync_of: None,
+            })),
+        );
+        apply_outcome(
+            &mut app,
+            Outcome::MailSpamRead(Box::new(mail_spam::MailSpamRead {
+                snapshot: None,
+                share: Ok(report_share(false)),
+                threshold_override: Some(Ok(None)),
+                resync_of: Some(carried),
+            })),
+        );
+
+        let s = &app.settings.mail_spam;
+        assert!(
+            s.share_reports,
+            "a re-read older than the share toggle painted over it"
+        );
+        assert_eq!(
+            s.spam_threshold_override,
+            Some(7),
+            "a re-read older than the threshold commit painted over it"
+        );
+    }
+
+    /// A re-read no gesture has outlived still lands: the generation drops
+    /// only what a newer gesture fold has superseded.
+    #[test]
+    fn a_spam_re_read_no_gesture_outlived_still_lands() {
+        let mut app = crate::app::tests::authed_app();
+        let carried = app.settings.mail_spam.gesture_gen;
+        apply_outcome(
+            &mut app,
+            Outcome::MailSpamRead(Box::new(mail_spam::MailSpamRead {
+                snapshot: None,
+                share: Ok(report_share(true)),
+                threshold_override: Some(Ok(Some(3))),
+                resync_of: Some(carried),
+            })),
+        );
+        assert!(app.settings.mail_spam.share_reports);
+        assert_eq!(app.settings.mail_spam.spam_threshold_override, Some(3));
+    }
+
+    /// The Spam resync's classifier half folds the machine as it stands at fold
+    /// time — the machine half of the page's two-part rule.
+    #[tokio::test]
+    async fn a_late_spam_classifier_read_paints_the_machine_now() {
+        use fauna_client_mail_settings::testing::FakeMailStore;
+        let machine = Arc::new(
+            crate::mail_glue::build_mail_spam_machine(
+                nest_for_test(),
+                &"11".repeat(32),
+                Arc::new(FakeMailStore::empty()),
+                "http://127.0.0.1:1",
+                Arc::new(
+                    fauna_client_config::test_helpers::FakeSuccessionLedgerStore::empty(
+                        fauna_core::identity::ActorId([0x11; 32]),
+                    ),
+                ),
+            )
+            .expect("a well-formed secret builds the machine"),
+        );
+        let mut app = crate::app::tests::authed_app();
+        app.settings.mail_spam.machine = Some(Arc::clone(&machine));
+        let mut carried = machine.snapshot();
+        carried.error = Some("a reading the machine has moved past".into());
+        let gen_now = app.settings.mail_spam.gesture_gen;
+
+        apply_outcome(
+            &mut app,
+            Outcome::MailSpamRead(Box::new(mail_spam::MailSpamRead {
+                snapshot: Some(carried),
+                share: Ok(report_share(false)),
+                threshold_override: None,
+                resync_of: Some(gen_now),
+            })),
+        );
+
+        assert_eq!(
+            app.settings.mail_spam.snapshot.as_ref(),
+            Some(&machine.snapshot()),
+            "the re-read painted the copy its op carried, not the machine now"
+        );
+    }
+
+    /// The AT Protocol push resync's bridges half (`atproto_resync_op`) re-reads
+    /// the Bridges page's follows and is not page-gated, so it carries that
+    /// page's gesture generation: a follow's fold that landed after the read
+    /// was taken stands against the late, follow-less read.
+    #[tokio::test]
+    async fn a_late_atproto_bridges_re_read_never_paints_over_a_newer_gesture() {
+        let machine = crate::mail_glue::build_atproto_settings_machine(
+            nest_for_test(),
+            &"11".repeat(32),
+            Arc::new(fauna_atproto_settings_machine::observer::NullObserver),
+            Arc::new(fauna_client_alerts::CriticalAlerts::new()),
+        )
+        .expect("a well-formed secret builds the machine");
+        let mut app = crate::app::tests::authed_app();
+        app.settings.atproto.machine = Some(Arc::clone(&machine));
+        let loaded = |follows: Vec<fauna_protocol::bridges_ui::BridgeFollow>| {
+            crate::bridges::Outcome::Loaded {
+                bridges: Vec::new(),
+                follows: [("activitypub".to_string(), follows)].into_iter().collect(),
+                follow_requests: Default::default(),
+                plugins: None,
+                plugin_cards: None,
+            }
+        };
+        let carried = app.bridges.gesture_gen;
+
+        crate::bridges::apply_outcome(
+            &mut app,
+            loaded(vec![fauna_protocol::bridges_ui::BridgeFollow {
+                id: "alice".to_string(),
+                petname: None,
+                created_at: None,
+                extra: None,
+                unknown_keys: Default::default(),
+            }]),
+        );
+        apply_outcome(
+            &mut app,
+            Outcome::AtprotoHydrated {
+                snapshot: Box::new(machine.snapshot()),
+                bridges: loaded(Vec::new()),
+                resync_of: Some(carried),
+            },
+        );
+
+        assert_eq!(
+            app.bridges.follows.get("activitypub").map(Vec::len),
+            Some(1),
+            "a re-read older than the follow painted over it"
+        );
+    }
+
+    /// The Task delegation store-change re-read (`store_resync_op`'s
+    /// `Op::LoadTaskDelegation`) carries the page's gesture generation: a pin's
+    /// re-compose that folded after it was built stands against it.
+    #[test]
+    fn a_late_task_delegation_re_read_never_paints_over_a_newer_gesture() {
+        let mut app = crate::app::tests::authed_app();
+        let carried = app.settings.task_delegation.gesture_gen;
+        let labels = |id: &str| {
+            [(id.to_string(), format!("device {id}"))]
+                .into_iter()
+                .collect::<std::collections::HashMap<_, _>>()
+        };
+        apply_outcome(
+            &mut app,
+            Outcome::TaskDelegationLoaded {
+                rows: Vec::new(),
+                labels: labels("after-pin"),
+                resync_of: None,
+            },
+        );
+        apply_outcome(
+            &mut app,
+            Outcome::TaskDelegationLoaded {
+                rows: Vec::new(),
+                labels: labels("before-pin"),
+                resync_of: Some(carried),
+            },
+        );
+        assert!(
+            app.settings
+                .task_delegation
+                .labels
+                .contains_key("after-pin"),
+            "a re-read older than the pin painted over it"
+        );
+    }
+
+    /// The ledger planes' store-change re-reads (`ledger_resync_ops`) carry the
+    /// ledger's gesture generation: a *Keep* that folded after they were built
+    /// is not undone by the late mark list that still holds the kept rule.
+    #[test]
+    fn a_late_ledger_re_read_never_paints_over_a_newer_gesture() {
+        let mut app = crate::app::tests::authed_app();
+        let carried = app.settings.ledger_gen;
+        apply_outcome(
+            &mut app,
+            Outcome::FilterMarks {
+                marks: Some(Vec::new()),
+                resync_of: None,
+            },
+        );
+        apply_outcome(
+            &mut app,
+            Outcome::FilterMarks {
+                marks: Some(vec![11]),
+                resync_of: Some(carried),
+            },
+        );
+        assert!(
+            app.filter_marks.is_empty(),
+            "a mark re-read older than the Keep brought the mark back"
+        );
+
+        app.member_reviews = Vec::new();
+        apply_outcome(
+            &mut app,
+            Outcome::MemberReviewRoster {
+                roster: Some(vec![fauna_core::data::MemberReview {
+                    person: fauna_core::identity::ActorId([7; 32]),
+                    reasons: vec![fauna_core::data::MemberUnattestedReason::CompromiseWindow],
+                }]),
+                resync_of: carried,
+            },
+        );
+        assert!(
+            app.member_reviews.is_empty(),
+            "a roster re-read older than the verdict brought the person back"
+        );
+    }
+
+    /// The unsent tick (`session::spawn_unsent_refresh`) is spawned: a read
+    /// taken before a discard folded never brings the discarded row back.
+    #[test]
+    fn a_late_unsent_tick_never_paints_over_a_newer_gesture() {
+        use fauna_core::localized::LocalizedText;
+        use fauna_core::offline_intent::{IntentDescription, UnsentChange, UnsentState};
+        let mut app = crate::app::tests::authed_app();
+        let carried = app.settings.unsent_gen;
+        apply_outcome(&mut app, Outcome::UnsentChangeSettled(Ok(Vec::new())));
+        fold_unsent_tick(
+            &mut app.settings,
+            Ok(vec![UnsentChange {
+                intent_id: "aa".to_string(),
+                kind: "fauna.posts.interact".to_string(),
+                scope: "posts.interact:p".to_string(),
+                state: UnsentState::Held,
+                created_at: 0,
+                attempts: 0,
+                description: IntentDescription {
+                    label: LocalizedText::key("settings.unsent_changes.kind_like"),
+                    target: None,
+                },
+                hold: None,
+            }]),
+            carried,
+        );
+        assert_eq!(
+            app.settings.unsent_changes.as_deref().map(<[_]>::len),
+            Some(0),
+            "a tick older than the discard brought the row back"
         );
     }
 

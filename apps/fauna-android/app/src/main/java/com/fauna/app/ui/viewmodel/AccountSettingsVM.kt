@@ -236,6 +236,9 @@ class AccountSettingsVM @Inject constructor(
     fun beginAddAccount() {
         onboardingHost.machine.reset()
         onboardingHost.appendMode = true
+        // Providers the signed-in account already holds read connected on the
+        // choose-providers page (onboarding-provisioning.md § 3d).
+        onboardingHost.seedHeldProviderCredentials()
     }
 
     /**
@@ -301,7 +304,7 @@ class AccountSettingsVM @Inject constructor(
      *  left the list, or is no longer not-sent, has nothing left to confirm. */
     suspend fun loadUnsentChanges() {
         val rows = try {
-            com.fauna.ffi.unsentChanges()
+            com.fauna.app.core.UnsentOutbox.unsentChanges()
         } catch (e: Exception) {
             android.util.Log.d("AccountSettingsVM", "unsent changes not re-read: ${e.message}")
             return
@@ -321,6 +324,9 @@ class AccountSettingsVM @Inject constructor(
      *  [UNSENT_REFRESH_MS], the first read at once. A local store read; no
      *  nest is needed. tui's `session::spawn_unsent_refresh` is the twin. */
     suspend fun refreshUnsentChangesWhileShown() {
+        // The kids build has no outbox list to read (`UnsentOutbox`'s twin):
+        // the page composes no section there, so nothing is re-read.
+        if (com.fauna.app.BuildConfig.KIDS) return
         while (true) {
             loadUnsentChanges()
             delay(UNSENT_REFRESH_MS)
@@ -332,7 +338,7 @@ class AccountSettingsVM @Inject constructor(
     fun retryUnsentChange(intentId: String) {
         unsentDiscardArmed.value = null
         viewModelScope.launch {
-            runCatching { com.fauna.ffi.retryUnsentChange(intentId) }
+            runCatching { com.fauna.app.core.UnsentOutbox.retry(intentId) }
                 .onFailure { android.util.Log.w("AccountSettingsVM", "retry failed: ${it.message}") }
             loadUnsentChanges()
         }
@@ -349,7 +355,7 @@ class AccountSettingsVM @Inject constructor(
     fun confirmUnsentDiscard(intentId: String) {
         unsentDiscardArmed.value = null
         viewModelScope.launch {
-            runCatching { com.fauna.ffi.discardUnsentChange(intentId) }
+            runCatching { com.fauna.app.core.UnsentOutbox.discard(intentId) }
                 .onFailure { android.util.Log.w("AccountSettingsVM", "discard failed: ${it.message}") }
             loadUnsentChanges()
         }
@@ -444,8 +450,45 @@ class AccountSettingsVM @Inject constructor(
      * sign-out hands back: the erase is best-effort BY DESIGN — sign-out
      * completes even when a scope will not go — but proceeding must not look
      * identical to succeeding.
+     *
+     * `onError` is told of a sign-out that did NOT finish — a throw anywhere,
+     * the awaited stop and finish inside the coroutine included, or a finish
+     * the shared routine answered *refused* (another instance still serves an
+     * account it reaches) — and `onComplete` is then never called: the caller
+     * paints the failure in its page's `error-message` and the person stays
+     * there (`account-age-band.md` § The account age band → *Kids-app
+     * eligibility while it is unknown*, the sign-out clause; `ui/README.md` §
+     * Offer only what is possible, rule 7). Both callers — the Account page
+     * and the kids build's not-supervised surface — share it.
      */
-    fun signOut(onComplete: (com.fauna.ffi.FfiSignOutResidue?) -> Unit) {
+    fun signOut(
+        onError: (SignOutFailure) -> Unit,
+        onComplete: (com.fauna.ffi.FfiSignOutResidue?) -> Unit,
+    ) {
+        val recorded = try {
+            recordSignOutFirst()
+        } catch (e: Exception) {
+            onError(SignOutFailure.Threw(e.message ?: e.toString()))
+            return
+        }
+        viewModelScope.launch {
+            val outcome = try {
+                awaitedSignOut(recorded)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                onError(SignOutFailure.Threw(e.message ?: e.toString()))
+                return@launch
+            }
+            if (outcome.refused) {
+                onError(SignOutFailure.Refused)
+                return@launch
+            }
+            onComplete(outcome.residue)
+        }
+    }
+
+    private fun recordSignOutFirst(): List<String>? {
         // The decision first, durably, before anything awaits: the sign-out
         // record names every account the registry lists plus the one this
         // process serves and owes the wipe, so a process killed anywhere after
@@ -453,52 +496,53 @@ class AccountSettingsVM @Inject constructor(
         // next launch (`account-scoping.md` § Erasure follows scope → *The
         // sign-out record is on all 7 apps*, decisions 1 and 7). The confirm
         // asked the serving question before calling this.
-        val recorded = accountStores.recordSignOut(accountStores.activeActorHex())
-        viewModelScope.launch {
-            // Await the shared account-runtime stop BEFORE anything below —
-            // while [api]'s client still names the departing account
-            // (`account-scoping.md` § Erasure follows scope, "that call
-            // before its `account_state_erase_*`"). `clearAuth()` (inside
-            // [ActorScope.dropActorScopedState] below) also fires the
-            // switch-shaped stop fire-and-forget for every OTHER teardown
-            // path, which is exactly the race the erase below must not run:
-            // an in-flight or still-open account store is an unerasable store
-            // (the ⚠ note this row closes), and only awaiting it here — not
-            // spawning it — proves the ordering. Sign-out-shaped, not the
-            // switch stop: the erase below takes this machine's account-store
-            // slot (the writer key) with it, so this also retires the
-            // enrollment nest-side first (`sync-agent-credentials.md` §
-            // Credential model → *The signed-out reconcile*), matching
-            // linux/tui/macOS/iOS/windows.
-            api.stopAccountRuntimeForSignOutAwaited()
+        return accountStores.recordSignOut(accountStores.activeActorHex())
+    }
 
-            // Drop BEFORE the erase, not merely before returning: the drop is what
-            // ends the custodian push loop and closes the sealed store it holds
-            // open, and deleting that directory out from under a live handle is the
-            // deleted-inode hazard AccountStores.closeOpenStores documents.
-            actorScope.dropActorScopedState()
-            // The one routine the launch and Remove Again run too, over the
-            // record written above: the wipe first — the registry's own store,
-            // then `secureStorage.clear()`, read back — so if the erase dies
-            // partway the identity is already unreachable; then every recorded
-            // account's scopes under both roots and the account-store container,
-            // with its slots in the shared account-store namespace; the residue
-            // record written before the sign-out record clears (decisions 2–6).
-            // The sync agent was dismissed by the stop above. Install-scoped
-            // state (logs, host-keyed nest pins) survives. What the erase could
-            // not remove goes to the log by path and to the user by count, on the
-            // onboarding surface this hands them (`principles.md` § The user
-            // always controls their data); every word of the line is shared.
-            // On the caller's dispatcher, as the erase it replaces ran: no agent
-            // exchange (the gesture caller), only the sweep.
-            val outcome = accountStores.finishSignOut(
-                SignOutCredentialEraser(registry, secureStorage),
-                caller = com.fauna.ffi.FfiFinishCaller.GESTURE,
-                written = recorded,
-            )
-            WidgetDataWorker.refoldForAccountSwitch(context)
-            onComplete(outcome.residue)
-        }
+    private suspend fun awaitedSignOut(recorded: List<String>?): com.fauna.ffi.FfiSignOutFinish {
+        // Await the shared account-runtime stop BEFORE anything below —
+        // while [api]'s client still names the departing account
+        // (`account-scoping.md` § Erasure follows scope, "that call
+        // before its `account_state_erase_*`"). `clearAuth()` (inside
+        // [ActorScope.dropActorScopedState] below) also fires the
+        // switch-shaped stop fire-and-forget for every OTHER teardown
+        // path, which is exactly the race the erase below must not run:
+        // an in-flight or still-open account store is an unerasable store
+        // (the ⚠ note this row closes), and only awaiting it here — not
+        // spawning it — proves the ordering. Sign-out-shaped, not the
+        // switch stop: the erase below takes this machine's account-store
+        // slot (the writer key) with it, so this also retires the
+        // enrollment nest-side first (`sync-agent-credentials.md` §
+        // Credential model → *The signed-out reconcile*), matching
+        // linux/tui/macOS/iOS/windows.
+        api.stopAccountRuntimeForSignOutAwaited()
+
+        // Drop BEFORE the erase, not merely before returning: the drop is what
+        // ends the custodian push loop and closes the sealed store it holds
+        // open, and deleting that directory out from under a live handle is the
+        // deleted-inode hazard AccountStores.closeOpenStores documents.
+        actorScope.dropActorScopedState()
+        // The one routine the launch and Remove Again run too, over the
+        // record written above: the wipe first — the registry's own store,
+        // then `secureStorage.clear()`, read back — so if the erase dies
+        // partway the identity is already unreachable; then every recorded
+        // account's scopes under both roots and the account-store container,
+        // with its slots in the shared account-store namespace; the residue
+        // record written before the sign-out record clears (decisions 2–6).
+        // The sync agent was dismissed by the stop above. Install-scoped
+        // state (logs, host-keyed nest pins) survives. What the erase could
+        // not remove goes to the log by path and to the user by count, on the
+        // onboarding surface this hands them (`principles.md` § The user
+        // always controls their data); every word of the line is shared.
+        // On the caller's dispatcher, as the erase it replaces ran: no agent
+        // exchange (the gesture caller), only the sweep.
+        val outcome = accountStores.finishSignOut(
+            SignOutCredentialEraser(registry, secureStorage),
+            caller = com.fauna.ffi.FfiFinishCaller.GESTURE,
+            written = recorded,
+        )
+        WidgetDataWorker.refoldForAccountSwitch(context)
+        return outcome
     }
 
     // Ruled 2026-08-26 (`settings.md` § Where logic lives → Account deletion):
@@ -526,5 +570,22 @@ class AccountSettingsVM @Inject constructor(
         /** How often the composed Account page re-reads the unsent changes
          *  (tui's `UNSENT_REFRESH_INTERVAL`). */
         const val UNSENT_REFRESH_MS = 2_000L
+    }
+}
+
+/**
+ * A sign-out that did not finish ([AccountSettingsVM.signOut]'s `onError`).
+ * The page resolves it to its `error-message` line with [render].
+ */
+sealed interface SignOutFailure {
+    /** Something threw; [message] is the exception's own. */
+    data class Threw(val message: String) : SignOutFailure
+
+    /** The shared finish answered *refused*: another instance serves an account it reaches. */
+    data object Refused : SignOutFailure
+
+    fun render(context: Context): String = when (this) {
+        is Threw -> message
+        Refused -> context.getString(com.fauna.app.R.string.settings_sign_out_blocked_other_window)
     }
 }

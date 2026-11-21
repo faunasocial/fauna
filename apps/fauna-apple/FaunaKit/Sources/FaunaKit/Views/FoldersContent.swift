@@ -361,7 +361,13 @@ public struct FoldersContent<BindingContent: View>: View {
                 .accessibilityIdentifier(Ids.folderAddButton)
                 // Same `openWizard()` the Button action runs. Env-gated no-op.
                 .automationActivate(Ids.folderAddButton) { vm.openWizard() }
+                // Disabled with its reason until the devices machine is built
+                // (`ui/README.md` § Offer only what is possible, rules 2 and 5);
+                // written outside the automation modifier so its `enabled`
+                // reads the disable.
+                .faunaPossible(vm.addFolderAnswer)
             }
+            FaunaPossibilityReason(vm.addFolderAnswer)
             if folders.isEmpty, ceremonyScopeCount == 0 {
                 Text(L.devices.noFolders)
                     .font(.caption)
@@ -798,30 +804,34 @@ private struct FolderConflictPolicyPicker: View {
     }
 }
 
-/// The `folder-webdav-toggle`'s hint. The "set up mail first" line **replaces** the
-/// usual explainer (rather than joining it) while the actor holds no MSEK — serving
-/// seals the `WebdavKeysBlob` under the mail encryption key, so the flip cannot succeed
-/// without mail (webdav-server.md § Independent enablement point 2).
-func serveWebdavHintText(canServe: Bool) -> String {
-    canServe ? L.devices.serveWebdavHint : L.devices.serveWebdavNeedsMail
+/// The `folder-webdav-toggle`'s hint: the toggle's own answer's reason **replaces**
+/// the usual explainer (rather than joining it) while the toggle is blocked — "set up
+/// mail first" only when the custody read answered that no MSEK is held (serving seals
+/// the `WebdavKeysBlob` under the mail encryption key, webdav-server.md § Independent
+/// enablement point 2), "still loading" / "could not load" while that read is out or
+/// failed (`ui/folders.md` § Errors & edge cases, *Own-tier and mail gates*).
+func serveWebdavHintText(_ answer: Possibility) -> String {
+    answer.reasonText ?? L.devices.serveWebdavHint
 }
 
 /// Per-set "serve over WebDAV" opt-in (`folder-webdav-toggle`, indexed) — default OFF.
 /// ON drives content-key genesis/migration + the `WebdavKeysBlob` provision; OFF rotates
 /// the content key + re-provisions the blob without the set (`FoldersAuthor::serve_set`).
 ///
-/// **Disabled — not merely error-on-click — while the actor holds no MSEK.** `serve_set`
-/// flips the nest `webdav_enabled` flag BEFORE it re-provisions the blob, so a doomed
-/// enable would commit the flag and only then fail `NoMsek`, leaving the nest marked as
-/// serving a set whose keys the MDA never received. The capability rides the key-bearing
-/// `folders_can_serve_webdav` face, cached per page-visit on the VM (it is NOT on the
-/// keyless `DevicesMachine` snapshot).
+/// **Disabled — not merely error-on-click — unless its shared answer is possible.**
+/// `serve_set` flips the nest `webdav_enabled` flag BEFORE it re-provisions the blob,
+/// so a doomed enable would commit the flag and only then fail `NoMsek`, leaving the
+/// nest marked as serving a set whose keys the MDA never received. The answer is
+/// `DevicesMachineVM.webdavAnswer` — the shared `webdav_serve_possibility` over the
+/// custody read cached per page-visit on the VM (it is NOT on the keyless
+/// `DevicesMachine` snapshot), which keeps a pending or failed read apart from "no
+/// mail key".
 private struct FolderWebdavToggle: View {
     let vm: DevicesMachineVM
     let folder: FolderSummary
 
     private var isOn: Bool { folder.webdavEnabled }
-    private var canServe: Bool { vm.canServeWebdav }
+    private var answer: Possibility { vm.webdavAnswer }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -831,17 +841,18 @@ private struct FolderWebdavToggle: View {
             )) {
                 Text(L.devices.serveWebdav)
             }
-            .disabled(!canServe)
             .accessibilityIdentifier(Ids.folderWebdavToggle)
             // One Entry carries the click, the "on"/"off" read, AND the enabled state —
             // the driver asserts the no-MSEK case via `is_disabled` (no separate ID;
-            // ui.yaml `folder-webdav-toggle`). `isEnabled` mirrors the `.disabled(...)`
-            // predicate above so the two can never silently diverge. Env-gated no-op.
+            // ui.yaml `folder-webdav-toggle`); the registry reads the enabled state the
+            // `faunaPossible` below paints. Env-gated no-op.
             .automationActivate(
                 Ids.folderWebdavToggle,
-                isEnabled: { canServe },
                 value: { isOn ? "on" : "off" }
             ) { apply(!isOn) }
+            // The shared answer, outside the automation modifier so the registry
+            // reads the same enabled-ness.
+            .faunaPossible(answer)
             // BOTH directions run `serve_set`, whose binding leg re-provisions
             // the `WebdavKeysBlob` — the flip's cheap `OfflineSafe` flag is not
             // the kind that matters here (tui declares the same one on
@@ -849,16 +860,16 @@ private struct FolderWebdavToggle: View {
             // half-applied flip is exactly what a no-nest enable leaves behind).
             .faunaGate("fauna.bridges.provision_webdav_keys_blob")
 
-            Text(serveWebdavHintText(canServe: canServe))
+            Text(serveWebdavHintText(answer))
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
     }
 
-    /// Guarded by the same `canServe` predicate the toggle is `.disabled(...)` on, so a
-    /// synthesized activate on a disabled control can never reach `serve_set` either.
+    /// The VM's `serveFolderWebdav` asks the same answer the toggle is painted from
+    /// and refuses with its reason, so a synthesized activate on a disabled control
+    /// never reaches `serve_set` either.
     private func apply(_ enable: Bool) {
-        guard canServe else { return }
         Task {
             await vm.serveFolderWebdav(
                 name: folder.name, mlsGroupIdHex: folder.mlsGroupId, enable: enable)
@@ -882,16 +893,17 @@ private struct FolderWebdavToggle: View {
 /// `unpaywall_set` / `rotate_paywall_grant` legs exist, but no app ships the clear
 /// control yet — folders.md § Web paywall), so picking the placeholder never dispatches.
 /// A tier the set is already paywalled to stays offered even if since deleted from
-/// the tier list, so the row still shows its state. No tiers ⇒ nothing to paywall
-/// to: the select is disabled with a "create a tier first" hint, mirroring the
-/// webdav "set up mail first" gate.
+/// the tier list, so the row still shows its state. The select is painted from
+/// `DevicesMachineVM.paywallAnswer` (the shared own-tier answer, use `Paywall`):
+/// loading and a failed read say so, and only an answered read with no tier gives
+/// "create a tier first" on `folder-paywall-hint`, mirroring the webdav gate.
 private struct FolderPaywallTierPicker: View {
     let vm: DevicesMachineVM
     let folder: FolderSummary
 
     /// `nil` = public (never paywalled). The select renders the empty sentinel then.
     private var current: String { folder.webPaywallTier ?? "" }
-    private var hasTiers: Bool { !vm.ownTierNames.isEmpty }
+    private var answer: Possibility { vm.paywallAnswer }
 
     /// The offered wire values, mirroring linux's model construction: the empty
     /// placeholder only while public, every own tier, plus the already-set tier if
@@ -926,28 +938,28 @@ private struct FolderPaywallTierPicker: View {
                 }
                 .labelsHidden()
                 .controlSize(.small)
-                .disabled(!hasTiers)
                 .accessibilityIdentifier(Ids.folderPaywallTierSelect)
                 // Drives the same `paywall_set` the Picker does; the value is the
-                // tier's wire NAME. `isEnabled` mirrors the `.disabled(...)`
-                // predicate so the two can never silently diverge. Env-gated no-op.
+                // tier's wire NAME. The registry reads the enabled state the
+                // `faunaPossible` below paints. Env-gated no-op.
                 .automationSelect(
                     Ids.folderPaywallTierSelect,
                     value: { current },
-                    isEnabled: { hasTiers },
                     set: { v in apply(v) }
                 )
+                .faunaPossible(answer)
             }
 
-            // `folder-paywall-hint` is present exactly while the select is disabled
-            // for want of a tier; the has-tiers line is the select's ordinary
-            // caption and carries no id (the android/linux shape).
-            if hasTiers {
-                Text(L.devices.paywallTierHint)
+            // `folder-paywall-hint` paints the blocked answer's reason (loading,
+            // a failed read, or "create a tier first"); the possible case's line
+            // is the select's ordinary caption and carries no id (the
+            // android/linux shape).
+            if let reason = answer.reasonText {
+                automationText(Ids.folderPaywallHint, reason)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                automationText(Ids.folderPaywallHint, L.devices.paywallTierNeedsTier)
+                Text(L.devices.paywallTierHint)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -955,11 +967,11 @@ private struct FolderPaywallTierPicker: View {
     }
 
     /// The empty placeholder is not a write — v1 is set-only, there is no "clear the
-    /// paywall" path yet. Only a real tier dispatches; guarded by the same `hasTiers`
-    /// predicate the Picker is `.disabled(...)` on, so a synthesized select on a
-    /// disabled control can never reach `paywall_set` either.
+    /// paywall" path yet. Only a real tier dispatches; the VM's `paywallFolder` asks
+    /// the same answer the Picker is painted from and refuses with its reason, so a
+    /// synthesized select on a disabled control never reaches `paywall_set` either.
     private func apply(_ tier: String) {
-        guard hasTiers, !tier.isEmpty, tier != current else { return }
+        guard !tier.isEmpty, tier != current else { return }
         Task {
             await vm.paywallFolder(
                 name: folder.name, mlsGroupIdHex: folder.mlsGroupId, tier: tier)
@@ -1336,31 +1348,35 @@ private struct FollowedFoldersSection: View {
 
             HStack {
                 Button(L.devices.followConfirm) { submitFollow() }
-                    .disabled(!canSubmit)
+                    .disabled(following)
                     .accessibilityIdentifier(Ids.folderFollowConfirm)
-                    // `isEnabled` mirrors the `.disabled(...)` predicate so a
-                    // synthesized activate cannot reach the write while the
-                    // form is incomplete or a follow is already in flight.
-                    .automationActivate(Ids.folderFollowConfirm, isEnabled: { canSubmit }) {
+                    // `isEnabled` keeps a synthesized activate from reaching
+                    // the write while a follow is already in flight.
+                    .automationActivate(Ids.folderFollowConfirm, isEnabled: { !following }) {
                         submitFollow()
                     }
+                    // The draft's shared answer (`fauna_client_folders::forms`),
+                    // outside the automation modifier so the registry reads it.
+                    .faunaPossible(followPossibility)
                 Button(L.common.cancel) { cancelFollow() }
             }
+            FaunaPossibilityReason(followPossibility)
         }
         .padding(.leading, 8)
     }
 
-    private var canSubmit: Bool {
-        !following
-            && !ownerInput.trimmingCharacters(in: .whitespaces).isEmpty
-            && !nameInput.trimmingCharacters(in: .whitespaces).isEmpty
+    private var followPossibility: Possibility {
+        vm.folderFollowPossibility(handle: ownerInput, name: nameInput)
     }
 
     /// The typed owner goes through UNRESOLVED — the shared recipe classifies it.
     /// The form closes only on success, so a not-found leaves the user's input in
     /// place to correct beside the error rather than making them retype it.
+    ///
+    /// The verb asks ``followPossibility`` again and refuses with its reason on
+    /// `error-message` — never a silent return.
     private func submitFollow() {
-        guard canSubmit else { return }
+        guard !following else { return }
         following = true
         Task {
             let ok = await vm.followFolder(owner: ownerInput, folderName: nameInput)

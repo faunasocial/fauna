@@ -57,6 +57,9 @@ public struct CalendarFileControls: View {
                         // In-process e2e actuation: the same `submitImport()` the Button
                         // fires. No-op in production.
                         .automationActivate(Ids.calendarImportButton) { submitImport() }
+                        // The shared write predicate (events.md § The other
+                        // calendar writes); the no-file refusal stays at the press.
+                        .faunaPossible(vm.calendarWriteGate)
                     Button(L.events.exportIcs) { submitExport() }
                         .accessibilityIdentifier(Ids.calendarExportButton)
                         .automationActivate(Ids.calendarExportButton) { submitExport() }

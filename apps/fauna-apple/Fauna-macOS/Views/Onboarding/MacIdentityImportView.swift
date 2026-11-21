@@ -28,11 +28,15 @@ struct MacIdentityImportView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .disabled(importSecret.isEmpty)
                 .accessibilityIdentifier(Ids.importSubmitButton)
-                .automationActivate(Ids.importSubmitButton, isEnabled: { !importSecret.isEmpty }) {
+                .automationActivate(Ids.importSubmitButton) {
                     submitImport()
                 }
+                // Painted from the shared draft answer; `importIdentity`
+                // re-asks it (`ui/README.md` § Offer only what is possible,
+                // rule 4's form case).
+                .faunaPossible(vm.importPossibility(importSecret))
+                FaunaPossibilityReason(vm.importPossibility(importSecret))
             }
 
             if let error = vm.errorMessage {

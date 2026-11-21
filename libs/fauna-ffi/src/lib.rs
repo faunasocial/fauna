@@ -82,6 +82,14 @@ mod caltime;
 // mail-bridge has no UI and therefore no gate to apply.
 mod offline;
 
+// forms: the form-validity predicates' faces (README.md § Offer only what is
+// possible, rule 4's form case) — the feed, search, nostr, family, folders
+// and subscription submits' shared
+// `Possibility` answers. `value-format`-gated for the same bare-`fauna_core`
+// reason as `offline`. See src/forms.rs.
+#[cfg(feature = "value-format")]
+mod forms;
+
 // Shared recipient-input classification (`fauna_core::resolve::classify_recipient`).
 // Like `spam`, its `#[uniffi::export]` fn returns built-in `Vec<String>` — no
 // `fauna_core` custom type crosses the boundary, so no `value-format`-style feature gate.

@@ -106,6 +106,7 @@ pub fn chunk_file_streaming(path: &Path, chunk_dir: &Path) -> Result<ChunkManife
         stored_hashes: None, // plaintext: store key == plaintext hash
         sealed_hashes: None,
         min_reader: None,
+        pages: None,
     })
 }
 

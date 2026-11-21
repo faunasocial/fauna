@@ -19,7 +19,14 @@ import com.fauna.app.R
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.faunaReadGate
+import com.fauna.app.ui.util.paintedReason
+import com.fauna.app.ui.util.pressAsked
+import androidx.compose.ui.platform.LocalContext
+import uniffi.fauna_core.Possibility
 import com.fauna.app.ui.viewmodel.AdminContactsVM
+import com.fauna.app.ui.viewmodel.AdminEntryRereadEffect
 import uniffi.fauna_client_mail_settings.CarddavPolicyStatus
 import social.fauna.generated.Ids
 
@@ -45,8 +52,10 @@ fun AdminContactsScreen(
     navController: NavController,
     vm: AdminContactsVM = hiltViewModel(),
 ) {
+    AdminEntryRereadEffect(vm.entryReread)
     val snapshot by vm.snapshot.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
+    val toggleAnswer by vm.toggleAnswer.collectAsState()
     val appMessages = LocalAppMessages.current
 
     LaunchedEffect(errorMessage) { errorMessage?.let { appMessages.showError(it) } }
@@ -56,6 +65,8 @@ fun AdminContactsScreen(
         working = snapshot.status == CarddavPolicyStatus.WORKING,
         onBack = { navController.exitAdminToPrimary() },
         onSetCarddavEnabled = vm::setCarddavEnabled,
+        toggleAnswer = toggleAnswer,
+        onRefused = appMessages::showError,
     )
 }
 
@@ -66,7 +77,15 @@ fun AdminContactsContent(
     working: Boolean,
     onBack: () -> Unit,
     onSetCarddavEnabled: (Boolean) -> Unit,
+    // The toggle's answer — the shared `CarddavPolicyMachine::toggle_possibility`
+    // (admin.md § Errors & edge cases, *Controls wait for their read*): blocked
+    // until `get_mail_config` resolves, after a failed read, and while its own
+    // change is on its way. Painted, and asked again at the press.
+    toggleAnswer: Possibility = Possibility.Possible,
+    // A refused press's reason, for the global `error-message` banner.
+    onRefused: (String) -> Unit = {},
 ) {
+    val context = LocalContext.current
     Scaffold(
         topBar = {
             TopAppBar(
@@ -104,7 +123,10 @@ fun AdminContactsContent(
             // ── CardDAV enable (deployment-wide master toggle; contacts sibling
             //    of the calendar enable) ──
             // A dispatch-on-change toggle IS the commit — no buffer, no save.
-            val carddavGate = faunaGate("fauna.bridges.set_carddav_enabled", enabled = !working)
+            val carddavGate = faunaReadGate(
+                toggleAnswer,
+                faunaGate("fauna.bridges.set_carddav_enabled", enabled = !working && toggleAnswer.isPossible),
+            )
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -124,9 +146,9 @@ fun AdminContactsContent(
                 }
                 Switch(
                     checked = carddavEnabled,
-                    onCheckedChange = onSetCarddavEnabled,
+                    onCheckedChange = { on -> pressAsked(context, toggleAnswer, onRefused) { onSetCarddavEnabled(on) } },
                     enabled = carddavGate.enabled,
-                    modifier = Modifier.testTag(Ids.ADMIN_CONTACTS_CARDDAV_ENABLED_TOGGLE),
+                    modifier = Modifier.testTag(Ids.ADMIN_CONTACTS_CARDDAV_ENABLED_TOGGLE).paintedReason(carddavGate.reason),
                 )
             }
         }

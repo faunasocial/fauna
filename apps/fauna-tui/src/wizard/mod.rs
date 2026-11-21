@@ -29,6 +29,7 @@ pub mod nat_mode_choice;
 pub mod nest_provisioning;
 pub mod nest_recovery;
 pub mod nest_retire;
+pub mod provider_choice;
 pub mod recover_selfhosted_instructions;
 pub mod recovery_entry;
 pub mod recovery_kit;
@@ -162,6 +163,12 @@ pub enum WizardField {
     DnsCred(String),
     VpsCred(String),
     Contact(ContactField),
+    /// A field of a provider's dialog on `provider_choice`
+    /// (`provider-credentials-form-<field>`): (provider id, field id).
+    ProviderCred(String, String),
+    /// A WHOIS contact field inside the open provider's dialog — the
+    /// registrar's own contact (`provider_contact`), not `dns_config`'s.
+    ProviderContact(ContactField),
     /// A `nest_retire` credential field (`vps-credentials-form-<id>`, reused
     /// from `vps_config`) — pushed to the retire machine, not the wizard's.
     RetireCred(String),
@@ -207,7 +214,6 @@ pub enum Action {
         confirm_word: String,
     },
     StartHandleCheck,
-    SetControlCheckbox(bool),
     SubmitHandleCheckContinue,
     SubmitClaimCode,
     SubmitInviteRequest,
@@ -258,6 +264,27 @@ pub enum Action {
     /// provisioning, exits through `dns_post_instructions` (§7).
     DnsSetUpLater,
     ContinueFromDns,
+
+    // --- provider_choice (§3d) ---
+    /// Open a provider's dialog (the sign-in pop-up). Client-local: which
+    /// dialog is open is presentation, held on [`Wizard::provider_dialog`].
+    OpenProviderDialog(String),
+    /// `provider-dialog-close-button`. Client-local like the open.
+    CloseProviderDialog,
+    /// `provider-connect-button` — every check of the provider's
+    /// capabilities with its one credential set.
+    ConnectProvider(String),
+    /// `provider-disconnect-button`.
+    DisconnectProvider(String),
+    /// A `hosted-auth` field of a provider's dialog: (provider id, field id).
+    ProviderHostedAuth(String, String),
+    /// A pick on `provider-goal-select[...]`, or the manual row for DNS.
+    SelectGoalCover(
+        fauna_onboarding_machine::ProviderGoal,
+        fauna_onboarding_machine::GoalCover,
+    ),
+    /// `provider-choice-continue-button` — straight to `nest_provisioning`.
+    ContinueFromProviders,
 
     // --- vps_config (§5) ---
     SelectVpsProvider(String),
@@ -349,6 +376,10 @@ pub struct Wizard {
     /// `machine.error_message()`, which the machine owns; `error-message`
     /// renders whichever is set.
     pub error: Option<String>,
+    /// The last `onboarding-terms-link` press reached the terminal: the link
+    /// then reads "Copied!" and carries the URL as its `copied` attr, as
+    /// `settings-terms-link` does. Any other gesture clears it.
+    pub terms_copied: bool,
     /// The resolved `recover-selfhosted-command` for the selected box — the
     /// installer `.env` line carrying that box's custodied `FAUNA_DEPLOYMENT_SEED`
     /// (`box-recovery.md` § Recovery UI (step 4)).
@@ -374,6 +405,10 @@ pub struct Wizard {
     /// `Some`, this page is what the wizard paints, whatever the onboarding
     /// machine's step.
     pub retire: Option<nest_retire::RetireView>,
+    /// The provider whose dialog is open on `provider_choice`, if any — the
+    /// page's one piece of presentation state (which pop-up is up); every
+    /// rule about coverage stays the machine's.
+    pub provider_dialog: Option<String>,
 }
 
 impl Wizard {
@@ -404,6 +439,11 @@ impl Wizard {
         // NAT step's exits through the one-tap trust offer. The other six apps
         // leave it undeclared and keep exiting straight to `Done`.
         machine.set_renders_trust_prompt(true);
+        // And the choose-providers page (`onboarding-provisioning.md` § 3d):
+        // tui renders it, so the handle check's Continue lands there instead of
+        // `dns_config`. The other six apps keep `dns_config` → `vps_config`
+        // until their trickle-down lands.
+        machine.set_renders_provider_choice(true);
         // A desktop app keeps a door key where SSH keys live: the run writes
         // it to `~/.ssh` with a `Host` entry (`installers/vps.md` § The SSH
         // door → *The key*).
@@ -414,9 +454,11 @@ impl Wizard {
             machine,
             inputs: HashMap::new(),
             error: None,
+            terms_copied: false,
             selfhosted_command: None,
             pending_invite_persisted: None,
             retire: None,
+            provider_dialog: None,
         }
     }
 
@@ -439,6 +481,7 @@ impl Wizard {
         self.inputs.clear();
         self.error = None;
         self.selfhosted_command = None;
+        self.provider_dialog = None;
         // Dropping the page drops its token with it (the machine holds it in
         // memory only); `cancel` makes that explicit.
         if let Some(view) = self.retire.take() {
@@ -479,9 +522,17 @@ impl Wizard {
             | WizardField::LockoutSecret
             | WizardField::LockoutAccount
             | WizardField::LockoutConfirm => self.inputs.get(&field).cloned().unwrap_or_default(),
-            WizardField::DnsCred(_) | WizardField::VpsCred(_) => {
+            WizardField::DnsCred(_) | WizardField::VpsCred(_) | WizardField::ProviderCred(..) => {
                 self.inputs.get(&field).cloned().unwrap_or_default()
             }
+            // Reads through to the machine, like `Contact`: *Connect* fetched
+            // the registrar's default contact into it.
+            WizardField::ProviderContact(which) => self
+                .provider_dialog
+                .as_ref()
+                .and_then(|id| self.machine.provider_contact(id.clone()))
+                .map(|c| which.get(&c).to_string())
+                .unwrap_or_default(),
             WizardField::RetireCred(_) | WizardField::RetireConfirmName => self
                 .retire
                 .as_ref()
@@ -506,6 +557,21 @@ impl Wizard {
             WizardField::VpsCred(ref id) => {
                 self.machine.set_vps_cred(id.clone(), value.clone());
                 self.inputs.insert(field, value);
+            }
+            WizardField::ProviderCred(ref pid, ref fid) => {
+                self.machine
+                    .set_provider_cred(pid.clone(), fid.clone(), value.clone());
+                self.inputs.insert(field, value);
+            }
+            WizardField::ProviderContact(which) => {
+                if let Some(id) = self.provider_dialog.clone() {
+                    let mut contact = self
+                        .machine
+                        .provider_contact(id.clone())
+                        .unwrap_or_default();
+                    which.set(&mut contact, value);
+                    self.machine.set_provider_contact(id, contact);
+                }
             }
             // `set_contact` takes the whole struct, so read-modify-write. No
             // local buffer: `field()` reads it back off the machine.
@@ -560,6 +626,7 @@ impl Wizard {
             OnboardingStep::InviteRequest => invite_request::elements(self),
             OnboardingStep::ClaimCode => claim_code::elements(self),
             OnboardingStep::NatModeChoice => nat_mode_choice::elements(self),
+            OnboardingStep::ProviderChoice => provider_choice::elements(self),
             OnboardingStep::DnsConfig => dns_config::elements(self),
             OnboardingStep::VpsConfig => vps_config::elements(self),
             OnboardingStep::NestProvisioning => nest_provisioning::elements(self),
@@ -609,6 +676,31 @@ impl Wizard {
         )
     }
 
+    /// Whether the page on screen paints a `Running` step row — the one state
+    /// whose checkbox animates (`crate::spinner`), so the main loop's spinner
+    /// tick redraws only then. Covers both pages that reuse the
+    /// `provisioning-step-row` component: nest retire (while open, the whole
+    /// surface) and nest provisioning.
+    pub fn shows_running_step(&self) -> bool {
+        use fauna_provisioning::progress::StepStatus;
+        if let Some(view) = &self.retire {
+            return view
+                .machine
+                .snapshot()
+                .steps
+                .iter()
+                .any(|s| s.state.progress_status() == StepStatus::Running);
+        }
+        !self.is_awaiting_manual_dns()
+            && self.machine.step() == OnboardingStep::NestProvisioning
+            && self
+                .machine
+                .provisioning_snapshot()
+                .steps
+                .iter()
+                .any(|s| s.status == StepStatus::Running)
+    }
+
     pub fn title(&self) -> String {
         if self.retire.is_some() {
             return nest_retire::title();
@@ -624,6 +716,7 @@ impl Wizard {
             OnboardingStep::InviteRequest => invite_request::title(),
             OnboardingStep::ClaimCode => claim_code::title(),
             OnboardingStep::NatModeChoice => nat_mode_choice::title(),
+            OnboardingStep::ProviderChoice => provider_choice::title(),
             OnboardingStep::DnsConfig => dns_config::title(),
             OnboardingStep::VpsConfig => vps_config::title(),
             OnboardingStep::NestProvisioning => nest_provisioning::title(),
@@ -656,6 +749,7 @@ impl Wizard {
             OnboardingStep::InviteRequest => invite_request::description(),
             OnboardingStep::ClaimCode => claim_code::description(),
             OnboardingStep::NatModeChoice => nat_mode_choice::description(),
+            OnboardingStep::ProviderChoice => provider_choice::description(),
             OnboardingStep::DnsConfig => dns_config::description(),
             OnboardingStep::VpsConfig => vps_config::description(),
             OnboardingStep::NestProvisioning => nest_provisioning::description(self),
@@ -675,9 +769,10 @@ impl Wizard {
     /// Client-side validation, run before a gesture reaches the machine.
     ///
     /// Returns the payload string the action carries, or `Err(message)` to
-    /// abort and show `message` in `error-message`. Only `identity_import`
-    /// validates: a bad paste "surfaces the localized `invalid_secret` without
-    /// touching the machine" (`onboarding.md:25`). Everything else forwards
+    /// abort and show `message` in `error-message`. `identity_import` parses:
+    /// a bad paste "surfaces the localized `invalid_secret` without touching
+    /// the machine" (`onboarding.md:25`). The claim, invite-code and handle
+    /// submits re-ask their shared draft predicate. Everything else forwards
     /// its field verbatim — the machine owns every other rule.
     pub fn prepare(&mut self, action: &Action) -> Result<String, String> {
         // The lock door keeps nothing: its pasted secret, handle and confirm
@@ -693,7 +788,23 @@ impl Wizard {
                 self.inputs.remove(&f);
             }
         }
+        // The open dialog belongs to `provider_choice` alone: leaving the page
+        // closes it, so a Back and a return never reopen a stale pop-up.
+        if self.machine.step() != OnboardingStep::ProviderChoice {
+            self.provider_dialog = None;
+        }
+        if !matches!(action, Action::CopyTermsUrl) {
+            self.terms_copied = false;
+        }
         match action {
+            Action::OpenProviderDialog(id) => {
+                self.provider_dialog = Some(id.clone());
+                Ok(String::new())
+            }
+            Action::CloseProviderDialog => {
+                self.provider_dialog = None;
+                Ok(String::new())
+            }
             Action::ConfirmImportedIdentity => {
                 let pasted = self.field(WizardField::ImportSecret);
                 let parsed = fauna_core::identity_qr::parse_import_input(&pasted)
@@ -726,8 +837,30 @@ impl Wizard {
                 self.machine.set_current_handle(typed.trim().to_string());
                 Ok(self.field(WizardField::LockoutSecret))
             }
-            Action::SubmitClaimCode => Ok(self.field(WizardField::ClaimCode)),
-            Action::VerifyOobInviteCode => Ok(self.field(WizardField::InviteCode)),
+            // The three code/handle submits ask the draft predicate their
+            // button is painted from again (`ui/README.md` § Offer only what is
+            // possible, rule 4's form case): an agent driving the id reaches
+            // here with the button disabled, and is refused in its words.
+            Action::SubmitClaimCode => {
+                let code = self.field(WizardField::ClaimCode);
+                refuse_blocked(fauna_onboarding_machine::claim_code_draft_possibility(
+                    code.clone(),
+                ))?;
+                Ok(code)
+            }
+            Action::VerifyOobInviteCode => {
+                let code = self.field(WizardField::InviteCode);
+                refuse_blocked(fauna_onboarding_machine::invite_code_draft_possibility(
+                    code.clone(),
+                ))?;
+                Ok(code)
+            }
+            Action::StartHandleCheck => {
+                refuse_blocked(fauna_onboarding_machine::handle_draft_possibility(
+                    self.field(WizardField::Handle),
+                ))?;
+                Ok(String::new())
+            }
             // The installer command is client-held (the machine never surfaces a
             // seed), so it rides to `run_action` as the payload. The button is
             // disabled until it resolves, so an empty payload is unreachable —
@@ -735,8 +868,46 @@ impl Wizard {
             Action::CopySelfhostedCommand => {
                 Ok(self.selfhosted_command.clone().unwrap_or_default())
             }
+            // The copy runs here, where its outcome can reach the page: a
+            // failed write is this gesture's refusal, which lands on the
+            // wizard's own `error-message` line.
+            Action::CopyTermsUrl => {
+                self.record_terms_copy(try_copy_to_clipboard(fauna_core::TERMS_URL))
+            }
             _ => Ok(String::new()),
         }
+    }
+
+    /// Record an `onboarding-terms-link` copy's outcome — the twin of the
+    /// Settings link's `record_terms_copy`: a write that reached the terminal
+    /// confirms on the link (and, through [`Self::prepare`]'s `Ok`, clears a
+    /// prior failure); one that failed confirms nothing and answers the
+    /// `common.copy_failed` line for `error-message` (`docs/goal/ui/README.md`
+    /// § Offer only what is possible, rule 7: a failure is never silent).
+    pub(crate) fn record_terms_copy(
+        &mut self,
+        outcome: std::io::Result<()>,
+    ) -> Result<String, String> {
+        match outcome {
+            Ok(()) => {
+                log_displayed_notice(fauna_i18n::strings::common::COPIED);
+                self.terms_copied = true;
+                Ok(String::new())
+            }
+            Err(e) => {
+                self.terms_copied = false;
+                Err(copy_failed_text(&e))
+            }
+        }
+    }
+}
+
+/// A blocked draft as [`Wizard::prepare`]'s refusal: the predicate's own
+/// reason, resolved, for `error-message`.
+fn refuse_blocked(answer: fauna_core::possibility::Possibility) -> Result<(), String> {
+    match answer.reason() {
+        Some(reason) => Err(localized(reason)),
+        None => Ok(()),
     }
 }
 
@@ -777,9 +948,10 @@ fn open_in_browser(url: &str) {
 /// (no new ui.yaml element), its label is the machine's
 /// `hosted_auth_state` — Idle → "Sign in at the provider…", Pending → the
 /// browser + code line, Connected, Failed — and it is pressable exactly when
-/// the machine's `hosted_auth_can_begin` says so (the `base-url` is typed and
-/// no attempt is mid-flight). Nothing here is re-derived: label states and
-/// pressability are both the machine's.
+/// the machine's `hosted_auth_possibility` says so (the `base-url` is typed
+/// and no attempt is mid-flight), the seam painting its reason otherwise.
+/// Nothing here is re-derived: label states and pressability are both the
+/// machine's.
 pub(crate) fn hosted_auth_button(
     m: &OnboardingMachine,
     form: fauna_onboarding_machine::CredentialForm,
@@ -790,9 +962,10 @@ pub(crate) fn hosted_auth_button(
     Element::button(
         element_id,
         text,
-        m.hosted_auth_can_begin(form, field_id.to_string()),
+        true,
         Action::HostedAuth(form, field_id.to_string()),
     )
+    .possible(m.hosted_auth_possibility(form, field_id.to_string()))
 }
 
 /// Run one wizard gesture to completion.
@@ -822,21 +995,23 @@ pub async fn run_action(
     match action {
         BeginCreateIdentity => machine.begin_create_identity(),
         BeginImportIdentity => machine.begin_import_identity(),
-        ConfirmGeneratedIdentity => match machine.confirm_generated_identity() {
-            // The durable commit point (`long-term-store.md` moment 1,
-            // `onboarding.md` § 1 Identity): written HERE, not carried to
-            // `LoggedIn`. A generated secret that has not been committed exists
-            // nowhere else, so deferring it makes a force-quit destroy the
-            // identity — and it deletes the launch router's case 2
-            // (`secret_key` present, `node_url` empty → resume at
-            // `HandleEntry`), which the whole partial-state design exists for.
-            Ok(secret) => commit(&secret),
-            Err(e) => tracing::warn!("confirm_generated_identity: {e}"),
-        },
-        ConfirmImportedIdentity => match machine.confirm_imported_identity(code) {
-            Ok(secret) => commit(&secret),
-            Err(e) => tracing::warn!("confirm_imported_identity: {e}"),
-        },
+        // The durable commit point (`long-term-store.md` moment 1,
+        // `onboarding.md` § 1 Identity): written HERE, not carried to
+        // `LoggedIn`. A generated secret that has not been committed exists
+        // nowhere else, so deferring it makes a force-quit destroy the
+        // identity — and it deletes the launch router's case 2 (`secret_key`
+        // present, `node_url` empty → resume at `HandleEntry`), which the
+        // whole partial-state design exists for.
+        ConfirmGeneratedIdentity => {
+            if let Some(secret) = machine.surface(machine.confirm_generated_identity()) {
+                commit(&secret);
+            }
+        }
+        ConfirmImportedIdentity => {
+            if let Some(secret) = machine.surface(machine.confirm_imported_identity(code)) {
+                commit(&secret);
+            }
+        }
         BeginRecoveryEntry => machine.begin_recovery_entry(),
         SubmitRecoveryEntry => run_recovery_entry(&machine, code).await,
         BeginEmergencyLockoutEntry => machine.begin_emergency_lockout_entry(),
@@ -844,7 +1019,6 @@ pub async fn run_action(
             run_emergency_lockout(&machine, code, confirm_word).await
         }
         StartHandleCheck => machine.start_handle_check(machine.current_handle()).await,
-        SetControlCheckbox(checked) => machine.set_control_checkbox(checked),
         SubmitHandleCheckContinue => {
             machine.submit_handle_check_continue().await;
         }
@@ -915,7 +1089,7 @@ pub async fn run_action(
             // On a successful claim it routes itself to `NatModeChoice` (or, on
             // the already-claimed edge, to the trust offer); the observer tick
             // repaints, and the launch slot is cleared only at `LoggedIn`, inside
-            // the shared `persist_logged_in` moment `session::adopt` runs
+            // the shared `persist_logged_in` moment `session::persist_logged_in_identity` runs
             // (`onboarding.md` § Long-term store contract) — never here.
             machine.recheck_manual_dns().await;
         }
@@ -952,7 +1126,32 @@ pub async fn run_action(
         ConfirmPrice => machine.confirm_price(),
         DnsSetUpLater => machine.dns_set_up_later(),
         ContinueFromDns => {
-            let _ = machine.continue_from_dns();
+            machine.surface(machine.continue_from_dns());
+        }
+
+        // --- provider_choice (§3d) ---
+        // Client-local: `prepare` already moved the dialog state.
+        OpenProviderDialog(_) | CloseProviderDialog => {}
+        ConnectProvider(id) => {
+            // A failed check is on the row (`ProviderRow::error`), painted as
+            // the dialog's status line — nothing to re-derive here.
+            let _ = machine.connect_provider(id).await;
+        }
+        DisconnectProvider(id) => machine.disconnect_provider(id),
+        ProviderHostedAuth(pid, field_id) => {
+            if let Ok(prompt) = machine
+                .provider_hosted_auth_begin(pid.clone(), field_id.clone())
+                .await
+            {
+                open_in_browser(&prompt.verification_url);
+                let _ = machine.provider_hosted_auth_wait(pid, field_id).await;
+            }
+        }
+        SelectGoalCover(goal, cover) => {
+            machine.surface(machine.select_goal_cover(goal, cover));
+        }
+        ContinueFromProviders => {
+            machine.surface(machine.continue_from_providers());
         }
 
         // --- vps_config (§5) ---
@@ -1027,7 +1226,8 @@ pub async fn run_action(
             }
         }
         ExitRecovery => machine.reset(),
-        CopyTermsUrl => copy_to_clipboard(fauna_core::TERMS_URL),
+        // Copied in `Wizard::prepare`, which owns the outcome's paint.
+        CopyTermsUrl => {}
     }
 }
 
@@ -1046,20 +1246,38 @@ pub(crate) fn terms_link_label() -> String {
 /// `invite_request`, `claim_code` and `nest_provisioning` always, and on
 /// `handle_entry` while the snapshot's `terms_notice_visible` says Continue
 /// signs in (`terms-and-content-guidelines.md` § The decisions, item 3; § Element
-/// IDs). One builder for the four pages, so they cannot drift.
-pub(crate) fn terms_notice() -> [Element; 2] {
+/// IDs). One builder for the four pages, so they cannot drift. After a copy
+/// that reached the terminal (`Wizard::terms_copied`) the link reads "Copied!"
+/// before its label and carries the URL as its `copied` attr, as
+/// `settings-terms-link` does — OSC 52 is fire-and-forget, so the attr is what
+/// a test reads.
+pub(crate) fn terms_notice(copied: bool) -> [Element; 2] {
+    let label = if copied {
+        format!(
+            "{} · {}",
+            fauna_i18n::strings::common::COPIED,
+            terms_link_label()
+        )
+    } else {
+        terms_link_label()
+    };
+    let link = Element::button(
+        fauna_ui_ids::ONBOARDING_TERMS_LINK,
+        label,
+        true,
+        Action::CopyTermsUrl,
+    )
+    .attr("href", fauna_core::TERMS_URL);
     [
         Element::label(
             fauna_ui_ids::ONBOARDING_TERMS_NOTICE,
             fauna_i18n::strings::onboarding::terms::NOTICE,
         ),
-        Element::button(
-            fauna_ui_ids::ONBOARDING_TERMS_LINK,
-            terms_link_label(),
-            true,
-            Action::CopyTermsUrl,
-        )
-        .attr("href", fauna_core::TERMS_URL),
+        if copied {
+            link.attr("copied", fauna_core::TERMS_URL)
+        } else {
+            link
+        },
     ]
 }
 
@@ -1068,14 +1286,35 @@ pub(crate) fn terms_notice() -> [Element; 2] {
 /// even when `fauna-tui` runs on a remote box over SSH. `pub(crate)`: the
 /// contacts page's `contact-actor-id-copy-btn` copies through this same door.
 pub(crate) fn copy_to_clipboard(text: &str) {
-    use base64::Engine as _;
-    use std::io::Write as _;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(text);
-    let mut out = std::io::stdout();
     // A terminal that ignores OSC 52 (or a closed stdout) simply doesn't copy;
-    // the secret is on screen either way, so this is never load-bearing.
-    let _ = write!(out, "\x1b]52;c;{encoded}\x07");
-    let _ = out.flush();
+    // at these call sites the value is on screen either way. A surface that
+    // confirms or reports its copy calls [`try_copy_to_clipboard`] instead.
+    let _ = try_copy_to_clipboard(text);
+}
+
+/// [`copy_to_clipboard`] with the write's outcome, for a surface that
+/// confirms a copy or must say it failed (`docs/goal/ui/README.md` § Offer
+/// only what is possible, rule 7: a failure is never silent). `Ok` means the
+/// sequence reached the terminal; whether the emulator honours OSC 52 is
+/// beyond what the app can observe.
+pub(crate) fn try_copy_to_clipboard(text: &str) -> std::io::Result<()> {
+    write_osc52(&mut std::io::stdout(), text)
+}
+
+/// Write `text` as one OSC 52 clipboard sequence to `out` and flush it — the
+/// one encoder both doors use, taking the writer so a test can hand it one
+/// that fails.
+pub(crate) fn write_osc52(out: &mut impl std::io::Write, text: &str) -> std::io::Result<()> {
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+    write!(out, "\x1b]52;c;{encoded}\x07")?;
+    out.flush()
+}
+
+/// The `common.copy_failed` line for a clipboard write that failed — what a
+/// copy surface puts on its `error-message`.
+pub(crate) fn copy_failed_text(error: &std::io::Error) -> String {
+    fauna_i18n::strings::common::COPY_FAILED.replace("{error}", &error.to_string())
 }
 
 /// Record a success/notice line the UI is showing ("Copied!") in the log ring
@@ -1347,18 +1586,112 @@ pub fn persist_pending_invite_slot(app: &mut crate::app::App) {
     }
 }
 
-/// The URL to **dial** for the nest `nest_url` names.
+/// The work a finished first-run wizard deferred to the authenticated session,
+/// held on the launch its `LoggedIn` started (`onboarding.md` § Wizard exit
+/// handling → *The finished wizard holds*: it "stays with the held launch
+/// through every Retry and runs once, at `Online`").
 ///
-/// A thin alias for the shared seam, kept only so this module's call sites read
-/// in wizard vocabulary. The `cfg`-split that used to live here — a production
-/// twin plus a machine-reading twin — moved into
-/// `fauna_launch_machine::dial::resolved_dial_url`, where every app's *store*
-/// read reaches it too: tui was the only app that could resolve through the
-/// onboarding machine, because it is the only one whose `LoggedIn` glue takes
-/// the dial URL as a parameter. Keeping a second copy here would have been the
-/// first of seven dialects of one rule (priority #1).
-fn nest_dial_url(_machine: &fauna_onboarding_machine::OnboardingMachine, nest_url: &str) -> String {
-    fauna_launch_machine::resolved_dial_url(nest_url)
+/// Lives on [`crate::app::App::held_first_setup`]. `launch::route`'s `Online`
+/// arm hands it to [`run_deferred_first_setup`] once the session is built; a
+/// Retry leaves it where it is; "Use a different nest" drops it (the identity
+/// goes back to `handle_entry`, and a new wizard run captures its own).
+pub struct DeferredFirstSetup {
+    /// The account the wizard signed in: the work runs only on that account's
+    /// `Online`, never on another's (an account the person switched to from
+    /// `launch_retry` meanwhile).
+    actor_id: String,
+    intents: fauna_client_mail_settings::serving_enablement::ServingEnablementIntents,
+    pending_kit: Option<fauna_core::secret::SecretString>,
+    trust_granted: bool,
+    captured_dns: Option<fauna_onboarding_machine::CapturedDnsCredential>,
+}
+
+impl DeferredFirstSetup {
+    /// The account this work belongs to.
+    pub fn actor_id(&self) -> &str {
+        &self.actor_id
+    }
+
+    /// Nothing deferred, for the account `secret_hex` names.
+    #[cfg(test)]
+    pub(crate) fn for_test(secret_hex: &str) -> Self {
+        Self {
+            actor_id: fauna_core::identity::ActorKeypair::from_secret_hex(secret_hex)
+                .expect("test secret")
+                .actor_id_hex(),
+            intents: Default::default(),
+            pending_kit: None,
+            trust_granted: false,
+            captured_dns: None,
+        }
+    }
+}
+
+/// Run the work a first-run wizard deferred ([`DeferredFirstSetup`]) on the
+/// session `launch::route`'s `Online` arm has just built — once: the held value
+/// is taken, so a later `Online` (a relaunch, a switch back) finds nothing.
+/// Left held when the session is another account's, or when no session stands.
+pub fn run_deferred_first_setup(
+    app: &mut crate::app::App,
+    tx: &UnboundedSender<UiMessage>,
+    nest_url: &str,
+    secret_hex: &str,
+) {
+    let Some(session) = app.session.as_ref() else {
+        return;
+    };
+    let Ok(keypair) = fauna_core::identity::ActorKeypair::from_secret_hex(secret_hex) else {
+        return;
+    };
+    if app
+        .held_first_setup
+        .as_ref()
+        .map(DeferredFirstSetup::actor_id)
+        != Some(keypair.actor_id_hex().as_str())
+    {
+        return;
+    }
+    let Some(held) = app.held_first_setup.take() else {
+        return;
+    };
+    let client = Arc::clone(&session.client);
+    // The post-claim serving enablement (`onboarding.md` § 3b): the four
+    // intents, fired by the ONE shared step every app calls — reached only on a
+    // wizard's `LoggedIn`; a returning-user relaunch holds nothing.
+    crate::mail_glue::apply_post_claim_serving_enablement(
+        Arc::clone(&client),
+        secret_hex,
+        app.settings.mail_store(),
+        nest_url,
+        crate::session::ledger_seam(app),
+        held.intents,
+        tx.clone(),
+    );
+    // No claim-time seed capture: the deployment-seed custody leg captures this
+    // box's seed once the account runtime is up (`box-recovery.md` § The
+    // plane-era recovery floor, (c) The writes; `crate::recovery::spawn_custody_leg`).
+    if let Some(kit_hex) = held.pending_kit {
+        register_deferred_recovery_kit(Arc::clone(&client), secret_hex, kit_hex);
+    }
+    if held.trust_granted {
+        mint_default_trust_set(
+            Arc::clone(&client),
+            secret_hex,
+            app.settings.account_runtime.clone(),
+            app.settings.mail_store(),
+        );
+    }
+    if let Some(cred) = held.captured_dns {
+        // The record lives on the account plane, whose runtime this session
+        // has only just started: the store waits for it
+        // (`fauna_client_dns::AccountDnsStore`).
+        seal_captured_dns_credential(
+            Arc::clone(&client),
+            secret_hex,
+            app.settings.account_runtime_source(),
+            cred,
+        );
+    }
 }
 
 pub fn handle_wizard_done(app: &mut crate::app::App, tx: &UnboundedSender<UiMessage>) {
@@ -1383,128 +1716,79 @@ pub fn handle_wizard_done(app: &mut crate::app::App, tx: &UnboundedSender<UiMess
         return;
     }
     match outcome {
-        WizardOutcome::LoggedIn { nest_url, handle } => {
-            // First-setup mail/CalDAV glue (Feature D): capture the machine-derived
-            // enablement intent *before* `adopt` replaces `app.wizard` (mirrors
-            // linux's `launch_main_app_after_signin` call site, which reads these
-            // off the machine before it is torn down). `email_enable_requested`/
-            // `caldav_enable_requested` are ON iff the handle targets a real
-            // registerable domain — there is no user-facing checkbox to read
-            // (Phase-4 S8.7 deleted the onboarding service checkboxes; the intent
-            // now derives, `onboarding.md` § 3b).
-            let enable_email = app.wizard.machine.email_enable_requested();
-            let enable_caldav = app.wizard.machine.caldav_enable_requested();
-            let enable_carddav = app.wizard.machine.carddav_enable_requested();
-            let enable_webdav = app.wizard.machine.webdav_enable_requested();
-            // The recovery kit the user confirmed on the `recovery_kit` screen,
-            // minted there but deliberately unregistered until now — no nest
-            // existed at that screen's position, and the root is never
-            // persisted, so this signed-in handoff is the one point custody
-            // permits the registration (`identity-succession.md` § The
-            // RecoveryKey → *Creation UX*). Consume-once; `None` if skipped.
+        WizardOutcome::LoggedIn { nest_url, .. } => {
+            // The work the wizard deferred to the authenticated session,
+            // captured off the machine before it is reset below (every
+            // `take_*` is consume-once, so a handoff that ran twice would mint
+            // once). It rides the held launch and runs once, at `Online`
+            // ([`run_deferred_first_setup`]):
+            //
+            // - the serving-enablement intents (`onboarding.md` § 3b): ON iff
+            //   the handle targets a real registerable domain — derived, never
+            //   a checkbox;
+            // - the recovery kit the user confirmed on `recovery_kit`, minted
+            //   there but unregistered until a nest exists
+            //   (`identity-succession.md` § The RecoveryKey → *Creation UX*);
+            // - the `trust_prompt` answer (`onboarding.md` § 3b-ter);
+            // - the DNS-provider credential verified on `dns_config`, which the
+            //   machine only captures — sealing it needs the account plane
+            //   (`onboarding-provisioning.md` § 4. DNS configuration).
+            let intents =
+                fauna_client_mail_settings::serving_enablement::ServingEnablementIntents {
+                    email: app.wizard.machine.email_enable_requested(),
+                    caldav: app.wizard.machine.caldav_enable_requested(),
+                    carddav: app.wizard.machine.carddav_enable_requested(),
+                    webdav: app.wizard.machine.webdav_enable_requested(),
+                };
             let pending_kit = app.wizard.machine.take_pending_recovery_secret();
-            // Same capture-before-adopt shape: the `trust_prompt` answer
-            // (`onboarding.md` § 3b-ter). Consume-once, so a handoff that runs
-            // twice mints once; `false` when the user skipped or was never
-            // asked.
             let trust_granted = app.wizard.machine.take_trust_prompt_granted();
-            // Same capture-before-adopt shape: the DNS-provider credential the
-            // user verified back on the `dns_config` step. The machine only
-            // *captures* it — it has no `fauna.account.state.put` capability, and on
-            // the fresh-provision path the nest did not yet exist at that step
-            // — so the seal is this signed-in handoff's job
-            // (`onboarding-provisioning.md` § 4. DNS configuration, *Capture at
-            // onboarding, seal via the launched app*). `None` on the manual /
-            // set-up-later / unverified paths, which is every run that did not
-            // provision a box through a supported provider.
             let captured_dns = app.wizard.machine.captured_dns_credential();
-            // Same capture-before-adopt shape: predecessor seeds a phrase-only
-            // restore recovered from the escrow blob's additive section. Empty
-            // on every ordinary onboarding; non-empty only when the restored
-            // account is mid corpus re-seal after a succession, and then they
-            // are the only copies left anywhere (`identity-succession.md`
-            // § Seed escrow). `adopt` persists them after the restored identity
-            // (so it is the one that lands active) and before the session is
-            // built (so the session's read custody holds them).
+            // Predecessor seeds a phrase-only restore recovered — the only
+            // copies left anywhere (`identity-succession.md` § Seed escrow) —
+            // persisted with the identity, before any session is built, so its
+            // read custody holds them.
             let restored_predecessors = app.wizard.machine.restored_predecessors();
-            // The socket to open, which is the typed URL itself in every
-            // production build — see `nest_dial_url` below.
-            let dial_url = nest_dial_url(&app.wizard.machine, &nest_url);
-            // Same capture-before-adopt shape as the trust answer:
-            // the box's reach address, which outlives the wizard as the account's
-            // reach hint so the first main-app session opens connected while the
-            // domain is still propagating (`onboarding.md` § Reach hint). `None`
-            // on every path that did not provision a box.
+            // The box's reach address, which outlives the wizard as the
+            // account's reach hint (`onboarding.md` § Reach hint); `None` on
+            // every path that did not provision a box.
             let reach_ipv4 = app.wizard.machine.provision_reach_ipv4();
-            let adopted = crate::session::adopt(
+            // Save the outcome — BEFORE the launch, so a crash between the two
+            // leaves a relaunchable account rather than a lost secret.
+            let persisted = crate::session::persist_logged_in_identity(
                 app,
-                tx,
-                &nest_url,
-                &dial_url,
                 &secret,
-                handle,
+                &nest_url,
                 reach_ipv4.as_deref(),
                 &restored_predecessors,
             );
-            // Consume the terminal: a wizard left at `Done` re-fires this handler
-            // the moment the session next drops (`showing_launch_surface()` turns
-            // true again), and a second `adopt` is a second claim terminal — it
-            // signs the account back in and spends whatever pending-factory-reset
-            // slot the drop was protecting. Measured on the admin reset right
-            // after a wizard claim: the reset's sign-out re-adopted, the slot was
-            // gone, and the box sat unclaimed under a code no client held
-            // (`nest/common.md` § Client-state recoverability, CR-1). Everything
-            // the success arm below needs was captured off the machine above.
-            if adopted.is_ok() {
-                app.wizard.reset();
-            }
-            if let Err(e) = adopted {
-                tracing::error!("wizard LoggedIn: {e}");
-                app.wizard.error = Some(e);
-            } else if let Some(session) = app.session.as_ref() {
-                // The post-claim serving enablement (`onboarding.md` § 3b): the
-                // four intents captured above, fired by the ONE shared step every
-                // app calls — reached only here, on a wizard `LoggedIn`; a
-                // returning-user relaunch never calls `adopt`.
-                let client = Arc::clone(&session.client);
-                crate::mail_glue::apply_post_claim_serving_enablement(
-                    Arc::clone(&client),
-                    &secret,
-                    app.settings.mail_store(),
-                    &nest_url,
-                    crate::session::ledger_seam(app),
-                    fauna_client_mail_settings::serving_enablement::ServingEnablementIntents {
-                        email: enable_email,
-                        caldav: enable_caldav,
-                        carddav: enable_carddav,
-                        webdav: enable_webdav,
-                    },
-                );
-                // No claim-time seed capture: the deployment-seed custody leg
-                // captures this box's seed once the account runtime is up
-                // (`box-recovery.md` § The plane-era recovery floor, (c) The
-                // writes; `crate::recovery::spawn_custody_leg`).
-                if let Some(kit_hex) = pending_kit {
-                    register_deferred_recovery_kit(Arc::clone(&client), &secret, kit_hex);
+            match persisted {
+                Err(e) => {
+                    tracing::error!("wizard LoggedIn: {e}");
+                    app.wizard.error = Some(e);
                 }
-                if trust_granted {
-                    mint_default_trust_set(
-                        Arc::clone(&client),
-                        &secret,
-                        app.settings.account_runtime.clone(),
-                        app.settings.mail_store(),
-                    );
-                }
-                if let Some(cred) = captured_dns {
-                    // The record lives on the account plane, whose runtime
-                    // this `adopt` has only just started: the store waits
-                    // for it (`fauna_client_dns::AccountDnsStore`).
-                    seal_captured_dns_credential(
-                        Arc::clone(&client),
-                        &secret,
-                        app.settings.account_runtime_source(),
-                        cred,
-                    );
+                Ok(actor_id) => {
+                    // Consume the terminal: a wizard left at `Done` re-fires
+                    // this handler whenever a launch surface shows again, and a
+                    // second pass is a second claim terminal — measured on the
+                    // admin reset right after a wizard claim, where it spent the
+                    // pending-factory-reset slot (`nest/common.md`
+                    // § Client-state recoverability, CR-1).
+                    app.wizard.reset();
+                    app.held_first_setup = Some(DeferredFirstSetup {
+                        actor_id,
+                        intents,
+                        pending_kit,
+                        trust_granted,
+                        captured_dns,
+                    });
+                    // The finished wizard holds until the session is signed in
+                    // (`onboarding.md` § Wizard exit handling → *The finished
+                    // wizard holds*): the step to the app IS a launch — the
+                    // same `start` a cold launch and an account switch run, so
+                    // `launch_progress` while it waits, `launch_retry` when it
+                    // cannot connect, and the shell only from `route`'s
+                    // `Online` arm. One path into the shell.
+                    crate::launch::start(app, tx);
                 }
             }
         }
@@ -1555,6 +1839,30 @@ fn done_description(_w: &Wizard) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The OSC 52 encoder hands back the writer's failure for the surface to
+    /// say, and writes the one sequence on success.
+    #[test]
+    fn write_osc52_reports_a_failed_write_and_encodes_a_good_one() {
+        struct Refusing;
+        impl std::io::Write for Refusing {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "closed",
+                ))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let err = write_osc52(&mut Refusing, "hi").unwrap_err();
+        assert!(copy_failed_text(&err).contains("closed"));
+
+        let mut out = Vec::new();
+        write_osc52(&mut out, "hi").unwrap();
+        assert_eq!(out, b"\x1b]52;c;aGk=\x07");
+    }
     use crate::app::tests::test_app;
     use fauna_launch_machine::LaunchPersistence;
 
@@ -1579,6 +1887,117 @@ mod tests {
             code.to_string(),
         )
         .await;
+    }
+
+    // ── Refusals are never silent (`ui/README.md` § Offer only what is
+    // possible, rule 7): each lands on the surface's `error-message` ───────
+
+    #[tokio::test]
+    async fn a_refused_goal_pick_shows_its_reason() {
+        use fauna_onboarding_machine::{GoalCover, ProviderGoal};
+        let app = test_app();
+        drive(&app, Action::BeginCreateIdentity, "").await;
+        drive(
+            &app,
+            Action::SelectGoalCover(ProviderGoal::Vps, GoalCover::Manual),
+            "",
+        )
+        .await;
+        assert_eq!(
+            app.wizard.error_text().as_deref(),
+            Some(fauna_i18n::strings::onboarding::provider_choice::STATUS_COVER_VPS)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_providers_continue_shows_its_reason() {
+        let app = test_app();
+        drive(&app, Action::BeginCreateIdentity, "").await;
+        app.wizard
+            .machine
+            .set_current_handle("alice@example.com".into());
+        drive(&app, Action::ContinueFromProviders, "").await;
+        assert_eq!(
+            app.wizard.error_text().as_deref(),
+            Some(fauna_i18n::strings::onboarding::provider_choice::STATUS_COVER_DNS)
+        );
+    }
+
+    /// `onboarding-terms-link` says what its press did, as `settings-terms-link`
+    /// does: a write that reached the terminal confirms on the link ("Copied!",
+    /// the `copied` attr); a failed one confirms nothing and lands
+    /// `common.copy_failed` on the wizard's `error-message`; the next other
+    /// gesture drops the confirmation.
+    #[tokio::test]
+    async fn the_onboarding_terms_link_confirms_its_copy_or_says_its_failure() {
+        struct Closed;
+        impl std::io::Write for Closed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "closed",
+                ))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let copied_attr = |w: &Wizard| {
+            terms_notice(w.terms_copied)[1]
+                .attrs
+                .iter()
+                .find(|(k, _)| k == "copied")
+                .map(|(_, v)| v.clone())
+        };
+        let mut app = test_app();
+        assert_eq!(copied_attr(&app.wizard), None);
+
+        // The press through the app's own door: the write reaches the
+        // (captured) terminal.
+        app.dispatch_wizard(Action::CopyTermsUrl, |_, _, _| {});
+        assert_eq!(
+            copied_attr(&app.wizard).as_deref(),
+            Some(fauna_core::TERMS_URL)
+        );
+        let link = &terms_notice(app.wizard.terms_copied)[1];
+        assert_eq!(link.id, fauna_ui_ids::ONBOARDING_TERMS_LINK);
+        assert!(
+            link.text.starts_with(fauna_i18n::strings::common::COPIED),
+            "{}",
+            link.text
+        );
+        assert_eq!(app.wizard.error_text(), None);
+
+        // A failed write: nothing confirmed, the failure said on the line
+        // `dispatch_wizard` paints a `prepare` refusal on.
+        let refusal = app
+            .wizard
+            .record_terms_copy(write_osc52(&mut Closed, fauna_core::TERMS_URL))
+            .expect_err("a failed write is a refusal");
+        app.wizard.error = Some(refusal);
+        assert_eq!(copied_attr(&app.wizard), None);
+        let error = app.wizard.error_text().expect("the failure is said");
+        let template = fauna_i18n::strings::common::COPY_FAILED;
+        let stem = template.split("{error}").next().unwrap();
+        assert!(
+            error.starts_with(stem) && error.contains("closed"),
+            "{error}"
+        );
+
+        // A confirmation does not outlive the next other gesture.
+        app.dispatch_wizard(Action::CopyTermsUrl, |_, _, _| {});
+        assert!(app.wizard.terms_copied);
+        app.dispatch_wizard(Action::CloseProviderDialog, |_, _, _| {});
+        assert_eq!(copied_attr(&app.wizard), None);
+    }
+
+    /// A refusal the machine itself leaves off the channel is still shown:
+    /// confirming with no generated identity is refused, never only logged.
+    #[tokio::test]
+    async fn a_refused_identity_confirm_is_shown_not_only_logged() {
+        let app = test_app();
+        drive(&app, Action::ConfirmGeneratedIdentity, "").await;
+        assert!(app.wizard.error_text().is_some());
     }
 
     // ── Moment 1: confirm-identity is the durable commit point ───────────
@@ -1728,5 +2147,84 @@ mod tests {
             Some(rows[0].as_str()),
             "and it is the one the next launch resumes"
         );
+    }
+
+    // ── The finished wizard holds until the session is signed in
+    // (`onboarding.md` § Wizard exit handling → *The finished wizard holds*) ──
+
+    /// A first-run `LoggedIn` saves the account and starts the launch — it
+    /// never builds the session itself. The shell is `launch::route`'s `Online`
+    /// arm's to build, so straight after the terminal no session stands, the
+    /// screen is the launch progress view, and the wizard's deferred work is
+    /// held for that account.
+    ///
+    /// Red-verify by restoring the old arm's `session::adopt` → `establish`:
+    /// a session stands at once and nothing is held.
+    #[tokio::test]
+    async fn a_first_run_logged_in_starts_the_launch_and_holds_the_deferred_work() {
+        let mut app = test_app();
+        let tx = app.tx.clone();
+        app.wizard.machine.seed_identity(SECRET.to_string());
+        app.wizard.machine.set_wizard_outcome_for_test(
+            fauna_onboarding_machine::WizardOutcome::LoggedIn {
+                // A closed port: the launch this starts can never reach Online.
+                nest_url: "https://127.0.0.1:1".to_string(),
+                handle: "user@127.0.0.1:1".to_string(),
+            },
+        );
+
+        handle_wizard_done(&mut app, &tx);
+
+        let actor = fauna_core::identity::ActorKeypair::from_secret_hex(SECRET)
+            .unwrap()
+            .actor_id_hex();
+        assert!(
+            app.session.is_none(),
+            "no session before the launch's Online"
+        );
+        assert_eq!(app.launch, crate::launch::LaunchSurface::Launching);
+        assert!(
+            app.launch_machine.is_some(),
+            "the launch is the app's held one"
+        );
+        assert_eq!(
+            app.held_first_setup
+                .as_ref()
+                .map(DeferredFirstSetup::actor_id),
+            Some(actor.as_str()),
+            "the deferred work rides the held launch, keyed to its account"
+        );
+        assert_eq!(
+            crate::session::registry(&app).active().as_deref(),
+            Some(actor.as_str()),
+            "the outcome is saved before the launch reads the store"
+        );
+        assert!(
+            app.wizard.machine.wizard_outcome().is_none(),
+            "the terminal is consumed, so it cannot fire twice"
+        );
+    }
+
+    /// While the held launch has no session (a Retry still failing), the work
+    /// stays held: it runs once, at `Online`, never before.
+    #[test]
+    fn deferred_first_setup_waits_for_a_session() {
+        let mut app = test_app();
+        let tx = app.tx.clone();
+        app.held_first_setup = Some(DeferredFirstSetup::for_test(SECRET));
+        run_deferred_first_setup(&mut app, &tx, "https://127.0.0.1:1", SECRET);
+        assert!(app.held_first_setup.is_some());
+    }
+
+    /// The work belongs to the account the wizard signed in; another
+    /// account's `Online` (a switch made from `launch_retry`) leaves it held.
+    #[test]
+    fn deferred_first_setup_never_runs_on_another_accounts_session() {
+        let mut app = crate::app::tests::authed_app();
+        let tx = app.tx.clone();
+        app.held_first_setup = Some(DeferredFirstSetup::for_test(SECRET));
+        let other = "2".repeat(64);
+        run_deferred_first_setup(&mut app, &tx, "https://127.0.0.1:1", &other);
+        assert!(app.held_first_setup.is_some());
     }
 }

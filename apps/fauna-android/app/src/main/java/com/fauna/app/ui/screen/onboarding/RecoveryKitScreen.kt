@@ -24,6 +24,8 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import social.fauna.generated.Ids
 import uniffi.fauna_core.QrMatrix
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
 
 @HiltViewModel
 class RecoveryKitVM @Inject constructor(

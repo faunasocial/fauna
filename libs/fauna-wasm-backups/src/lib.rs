@@ -12,6 +12,10 @@
 
 use std::sync::Arc;
 
+use fauna_backups_machine::possibility::{
+    DestinationForm, RestoreSelection, destination_form_possibility, restore_inputs_possibility,
+    restore_possibility,
+};
 use fauna_backups_machine::{
     BackupOp, BackupsMachine as InnerMachine, BackupsObserver as InnerObserver, RowIntegrity,
     SnapshotState,
@@ -60,6 +64,91 @@ pub fn snapshot_integrity_text(integrity: JsValue) -> Result<JsValue, JsValue> {
     let integrity: RowIntegrity = serde_wasm_bindgen::from_value(integrity)
         .map_err(|e| JsValue::from_str(&format!("invalid integrity: {e}")))?;
     to_js(&fauna_backups_machine::snapshot_integrity_text(integrity)).map_err(err_to_js)
+}
+
+// ── The page's possibility answers (`docs/goal/ui/README.md` § Offer only
+// what is possible, rules 2, 4, 6 and 7; `docs/goal/ui/backups.md` § Errors &
+// edge cases → *What the page offers*) ─────────────────────────────────
+//
+// Each face returns `fauna_core::possibility::Possibility`'s serde JSON
+// (`{"state":"possible"}` / `{"state":"blocked","reason":…}` /
+// `{"state":"absent"}`), the shape `#lib/possibility` paints — the
+// `uploadPossibilityJson` precedent in `fauna-wasm-media`. The page paints each
+// control from the answer and its gesture asks the same face again before it
+// runs, so the SPA re-derives none of these rules.
+
+fn possibility_json(answer: &fauna_core::possibility::Possibility) -> String {
+    serde_json::to_string(answer).unwrap_or_default()
+}
+
+/// The destination dialog's ceremony, by the tag the SPA names it with. An
+/// unknown tag is a programming error on the SPA side, so the face throws
+/// rather than painting anything on a guess.
+fn destination_form(tag: &str) -> Option<DestinationForm> {
+    Some(match tag {
+        "add_nest" => DestinationForm::AddNest,
+        "add_client_device" => DestinationForm::AddClientDevice,
+        "edit_nest" => DestinationForm::EditNest,
+        "edit_client_device" => DestinationForm::EditClientDevice,
+        _ => return None,
+    })
+}
+
+/// `backup-destination-add-confirm-button` — `destination_form_possibility`.
+/// `form` is `add_nest` | `add_client_device` | `edit_nest` |
+/// `edit_client_device`: a nest form needs its URL, the add-device form a
+/// readable capacity, and a this-device edit is a rename that needs neither.
+#[wasm_bindgen(js_name = destinationFormPossibilityJson)]
+pub fn destination_form_possibility_json(
+    form: &str,
+    url: &str,
+    capacity: &str,
+) -> Result<String, JsValue> {
+    let form = destination_form(form)
+        .ok_or_else(|| JsValue::from_str(&format!("unknown destination form: {form}")))?;
+    Ok(possibility_json(&destination_form_possibility(
+        form, url, capacity,
+    )))
+}
+
+/// `restore-kind-checkbox` and `restore-confirm-input` —
+/// `restore_inputs_possibility`. `snapshotId` is the picked local snapshot's
+/// id, or `null`/`undefined` when there is none to restore.
+#[wasm_bindgen(js_name = restoreInputsPossibilityJson)]
+pub fn restore_inputs_possibility_json(snapshot_id: Option<String>) -> String {
+    let selection = snapshot_id.as_deref().map(|snapshot_id| RestoreSelection {
+        snapshot_id,
+        kind_ticked: true,
+    });
+    possibility_json(&restore_inputs_possibility(selection.as_ref()))
+}
+
+/// `restore-confirm-button` — `restore_possibility`: a snapshot picked, its
+/// kind ticked (`kindTicked`; a kind with no box passes `true`), its id
+/// re-typed exactly, and no restore running.
+#[wasm_bindgen(js_name = restorePossibilityJson)]
+pub fn restore_possibility_json(
+    running: bool,
+    snapshot_id: Option<String>,
+    kind_ticked: bool,
+    typed: &str,
+) -> String {
+    let selection = snapshot_id.as_deref().map(|snapshot_id| RestoreSelection {
+        snapshot_id,
+        kind_ticked,
+    });
+    possibility_json(&restore_possibility(running, selection.as_ref(), typed))
+}
+
+/// A carve-out fetch's offline half — a snapshot file's download and the
+/// whole-snapshot restore: `fauna_protocol::offline_class::carve_out_affordance`.
+/// `connectionState` is the same lowercase word `offlinePossibility` takes
+/// (`connectionStatus` in `#lib/store`); blocked while it is an offline word.
+#[wasm_bindgen(js_name = carveOutPossibilityJson)]
+pub fn carve_out_possibility_json(connection_state: &str) -> String {
+    possibility_json(
+        &fauna_protocol::offline_class::carve_out_affordance(connection_state).possibility(),
+    )
 }
 
 #[wasm_bindgen]
@@ -175,6 +264,34 @@ impl BackupsMachine {
     #[wasm_bindgen(js_name = snapshotJson)]
     pub fn snapshot_json(&self) -> String {
         serde_json::to_string(&self.0.snapshot()).unwrap_or_default()
+    }
+
+    /// `snapshot-create-button`, `snapshot-prune-button` and
+    /// `snapshot-check-button` — `BackupsSnapshot::set_action_possibility` over
+    /// the machine's current state, as `Possibility` serde JSON.
+    #[wasm_bindgen(js_name = setActionPossibilityJson)]
+    pub fn set_action_possibility_json(&self) -> String {
+        possibility_json(&self.0.snapshot().set_action_possibility())
+    }
+
+    /// `snapshot-delete` (the 48-hour soft delete) on the row at `index` of the
+    /// snapshot list — `BackupsSnapshot::delete_possibility`. `index` is a
+    /// `u32` (a plain JS number), never a `BigInt`-typed `i64`/`u64`.
+    #[wasm_bindgen(js_name = deletePossibilityJson)]
+    pub fn delete_possibility_json(&self, index: u32) -> String {
+        possibility_json(&self.0.snapshot().delete_possibility(index as usize))
+    }
+
+    /// `snapshot-immediate-delete-button` on the row at `index` —
+    /// `BackupsSnapshot::immediate_delete_possibility`.
+    #[wasm_bindgen(js_name = immediateDeletePossibilityJson)]
+    pub fn immediate_delete_possibility_json(&self, index: u32) -> String {
+        possibility_json(
+            &self
+                .0
+                .snapshot()
+                .immediate_delete_possibility(index as usize),
+        )
     }
 
     /// `immediate-delete-confirm-button`'s enabled flag, with the machine's real

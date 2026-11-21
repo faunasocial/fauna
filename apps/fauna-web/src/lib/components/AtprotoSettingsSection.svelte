@@ -49,8 +49,27 @@
   } from '#lib/bridges';
   import { changeFollow } from '#lib/bridge-follow';
   import { IDS } from '#lib/generated/uiIds';
+  import {
+    rungPaint,
+    authorizePaint,
+    contestPaint,
+    retireIdentityPaint,
+    distinctReasons,
+    pageMode,
+  } from '#lib/atproto-possibility';
 
   let { error = $bindable('') } = $props();
+
+  // The machine could not be built (e.g. an undecodable identity key): the page
+  // paints the one `page_unavailable` line in place of every control
+  // (`ui/README.md` § Offer only what is possible, rule 7).
+  let buildFailed = $state(false);
+  // The machine is not reactive; every paint below reads `snap` first so it
+  // re-evaluates on each snapshot tick (the machine's answers change with it).
+  function paintOf<T>(f: () => T): T {
+    void snap;
+    return f();
+  }
 
   // The hosted rungs (`atproto-depth-hosted-visible`/`-hosted-full`) render
   // disabled from the moment `ready` flips true — before `snap` has ever been
@@ -219,11 +238,18 @@
     }
     try {
       await ensureWasm();
-      machine = await getAtprotoSettingsMachine(
-        { onChanged: () => applySnapshot() },
-        await sharedRpcPort(id.secretHex),
-        id.secretHex,
-      );
+      try {
+        machine = await getAtprotoSettingsMachine(
+          { onChanged: () => applySnapshot() },
+          await sharedRpcPort(id.secretHex),
+          id.secretHex,
+        );
+      } catch (e: unknown) {
+        buildFailed = true;
+        error = e instanceof Error ? e.message : String(e);
+        ready = true;
+        return;
+      }
       ready = true;
       // The D10 lapse journey's rehydrate hook — the browser shape of linux's
       // `notify_atproto_rehydrate` nudge. Installed the moment the machine
@@ -342,16 +368,15 @@
   // what the `reason` attr always carries, mirroring linux/tui's
   // `set_test_attr(rung, "reason", if gated {...})`. `hosted` is the catalog's
   // fact now, not a `startsWith('hosted')` sniff this file re-runs.
-  function isHostedRungGated(rung: DepthLevelOption): boolean {
-    return rung.hosted && !(snap?.hosted_allowed ?? false);
+  // Each rung's paint is the machine's `rung_possibility(level)` answer
+  // (blocked `common.still_loading` until the read resolves, folded with the
+  // hosted gate's reason). The machine already answers possible for the rung
+  // the person is at, so a step-down stays reachable.
+  function rungOf(rung: DepthLevelOption) {
+    return paintOf(() => rungPaint(machine, rung.level));
   }
-
-  // A hosted rung the user is ALREADY at stays selectable even when gated,
-  // so a step-down is reachable if the domain later stops being public — the
-  // gate only ever blocks ENTERING a hosted level from a lower one (mirrors
-  // linux/tui's `!gated || active`).
-  function isHostedRungEnabled(rung: DepthLevelOption): boolean {
-    return !isHostedRungGated(rung) || snap?.level === rung.level;
+  function rungReasons() {
+    return paintOf(() => distinctReasons(depthLevels.map((r) => rungPaint(machine, r.level))));
   }
 
   async function selectDepth(level: string): Promise<void> {
@@ -476,6 +501,11 @@
   <p class="muted">{t.common.loading}</p>
 {:else if !$identity}
   <p class="muted">{t.common.identity_required}</p>
+{:else if pageMode(buildFailed) === 'unavailable'}
+  <section class="section" data-testid={IDS.ATPROTO_PAGE}>
+    <h2>{t.atproto_settings.title}</h2>
+    <p class="muted">{t.atproto_settings.page_unavailable}</p>
+  </section>
 {:else}
   <section class="section" data-testid={IDS.ATPROTO_PAGE}>
     <h2>{t.atproto_settings.title}</h2>
@@ -494,7 +524,7 @@
         {#if contestCard.deadline}
           <p class="muted small" data-testid={IDS.ATPROTO_CONTEST_DEADLINE}>{resolveLocalized(contestCard.deadline)}</p>
         {/if}
-        {#if contestCard.show_contest}
+        {#if paintOf(() => contestPaint(machine)).shown}
           <button class="btn danger" data-testid={IDS.ATPROTO_CONTEST} onclick={openContest}>
             {t.atproto_settings.contest_button}
           </button>
@@ -523,23 +553,23 @@
       <h3>{t.atproto_settings.depth_heading}</h3>
       {#each depthLevels as rung (rung.level)}
         {@const active = snap?.level === rung.level}
-        {@const gated = isHostedRungGated(rung)}
+        {@const paint = rungOf(rung)}
         <button
           class="depth-rung"
           class:active
           data-testid={rung.ui_id}
           data-state={active ? 'active' : 'inactive'}
-          data-reason={gated ? 'gated' : 'ok'}
-          disabled={!isHostedRungEnabled(rung)}
+          data-reason={paint.disabled ? 'gated' : 'ok'}
+          disabled={paint.disabled}
           onclick={() => selectDepth(rung.level)}
         >
           <span class="depth-title">{resolveLocalized(rung.title)}</span>
           <span class="depth-desc muted small">{resolveLocalized(rung.description)}</span>
         </button>
       {/each}
-      {#if !(snap?.hosted_allowed ?? false) && snap?.hosted_gate_reason}
-        <p class="muted small">{resolveLocalized(snap.hosted_gate_reason)}</p>
-      {/if}
+      {#each rungReasons() as reason}
+        <p class="muted small">{resolveLocalized(reason)}</p>
+      {/each}
     </div>
 
     <!-- ── Transition card ────────────────────────────────────────────── -->
@@ -648,6 +678,7 @@
     {#if snap?.delete_confirm}
       {@const deleteConfirm = snap.delete_confirm}
       {@const retire = deleteConfirm.retire_identity}
+      {@const retirePaint = paintOf(() => retireIdentityPaint(machine))}
       <div class="card" data-testid={IDS.ATPROTO_DELETE_CONFIRM_CARD}>
         {#each deleteConfirm.lines as line}
           <p>{resolveLocalized(line)}</p>
@@ -656,15 +687,15 @@
           <input
             type="checkbox"
             data-testid={IDS.ATPROTO_DELETE_TOMBSTONE}
-            data-state={!retire.available ? 'unavailable' : retire.selected ? 'on' : 'off'}
+            data-state={retirePaint.disabled ? 'unavailable' : retire.selected ? 'on' : 'off'}
             checked={retire.selected}
-            disabled={!retire.available || deleteConfirm.in_progress}
+            disabled={retirePaint.disabled || deleteConfirm.in_progress}
             onchange={(e) => setRetireIdentity(e.currentTarget.checked)}
           />
           {t.atproto_settings.delete_retire_identity_label}
         </label>
-        {#if retire.unavailable_reason}
-          <p>{resolveLocalized(retire.unavailable_reason)}</p>
+        {#if retirePaint.reason}
+          <p>{resolveLocalized(retirePaint.reason)}</p>
         {/if}
         <div class="card-actions">
           <button class="btn" data-testid={IDS.ATPROTO_DELETE_CANCEL} disabled={deleteConfirm.in_progress} onclick={cancelDelete}>
@@ -739,13 +770,17 @@
          renders in BOTH states because re-minting IS renewal; `-revoke` only
          alongside a live row. -->
     {#if snap?.level === 'hosted_full' || snap?.delegation}
+      {@const authPaint = paintOf(() => authorizePaint(machine))}
       <div class="creds">
         <h3>{t.atproto_settings.delegation_heading}</h3>
         {#if !snap?.delegation}
           <p class="muted small">{t.atproto_settings.delegation_empty}</p>
-          <button class="btn btn-primary" data-testid={IDS.ATPROTO_DELEGATION_AUTHORIZE} onclick={authorizeExternalApps}>
+          <button class="btn btn-primary" data-testid={IDS.ATPROTO_DELEGATION_AUTHORIZE} disabled={authPaint.disabled} onclick={authorizeExternalApps}>
             {t.atproto_settings.delegation_authorize_button}
           </button>
+          {#if authPaint.reason}
+            <p class="muted small">{resolveLocalized(authPaint.reason)}</p>
+          {/if}
         {:else}
           {@const d = snap.delegation}
           <div class="card" data-testid={IDS.ATPROTO_DELEGATION_ROW}>
@@ -784,9 +819,12 @@
             <p class="muted small">{t.atproto_settings.delegation_last_used_hint}</p>
           </div>
           <div class="card-actions">
-            <button class="btn" data-testid={IDS.ATPROTO_DELEGATION_AUTHORIZE} onclick={authorizeExternalApps}>
+            <button class="btn" data-testid={IDS.ATPROTO_DELEGATION_AUTHORIZE} disabled={authPaint.disabled} onclick={authorizeExternalApps}>
               {t.atproto_settings.delegation_reauthorize_button}
             </button>
+            {#if authPaint.reason}
+              <p class="muted small">{resolveLocalized(authPaint.reason)}</p>
+            {/if}
             <button class="btn danger" data-testid={IDS.ATPROTO_DELEGATION_REVOKE} onclick={deauthorizeExternalApps}>
               {t.atproto_settings.delegation_revoke_button}
             </button>

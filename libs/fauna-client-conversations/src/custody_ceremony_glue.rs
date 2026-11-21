@@ -264,6 +264,40 @@ impl CustodyMintCandidate {
     }
 }
 
+/// Whether `custody-mint-button` can open the offer flow now
+/// (`docs/goal/ui/README.md` § Offer only what is possible, rules 3–5): the
+/// gate is at the entry, never at the confirm. `candidates` is
+/// [`custody_mint_candidates`]' answer, or `None` before the conversations
+/// it reads have loaded (not enabled on a guess). With no 1:1 conversation
+/// the offer has nothing to travel over: blocked, the reason naming the step
+/// (start a conversation first). Generic over the row, so an app holding the
+/// boundary projection (`CustodyMintCandidateView`, what every UniFFI and wasm
+/// face hands out) asks the same function as one holding the session's rows.
+pub fn custody_mint_possibility<T>(
+    candidates: Option<&[T]>,
+) -> fauna_core::possibility::Possibility {
+    use fauna_core::possibility::{Possibility, ReadState};
+    match candidates {
+        None => Possibility::from_read(ReadState::Pending),
+        Some([]) => Possibility::blocked(fauna_core::localized::LocalizedText::key(
+            "devices.custody_mint_no_contacts",
+        )),
+        Some(_) => Possibility::Possible,
+    }
+}
+
+/// Whether the open offer flow's confirm (`custody-mint-confirm-button`) can
+/// send: blocked, with its reason, until a host is picked.
+pub fn custody_mint_confirm_possibility(host_picked: bool) -> fauna_core::possibility::Possibility {
+    if host_picked {
+        fauna_core::possibility::Possibility::Possible
+    } else {
+        fauna_core::possibility::Possibility::blocked(fauna_core::localized::LocalizedText::key(
+            "devices.custody_mint_pick_host",
+        ))
+    }
+}
+
 /// Derive the owner's custody-offer host candidates from the live session:
 /// every conversation channel whose MLS group has exactly two members — this
 /// account and one counterpart. Deduped per counterpart (the most recently
@@ -835,5 +869,44 @@ mod mint_candidate_tests {
         );
         let labels: Vec<&str> = got.iter().map(|c| c.label.as_str()).collect();
         assert_eq!(labels, vec!["Ada", "Mel", "Zoe"]);
+    }
+}
+
+#[cfg(test)]
+mod mint_possibility_tests {
+    use super::*;
+    use fauna_core::localized::LocalizedText;
+    use fauna_core::possibility::Possibility;
+
+    /// The mint is gated at its entry: not enabled before the conversations
+    /// load, blocked with the start-a-conversation step with no 1:1
+    /// conversation, possible with one; the confirm waits for a host.
+    #[test]
+    fn the_mint_is_gated_at_the_entry_and_the_confirm_waits_for_a_host() {
+        assert_eq!(
+            custody_mint_possibility::<CustodyMintCandidate>(None),
+            Possibility::blocked(LocalizedText::key("common.still_loading"))
+        );
+        assert_eq!(
+            custody_mint_possibility::<CustodyMintCandidate>(Some(&[])),
+            Possibility::blocked(LocalizedText::key("devices.custody_mint_no_contacts"))
+        );
+        let one = CustodyMintCandidate {
+            host: ActorId([1u8; 32]),
+            channel_hex: "ab".into(),
+            label: "alice".into(),
+        };
+        assert_eq!(
+            custody_mint_possibility(Some(&[one])),
+            Possibility::Possible
+        );
+        assert_eq!(
+            custody_mint_confirm_possibility(false),
+            Possibility::blocked(LocalizedText::key("devices.custody_mint_pick_host"))
+        );
+        assert_eq!(
+            custody_mint_confirm_possibility(true),
+            Possibility::Possible
+        );
     }
 }

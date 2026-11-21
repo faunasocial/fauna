@@ -16,3 +16,9 @@
 # version = "x.y.z"
 # reason = "..."      # our own words
 # approved = "YYYY-MM-DD"
+
+[[exception]]
+package = "nostr-connect"
+version = "0.45.2"
+reason = "A dev-dependency of fauna-nest only (its nostr test harness); no shipped binary links it. The registry withdrew 0.45.2 with no advisory. Excepted on the owner's word in chat on 2026-11-17, deciding need 274 of the bump queue; the replacement is still taken when one is published."
+approved = "2026-11-17"

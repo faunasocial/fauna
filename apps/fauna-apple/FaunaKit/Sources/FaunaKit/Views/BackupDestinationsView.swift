@@ -572,7 +572,12 @@ private struct AddEditForm: View {
                     // `fauna.account.state.put` is the only offline-safe part of the
                     // sequence, and it is not the part that can succeed alone.
                     .faunaGate("fauna.backup.destination.register")
+                    // The draft's own answer (a nest form needs its URL, a
+                    // typed capacity must read, a this-device edit is a
+                    // rename that needs nothing); `submitForm` asks it again.
+                    .faunaPossible(vm.formPossibility)
             }
+            FaunaPossibilityReason(vm.formPossibility)
         }
         .padding(8)
         .accessibilityElement(children: .contain)

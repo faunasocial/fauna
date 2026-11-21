@@ -25,6 +25,8 @@ import time
 
 import pytest
 
+from helpers.waiting import wait_until
+
 pytestmark = [pytest.mark.tier2, pytest.mark.tier_3]
 # macos built the shell + admin-nav-back 2026-06-08 (a macos admin-users follow-up) and
 # the three shell-exit tests below are green --client macos (2026-06-08), so they
@@ -278,9 +280,17 @@ def test_admin_area_navigation_switches_between_admin_pages(admin_main_app):
             app.driver.wait_for("admin-dashboard-heading", timeout=15.0)
         app.driver.click(row)
         app.driver.wait_for(heading, timeout=15.0)
-        assert app.driver.is_absent("admin-dashboard-heading"), (
-            f"the {page_id} rail row should replace the dashboard, not stack on "
-            f"it: {app.driver.diagnose('admin-dashboard-heading')}"
+        # The page's heading can register before the push transition has
+        # taken the dashboard root off screen (iOS paints the pushed page's
+        # appear first), so the dashboard's absence is waited for, never read
+        # at one instant (convention 14).
+        wait_until(
+            lambda: app.driver.is_absent("admin-dashboard-heading"),
+            15.0,
+            diagnose=lambda: (
+                f"the {page_id} rail row should replace the dashboard, not stack "
+                f"on it: {app.driver.diagnose('admin-dashboard-heading')}"
+            ),
         )
         assert app.admin.nav_back_present(), (
             f"{page_id} reached by the rail must still be inside the admin area "

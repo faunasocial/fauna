@@ -2982,6 +2982,7 @@ pub fn mail_health_state_label(state: &str) -> LocalizedText {
     LocalizedText::key(match state {
         "off" => "admin.mail_page.health_state_off",
         "bridge_down" => "admin.mail_page.health_state_bridge_down",
+        "outbound_blocked" => "admin.mail_page.health_state_outbound_blocked",
         "blocklisted" => "admin.mail_page.health_state_blocklisted",
         "queue_stalled" => "admin.mail_page.health_state_queue_stalled",
         "records_failing" => "admin.mail_page.health_state_records_failing",
@@ -6237,6 +6238,10 @@ mod value_format_tests {
         for (state, key) in [
             ("off", "admin.mail_page.health_state_off"),
             ("bridge_down", "admin.mail_page.health_state_bridge_down"),
+            (
+                "outbound_blocked",
+                "admin.mail_page.health_state_outbound_blocked",
+            ),
             ("blocklisted", "admin.mail_page.health_state_blocklisted"),
             (
                 "queue_stalled",

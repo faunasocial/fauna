@@ -44,9 +44,12 @@
 //! Three properties make it a convention-14 mechanism rather than another timing
 //! trick:
 //!
-//! 1. **The park is unbounded and test-ended, so no budget can expire under the
-//!    assertion.** It runs *before* the per-kind `tokio::time::timeout`, so the
-//!    handler's own deadline clock starts at release, not at arm.
+//! 1. **The park is unbounded and test-ended at BOTH ends, so no budget can
+//!    expire under the assertion.** On the nest's end it runs *before* the
+//!    per-kind `tokio::time::timeout`, so the handler's own deadline clock
+//!    starts at release, not at arm. On the caller's end the park is announced
+//!    (§ Announcing the park, below), so an `e2e-agent` client stops that
+//!    call's own deadline backstop too.
 //! 2. **Arrival is observable, not assumed.** `GET` reports `holding` — how many
 //!    requests of the kind are parked *right now*. A test deadline-polls that to
 //!    ≥ 1 before asserting, so it never reads the UI before the app has even sent
@@ -59,6 +62,26 @@
 //! Deliberately general (any registered kind, not `fauna.inbox.mode.get`): the
 //! untestable-pre-fetch shape is a whole class of rule, and a per-rule hook would
 //! be re-derived once per rule.
+//!
+//! ## Announcing the park — the caller stops its own deadline
+//!
+//! The nest's park alone bounded the window from the other end: the shared
+//! client gives a request up at its kind's registered deadline, counted from
+//! the send, and sends `Cancel`. So the moment a request PARKS — a `Hold` past
+//! its pass budget, or a `HoldUntilShutdown` before the stop — on the
+//! per-actor plane, the nest at once sends the caller's connection one Push of
+//! kind [`fauna_protocol::push_events::RPC_HELD_PUSH_KIND`] naming the
+//! request's correlation id, through the connection's ordinary push path (it
+//! takes the connection's next `seq`; `DispatchSink::announce_held`). A client
+//! built with `e2e-agent` consumes it in the shared dispatcher's driver and
+//! that one call then has no client-side deadline backstop
+//! (`e2e-latency-independent-assertions.md` § The convention, *The held-read
+//! announce*). Never for a request that passes, is refused or has its reply
+//! dropped, and never on the federation or principal plane (their callers are
+//! not a UI window; `dispatch_core` hands those requests no announce).
+//! `POST …/{kind}?announce=0` (combinable with `pass=N`) arms a hold that parks
+//! WITHOUT announcing — for the journey whose subject is the client's own
+//! timeout. `announced` in the status counts the announces actually queued.
 //!
 //! ## Refusal — the failed-request sibling
 //!
@@ -181,7 +204,10 @@
 //! keep flowing, so a test can drive the rest of the app while one read hangs. It
 //! touches no at-rest state and no handler logic — a released request runs
 //! exactly the code an un-armed one would. It is per-process in-memory state,
-//! cleared when the nest exits.
+//! cleared when the nest exits. Its one addition to the wire is the park's
+//! announce (§ Announcing the park), a test-only push kind a client without
+//! `e2e-agent` decodes as unknown and ignores; it changes no production
+//! deadline on either end.
 //!
 //! An armed kind holds one `MAX_INFLIGHT_HANDLERS` permit per parked request
 //! (the permit is acquired before the spawn, so the park cannot deadlock the
@@ -204,7 +230,7 @@
 #![cfg(feature = "test-hooks")]
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path, Query, State};
@@ -267,6 +293,12 @@ pub enum Refusal {
     Unauthenticated,
 }
 
+/// The park's announce for one request (module doc § Announcing the park):
+/// queue the `fauna.test.rpc_held` push on the caller's connection, `true` iff
+/// it was queued. `dispatch_core` builds one only for a per-actor request;
+/// `None` everywhere else.
+pub type Announce = Box<dyn FnOnce() -> bool + Send>;
+
 /// What [`HoldGate::park`] decided for one request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verdict {
@@ -322,6 +354,11 @@ pub struct HoldGate {
     /// doc § Refusal → *Sparing one request shape*): a request whose payload
     /// names it passes. Cleared by every other mode change.
     spare: Mutex<Option<String>>,
+    /// Whether a park is announced to its caller (module doc § Announcing the
+    /// park) — `false` only for a hold armed with `?announce=0`.
+    announcing: AtomicBool,
+    /// Cumulative announces this gate has queued on a caller's connection.
+    announced: AtomicUsize,
 }
 
 impl HoldGate {
@@ -335,6 +372,8 @@ impl HoldGate {
             passing: AtomicUsize::new(0),
             abandoned: AtomicUsize::new(0),
             spare: Mutex::new(None),
+            announcing: AtomicBool::new(true),
+            announced: AtomicUsize::new(0),
         }
     }
 
@@ -360,26 +399,30 @@ impl HoldGate {
         shutdown: watch::Receiver<bool>,
         actor: Option<[u8; 32]>,
         fields: &[String],
+        announce: Option<Announce>,
     ) -> Verdict {
         if self.spares(fields) {
             return Verdict::Pass;
         }
-        self.park_as(shutdown, actor).await
+        self.park_as(shutdown, actor, announce).await
     }
 
     /// Arm with no pass budget — the unit tests' shorthand; the route always
     /// passes its (possibly zero) budget through [`Self::arm_after`].
     #[cfg(test)]
     fn arm(&self) {
-        self.arm_after(0);
+        self.arm_after(0, true);
     }
 
-    /// Arm the hold, letting the next `pass` requests run first. The budget is
-    /// stored BEFORE the mode flips, so a request arriving in between sees the
-    /// gate still open rather than a hold with no budget.
-    fn arm_after(&self, pass: usize) {
+    /// Arm the hold, letting the next `pass` requests run first, announcing
+    /// each park to its caller unless `announce` is `false` (module doc
+    /// § Announcing the park). The budget and the flag are stored BEFORE the
+    /// mode flips, so a request arriving in between sees the gate still open
+    /// rather than a hold with no budget.
+    fn arm_after(&self, pass: usize, announce: bool) {
         self.set_spare(None);
         self.passing.store(pass, Ordering::SeqCst);
+        self.announcing.store(announce, Ordering::SeqCst);
         // `send_replace`, never `send`: `Sender::send` FAILS — and leaves the
         // value untouched — when no receiver is currently subscribed, which is
         // the normal state of a gate nothing is parked in. Armed with `send`
@@ -394,6 +437,7 @@ impl HoldGate {
     fn arm_until_shutdown(&self) {
         self.set_spare(None);
         self.passing.store(0, Ordering::SeqCst);
+        self.announcing.store(true, Ordering::SeqCst);
         self.mode.send_replace(Mode::HoldUntilShutdown);
     }
 
@@ -453,10 +497,15 @@ impl HoldGate {
     /// `actor` is who the request is served as on the per-actor plane, `None`
     /// for a federation or principal request; only [`Mode::RefuseFor`] reads
     /// it.
+    ///
+    /// `announce` is run exactly when the request PARKS, if this gate is
+    /// announcing (module doc § Announcing the park) — never for a request
+    /// that passes or is refused.
     async fn park_as(
         &self,
         mut shutdown: watch::Receiver<bool>,
         actor: Option<[u8; 32]>,
+        announce: Option<Announce>,
     ) -> Verdict {
         let verdict = match self.current() {
             // Already stopping: the request this mode stages is one sent
@@ -492,6 +541,14 @@ impl HoldGate {
                 // permanently high and the next test's arrival poll passes on a
                 // ghost.
                 let mut guard = HoldingGuard::new(self);
+                // Parked: tell the caller, once, before waiting — the
+                // client's backstop is already counting.
+                if self.announcing.load(Ordering::SeqCst)
+                    && let Some(announce) = announce
+                    && announce()
+                {
+                    self.announced.fetch_add(1, Ordering::SeqCst);
+                }
                 let mut rx = self.mode.subscribe();
                 let mut shutdown_gone = false;
                 // Both watches are re-read each pass with `borrow_and_update`,
@@ -548,7 +605,7 @@ impl HoldGate {
     /// shorthand.
     #[cfg(test)]
     async fn park(&self, shutdown: watch::Receiver<bool>) -> Verdict {
-        self.park_as(shutdown, None).await
+        self.park_as(shutdown, None, None).await
     }
 }
 
@@ -666,16 +723,19 @@ impl RpcHoldRegistry {
 /// `actor` is the actor the request is served as on the per-actor plane, or
 /// `None` (federation, principal) — what a scoped refusal matches; `fields`
 /// are the top-level keys of the request's payload map — what a spared
-/// refusal matches.
+/// refusal matches; `announce` queues the park's announce on the caller's
+/// connection (module doc § Announcing the park) — `Some` only for a
+/// per-actor request, run only if the request parks.
 pub async fn hold_if_armed(
     state: &AppState,
     kind: &str,
     actor: Option<[u8; 32]>,
     fields: &[String],
+    announce: Option<Announce>,
 ) -> Verdict {
     match state.rpc_hold.existing(kind) {
         Some(gate) => {
-            gate.park_request(state.ws.subscribe_shutdown(), actor, fields)
+            gate.park_request(state.ws.subscribe_shutdown(), actor, fields, announce)
                 .await
         }
         None => Verdict::Pass,
@@ -705,15 +765,26 @@ fn known_kind(state: &AppState, kind: &str) -> bool {
 }
 
 /// The `pass` query of `POST …/{kind}`; absent means park from the next request.
+/// `announce=0` (or `false`) parks without announcing (module doc § Announcing
+/// the park); absent, or any other value, announces.
 #[derive(serde::Deserialize, Default)]
 struct ArmQuery {
     #[serde(default)]
     pass: usize,
+    #[serde(default)]
+    announce: Option<String>,
 }
 
-/// `POST /api/v1/test/rpc-hold/{kind}[?pass=N]` — arm the hold. Every subsequent
-/// request of `kind` — after the first `N`, which run as usual (module doc
-/// § Passing the first N) — parks until `release`. Returns
+impl ArmQuery {
+    fn announces(&self) -> bool {
+        !matches!(self.announce.as_deref(), Some("0" | "false"))
+    }
+}
+
+/// `POST /api/v1/test/rpc-hold/{kind}[?pass=N][&announce=0]` — arm the hold.
+/// Every subsequent request of `kind` — after the first `N`, which run as usual
+/// (module doc § Passing the first N) — parks until `release`, each park
+/// announced to its caller unless `announce=0` (§ Announcing the park). Returns
 /// `{"ok": true, "kind": <kind>}`.
 async fn arm_hold(
     State(state): State<Arc<AppState>>,
@@ -727,7 +798,10 @@ async fn arm_hold(
         ))
         .into_response();
     }
-    state.rpc_hold.gate(&kind).arm_after(query.pass);
+    state
+        .rpc_hold
+        .gate(&kind)
+        .arm_after(query.pass, query.announces());
     Json(json!({ "ok": true, "kind": kind })).into_response()
 }
 
@@ -854,8 +928,11 @@ async fn drop_reply_once_kind(
 /// what is left of an armed hold's pass budget and `holding` is the number of
 /// requests of `kind` parked right now, `refused` the cumulative number turned
 /// away and `dropped` the cumulative number whose handler ran and whose reply
-/// was thrown away. A test deadline-polls `holding >= 1` (or `refused >= 1`,
-/// `dropped >= 1`) before asserting anything about the UI.
+/// was thrown away. `announcing` says whether an armed hold announces its parks
+/// (false for `announce=0`, and whenever no hold is armed) and `announced` is
+/// the cumulative number of announces queued on a caller's connection (module
+/// doc § Announcing the park). A test deadline-polls `holding >= 1` (or
+/// `refused >= 1`, `dropped >= 1`) before asserting anything about the UI.
 async fn hold_status(
     State(state): State<Arc<AppState>>,
     Path(kind): Path<String>,
@@ -877,6 +954,8 @@ async fn hold_status(
             "refused": gate.refused.load(Ordering::SeqCst),
             "dropped": gate.dropped.load(Ordering::SeqCst),
             "abandoned": gate.abandoned.load(Ordering::SeqCst),
+            "announcing": gate.is_armed() && gate.announcing.load(Ordering::SeqCst),
+            "announced": gate.announced.load(Ordering::SeqCst),
         })),
         // Never armed is a legitimate answer, not an error: a test polling a
         // kind it has not armed should see zeros, not a 404 it has to special-case.
@@ -893,6 +972,8 @@ async fn hold_status(
             "refused": 0,
             "dropped": 0,
             "abandoned": 0,
+            "announcing": false,
+            "announced": 0,
         })),
     }
 }
@@ -1014,7 +1095,7 @@ mod tests {
     #[tokio::test]
     async fn a_pass_budget_lets_the_first_n_through_then_parks() {
         let gate = Arc::new(HoldGate::new());
-        gate.arm_after(2);
+        gate.arm_after(2, true);
         for _ in 0..2 {
             tokio::time::timeout(Duration::from_secs(5), gate.park(no_shutdown()))
                 .await
@@ -1037,7 +1118,7 @@ mod tests {
             .expect("release wakes the parked request")
             .expect("the parked task did not panic");
 
-        gate.arm_after(5);
+        gate.arm_after(5, true);
         gate.release();
         assert_eq!(
             gate.passing.load(Ordering::SeqCst),
@@ -1138,11 +1219,11 @@ mod tests {
         gate.set_spare(Some("item_class".into()));
         gate.refuse(Refusal::Unknown);
         assert_eq!(
-            gate.park_request(no_shutdown(), None, &spared).await,
+            gate.park_request(no_shutdown(), None, &spared, None).await,
             Verdict::Pass
         );
         assert_eq!(
-            gate.park_request(no_shutdown(), None, &other).await,
+            gate.park_request(no_shutdown(), None, &other, None).await,
             Verdict::Refuse(Refusal::Unknown)
         );
         assert_eq!(gate.refused.load(Ordering::SeqCst), 1);
@@ -1150,7 +1231,7 @@ mod tests {
         gate.release();
         gate.refuse(Refusal::Unknown);
         assert_eq!(
-            gate.park_request(no_shutdown(), None, &spared).await,
+            gate.park_request(no_shutdown(), None, &spared, None).await,
             Verdict::Refuse(Refusal::Unknown),
             "a release forgets the spare"
         );
@@ -1172,12 +1253,12 @@ mod tests {
         // spawn-ok(test): a test-local park the test awaits after the refusal
         let parked_named = tokio::spawn({
             let gate = Arc::clone(&gate);
-            async move { gate.park_as(no_shutdown(), Some(named)).await }
+            async move { gate.park_as(no_shutdown(), Some(named), None).await }
         });
         // spawn-ok(test): a test-local park the test awaits after the refusal
         let parked_other = tokio::spawn({
             let gate = Arc::clone(&gate);
-            async move { gate.park_as(no_shutdown(), Some(other)).await }
+            async move { gate.park_as(no_shutdown(), Some(other), None).await }
         });
         wait_for(|| gate.holding.load(Ordering::SeqCst) == 2).await;
 
@@ -1194,19 +1275,19 @@ mod tests {
         }
 
         assert_eq!(
-            gate.park_as(no_shutdown(), Some(named)).await,
+            gate.park_as(no_shutdown(), Some(named), None).await,
             Verdict::Refuse(Refusal::Unknown)
         );
         assert_eq!(
-            gate.park_as(no_shutdown(), Some(other)).await,
+            gate.park_as(no_shutdown(), Some(other), None).await,
             Verdict::Pass
         );
-        assert_eq!(gate.park_as(no_shutdown(), None).await, Verdict::Pass);
+        assert_eq!(gate.park_as(no_shutdown(), None, None).await, Verdict::Pass);
         assert_eq!(gate.refused.load(Ordering::SeqCst), 2);
 
         gate.release();
         assert_eq!(
-            gate.park_as(no_shutdown(), Some(named)).await,
+            gate.park_as(no_shutdown(), Some(named), None).await,
             Verdict::Pass
         );
 
@@ -1457,5 +1538,200 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
         panic!("condition never held within the 10s budget");
+    }
+
+    // ── Announcing the park (module doc § Announcing the park) ───────────
+
+    /// An announce that counts its own runs and reports `queued`.
+    fn counting_announce(runs: &Arc<AtomicUsize>, queued: bool) -> Option<Announce> {
+        let runs = Arc::clone(runs);
+        Some(Box::new(move || {
+            runs.fetch_add(1, Ordering::SeqCst);
+            queued
+        }))
+    }
+
+    /// Park one request on its own task with `announce`, wait for it to be
+    /// parked, and return the task.
+    async fn park_announced(
+        gate: &Arc<HoldGate>,
+        shutdown: watch::Receiver<bool>,
+        announce: Option<Announce>,
+        holding_after: usize,
+    ) -> tokio::task::JoinHandle<Verdict> {
+        // spawn-ok(test): a test-local park the test releases itself
+        let parked = tokio::spawn({
+            let gate = Arc::clone(gate);
+            async move { gate.park_as(shutdown, None, announce).await }
+        });
+        wait_for(|| gate.holding.load(Ordering::SeqCst) == holding_after).await;
+        parked
+    }
+
+    /// A parked request is announced exactly once, at the park, and
+    /// `announced` counts it.
+    #[tokio::test]
+    async fn a_park_is_announced_once_when_it_parks() {
+        let gate = Arc::new(HoldGate::new());
+        gate.arm();
+        let runs = Arc::new(AtomicUsize::new(0));
+        let parked = park_announced(&gate, no_shutdown(), counting_announce(&runs, true), 1).await;
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "announced at the park");
+        assert_eq!(gate.announced.load(Ordering::SeqCst), 1);
+        gate.release();
+        tokio::time::timeout(Duration::from_secs(5), parked)
+            .await
+            .expect("release wakes the parked request")
+            .expect("the parked task did not panic");
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "never again at release");
+    }
+
+    /// `?pass=N`: the requests the budget lets through are never announced;
+    /// the first one to park is.
+    #[tokio::test]
+    async fn a_passed_request_is_not_announced_and_the_parked_one_is() {
+        let gate = Arc::new(HoldGate::new());
+        gate.arm_after(1, true);
+        let runs = Arc::new(AtomicUsize::new(0));
+        let verdict = tokio::time::timeout(
+            Duration::from_secs(5),
+            gate.park_as(no_shutdown(), None, counting_announce(&runs, true)),
+        )
+        .await
+        .expect("a request inside the pass budget does not park");
+        assert_eq!(verdict, Verdict::Pass);
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            0,
+            "a passed request is never announced"
+        );
+
+        let parked = park_announced(&gate, no_shutdown(), counting_announce(&runs, true), 1).await;
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        gate.release();
+        tokio::time::timeout(Duration::from_secs(5), parked)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    /// `?announce=0`: the hold parks without announcing, and the status says
+    /// so; a later plain arm announces again.
+    #[tokio::test]
+    async fn a_hold_armed_without_announce_parks_silently() {
+        let gate = Arc::new(HoldGate::new());
+        gate.arm_after(0, false);
+        assert!(!gate.announcing.load(Ordering::SeqCst));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let parked = park_announced(&gate, no_shutdown(), counting_announce(&runs, true), 1).await;
+        assert_eq!(runs.load(Ordering::SeqCst), 0, "announce=0 parks silently");
+        assert_eq!(gate.announced.load(Ordering::SeqCst), 0);
+        gate.release();
+        tokio::time::timeout(Duration::from_secs(5), parked)
+            .await
+            .unwrap()
+            .unwrap();
+
+        gate.arm();
+        let parked = park_announced(&gate, no_shutdown(), counting_announce(&runs, true), 1).await;
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "a plain arm announces again"
+        );
+        gate.release();
+        tokio::time::timeout(Duration::from_secs(5), parked)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    /// The route's query: `announce=0` and `announce=false` silence the hold;
+    /// absent, or anything else, announces.
+    #[test]
+    fn the_announce_query_silences_only_on_zero_or_false() {
+        let q = |announce: Option<&str>| ArmQuery {
+            pass: 0,
+            announce: announce.map(str::to_string),
+        };
+        assert!(q(None).announces());
+        assert!(q(Some("1")).announces());
+        assert!(!q(Some("0")).announces());
+        assert!(!q(Some("false")).announces());
+    }
+
+    /// A refused request — at arrival or woken from a park into the refusal —
+    /// is never announced at the refusal; an open gate never announces.
+    #[tokio::test]
+    async fn a_refused_or_unheld_request_is_not_announced() {
+        let gate = Arc::new(HoldGate::new());
+        let runs = Arc::new(AtomicUsize::new(0));
+        // Open gate.
+        gate.park_as(no_shutdown(), None, counting_announce(&runs, true))
+            .await;
+        // Refusing gate.
+        gate.refuse(Refusal::Unknown);
+        let verdict = gate
+            .park_as(no_shutdown(), None, counting_announce(&runs, true))
+            .await;
+        assert_eq!(verdict, Verdict::Refuse(Refusal::Unknown));
+        // Dropping gate.
+        gate.drop_replies();
+        gate.park_as(no_shutdown(), None, counting_announce(&runs, true))
+            .await;
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+        assert_eq!(gate.announced.load(Ordering::SeqCst), 0);
+        gate.release();
+    }
+
+    /// A hold-until-shutdown announces its park like a plain hold; a request
+    /// arriving after the stop began passes and is not announced.
+    #[tokio::test]
+    async fn a_hold_until_shutdown_announces_its_park() {
+        let gate = Arc::new(HoldGate::new());
+        let runs = Arc::new(AtomicUsize::new(0));
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        gate.arm_until_shutdown();
+        let parked = park_announced(
+            &gate,
+            shutdown_rx.clone(),
+            counting_announce(&runs, true),
+            1,
+        )
+        .await;
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        shutdown_tx.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(5), parked)
+            .await
+            .unwrap()
+            .unwrap();
+        gate.park_as(shutdown_rx, None, counting_announce(&runs, true))
+            .await;
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "an arrival after the stop is not parked"
+        );
+    }
+
+    /// An announce whose plane could not queue it (`false`) is run but not
+    /// counted — `announced` counts pushes actually queued — and a request
+    /// with no announce at all (federation, principal) still parks.
+    #[tokio::test]
+    async fn an_unqueued_or_absent_announce_is_not_counted_and_the_park_holds() {
+        let gate = Arc::new(HoldGate::new());
+        gate.arm();
+        let runs = Arc::new(AtomicUsize::new(0));
+        let a = park_announced(&gate, no_shutdown(), counting_announce(&runs, false), 1).await;
+        let b = park_announced(&gate, no_shutdown(), None, 2).await;
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert_eq!(gate.announced.load(Ordering::SeqCst), 0);
+        gate.release();
+        for t in [a, b] {
+            tokio::time::timeout(Duration::from_secs(5), t)
+                .await
+                .unwrap()
+                .unwrap();
+        }
     }
 }

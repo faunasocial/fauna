@@ -28,10 +28,19 @@ public struct CopyButton: View {
     /// "Copy" button); `nil` keeps the icon.
     let title: String?
 
-    public init(_ accessibilityId: String, text: String, title: String? = nil) {
+    /// Where the copy's outcome goes beyond the button's own confirmation —
+    /// a page that owns an error line puts a failure there (`admin-users`'s
+    /// `admin-users-action-error`); `nil` keeps the button self-contained.
+    let onOutcome: ((CopyOutcome) -> Void)?
+
+    public init(
+        _ accessibilityId: String, text: String, title: String? = nil,
+        onOutcome: ((CopyOutcome) -> Void)? = nil
+    ) {
         self.accessibilityId = accessibilityId
         self.text = text
         self.title = title
+        self.onOutcome = onOutcome
     }
 
     public var body: some View {
@@ -64,13 +73,14 @@ public struct CopyButton: View {
     }
 
     private func copy() {
-        Pasteboard.copy(text)
-        copied = text
-        showConfirmation = true
-        // Category 1 (observability.md § What must be logged): a displayed
-        // success line also logs, at its matching `info` level — the
+        // `CopyOutcome.attempt` logs a displayed success at `info`
+        // (observability.md § What must be logged, category 1) — the
         // confirmation TEXT only, never the copied value (§ 2's redaction rule).
-        logMessage(level: .info, target: "fauna.copy_button", message: L.common.copied)
+        let outcome = CopyOutcome.attempt(text)
+        copied = outcome.copiedText
+        showConfirmation = outcome.copiedText != nil
+        onOutcome?(outcome)
+        guard showConfirmation else { return }
         Task {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             showConfirmation = false

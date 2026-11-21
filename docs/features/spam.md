@@ -101,8 +101,8 @@ Stamped 2026-11-07 at b844c771f6.
 | web | ✅ full | 0.1.5-dev+d8a27534 standalone |
 | linux | ⚠ partial | 0.1.5-dev+101d08fa standalone |
 | windows | ⚠ partial | 0.1.2-dev+a945dfd3 standalone |
-| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ⚠ partial | 0.1.5-dev+b7384d11 standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.5-dev+b7384d11 standalone |
 | android |  no run recorded | |
 | tui | ⚠ partial | 0.1.6-dev+d5e8a720 standalone |
 | android-kids | — absent | |
@@ -115,7 +115,7 @@ Stamped 2026-11-07 at b844c771f6.
 | 1 | app | `tests/e2e-unified/tests/test_mail_spam.py::test_mail_spam_reset_clears_history` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 1 | app | `tests/e2e-unified/tests/test_mail_spam.py::test_mail_spam_contribute_toggle_round_trips` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_moderation_client_model_write.py::test_mark_as_spam_trains_sealed_model` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 2 | app | `tests/e2e-unified/tests/test_moderation_client_model_write.py::test_mark_as_spam_writes_sealed_history_row_then_undo` — requires `moderation-queue-second-real-engine` (test harness) (not built: web, android, android-kids) | linux (linux): passed, windows (windows): error, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_moderation_client_model_write.py::test_mark_as_spam_writes_sealed_history_row_then_undo` — requires `moderation-queue-second-real-engine` (test harness) (not built: web) | linux (linux): passed, windows (windows): error, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 3 | app | `tests/e2e-unified/tests/test_mail_client_spam_receive.py::test_client_scores_inbound_spam_to_junk` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 4 | app | `tests/e2e-unified/tests/test_mail_spam.py::test_mail_spam_report_share_toggle_and_published_list` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 4 | app | absent by design on web | — |
@@ -149,7 +149,7 @@ Stamped 2026-11-07 at b844c771f6.
 | 25 | nest | `tests/e2e-unified/tests/api/test_report_sharing.py::test_report_sharing_k_gate_opt_in_transparency_and_opt_out` | nest (linux): passed, nest (macos): passed |
 | 26 | nest | `tests/e2e-unified/tests/test_mail_bridge_report_aggregate.py::test_three_reports_file_the_message_at_your_own_line_and_not_spam_vetoes_it` | nest (linux): passed, nest (macos): passed |
 | 27 | nest | `tests/e2e-unified/tests/api/test_federation_exchange_originator.py::test_reports_gathered_on_another_nest_nudge_your_copy_by_a_capped_amount` | nest (linux): passed, nest (macos): passed |
-| 28 | app | `tests/e2e-unified/tests/test_mail_report_aggregate_app.py::test_three_reports_file_a_message_already_in_your_inbox` | web (linux): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 28 | app | `tests/e2e-unified/tests/test_mail_report_aggregate_app.py::test_three_reports_file_an_unscored_message_already_in_your_inbox` | web (linux): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 29 | app | `tests/e2e-unified/tests/test_mail_spam_catch_up_app.py::test_mail_delivered_before_the_first_lesson_is_filed_once_the_model_exists` | web (linux): passed, windows (windows): passed, tui (linux): passed, tui (macos): passed, tui (windows): failed |
+| 28 | app | `tests/e2e-unified/tests/test_mail_report_aggregate_app.py::test_three_reports_file_a_message_already_in_your_inbox` | web (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 28 | app | `tests/e2e-unified/tests/test_mail_report_aggregate_app.py::test_three_reports_file_an_unscored_message_already_in_your_inbox` | web (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 29 | app | `tests/e2e-unified/tests/test_mail_spam_catch_up_app.py::test_mail_delivered_before_the_first_lesson_is_filed_once_the_model_exists` | web (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): failed |
 <!-- features-render:end -->

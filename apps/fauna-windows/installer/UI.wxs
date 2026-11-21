@@ -13,7 +13,8 @@
 
     1. The DataCleanup component (referenced by BOTH the Sync and Nest features
        in Package.wxs, so it installs whenever either is selected — Sync is now
-       optional, so the Nest ref covers a headless nest-only install) writes the
+       optional, so the Nest ref covers a headless nest-only install; the nest
+       MSI, nest/Package.wxs, references it from its Nest feature alone) writes the
        data-dir path into the registry at install time:
        HKLM\SOFTWARE\Fauna\Install\DataDir = [FaunaDataFolder].
     2. On uninstall, the FAUNA_PROGRAMDATA_DIR property's RegistrySearch (during
@@ -67,7 +68,8 @@
 
     <!-- ── GUI "also delete my data" on uninstall ──────────────────────────────
       By default a GUI uninstall preserves %ProgramData%\Fauna (the no-data-loss
-      default). This dialog, shown ONLY on the Remove path, lets the user opt into
+      default). This dialog, shown ONLY on the Remove path of an install that
+      recorded a data folder (the routes below), lets the user opt into
       the same cleanup the CLI `REMOVE_USER_DATA=1` triggers — it merely SETS that
       property from the checkbox; the removal mechanism (DataCleanup +
       util:RemoveFolderEx above) is unchanged. Per-user %LocalAppData%\Fauna stays
@@ -75,13 +77,15 @@
       working unchanged for headless/scripted uninstalls. -->
     <UI>
       <Dialog Id="RemoveDataDlg" Width="370" Height="270" Title="[ProductName] Setup" NoMinimize="yes">
+        <!-- public-text: windows-installer-descriptions -->
         <Control Id="Title" Type="Text" X="15" Y="15" Width="340" Height="15" Transparent="yes" NoPrefix="yes"
-                 Text="{\WixUI_Font_Title}Remove Fauna" />
+                 Text="{\WixUI_Font_Title}Remove [ProductName]" />
         <Control Id="Description" Type="Text" X="25" Y="45" Width="320" Height="40" Transparent="yes" NoPrefix="yes"
-                 Text="Fauna will be uninstalled. By default your data in %ProgramData%\Fauna (the nest database, identity, and stored content) is kept, so reinstalling keeps working." />
+                 Text="[ProductName] will be uninstalled. By default your data in %ProgramData%\Fauna (the nest database, identity, and stored content) is kept, so reinstalling keeps working." />
         <Control Id="RemoveDataCheckBox" Type="CheckBox" X="25" Y="105" Width="320" Height="18"
                  Property="REMOVE_USER_DATA" CheckBoxValue="1"
-                 Text="Also permanently delete all Fauna data (this cannot be undone)" />
+                 Text="Also permanently delete this data (this cannot be undone)" />
+        <!-- public-text-end: windows-installer-descriptions -->
         <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
         <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="Back">
           <Publish Event="NewDialog" Value="MaintenanceTypeDlg" />
@@ -96,9 +100,15 @@
 
       <!-- Route the Remove path through RemoveDataDlg before the final confirm.
            A higher Order than the WixUI library default makes this NewDialog win
-           for Remove; Change / Repair / Install paths are unaffected. -->
-      <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="RemoveDataDlg" Order="10" Condition="WixUI_InstallMode = &quot;Remove&quot;" />
-      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="RemoveDataDlg" Order="10" Condition="WixUI_InstallMode = &quot;Remove&quot;" />
+           for Remove; Change / Repair / Install paths are unaffected.
+           Only when the install recorded a data folder (FAUNA_PROGRAMDATA_DIR set):
+           DataCleanup rides only the features that make machine data, so a box
+           without one (the nest MSI's Terminal App alone) has nothing for the
+           checkbox to delete, and its Remove path keeps the library's own route
+           straight to VerifyReadyDlg. -->
+      <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="RemoveDataDlg" Order="10" Condition="WixUI_InstallMode = &quot;Remove&quot; AND FAUNA_PROGRAMDATA_DIR" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="RemoveDataDlg" Order="10" Condition="WixUI_InstallMode = &quot;Remove&quot; AND FAUNA_PROGRAMDATA_DIR" />
+
     </UI>
 
   </Fragment>

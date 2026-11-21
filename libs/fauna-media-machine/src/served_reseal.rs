@@ -772,6 +772,7 @@ mod tests {
                     "fauna.sync.changes.record",
                     &SyncChangeRecordReply {
                         seq: 9,
+                        prev_set_seq: None,
                         extra: Default::default(),
                     },
                 )

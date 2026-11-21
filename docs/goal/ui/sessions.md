@@ -89,6 +89,7 @@ None. Own token ids are in-memory only ([`../behavior/devices.md`](../behavior/d
 - A `minted_by_device` with no roster match is expected (a custodian's key is one), and renders the neutral third `kind`, never an error.
 - `ip_address` is `None` for every session today — the WS mint path does not yet record the peer address ([`../behavior/login.md`](../behavior/login.md) § Implementation status today, the dormant new-IP event). The detail line says so plainly rather than hiding the field, so the page gains the address with no app change when the nest starts recording it.
 - Driving `sessions-lockout-button` with the wrong word refuses loudly in the action arm.
+- *Sign out everywhere else* (`sessions-revoke-others-button`) is offered only when it can end something ([`README.md`](README.md) § Offer only what is possible, rules 2 and 5): disabled with *still loading* before the first read folds, with the read's failure while no rows are held, with *No other sign-ins to end* when this app's own row is the only one (the nest would revoke nothing), and in flight while an act is on its way. The answer is `sessions_view::revoke_others_possibility` (`libs/fauna-client-account`); the arm and the confirm ask it again and refuse on `error-message`. Built on tui 2026-11-17, on macOS and iOS 2026-11-18 and on linux, android and web 2026-11-18; windows follows, through `fauna-ffi`'s `sessions_revoke_others_possibility`.
 
 ## Architectural rules
 

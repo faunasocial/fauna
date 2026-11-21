@@ -43,6 +43,11 @@ pub const KIND_RECEIPT: &str = "fauna.bridges.conversation.receipt";
 pub const KIND_ROOMS_LIST: &str = "fauna.bridges.conversation.rooms.list";
 /// The user's find-or-mint of a room for a far address.
 pub const KIND_ROOMS_OPEN: &str = "fauna.bridges.conversation.rooms.open";
+/// The user's effect-free question: which one bridge serving the account
+/// admits this spelling? What the recipient picker asks on each keystroke
+/// (`docs/goal/ui/conversations.md` § Errors & edge cases → *The picker tells
+/// the truth*, rule 4).
+pub const KIND_ADDRESS_ADMIT: &str = "fauna.bridges.conversation.address.admit";
 /// The user's read of bridged rows.
 pub const KIND_INBOX_FETCH: &str = "fauna.bridges.conversation.inbox.fetch";
 /// The user's send.
@@ -316,6 +321,29 @@ pub struct RoomsOpenRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct RoomsOpenReply {
     pub room: BridgedRoomInfo,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// `conversation.address.admit` — which one bridge serving the caller admits
+/// `address`. A read with no effect: the declared grammars are matched and
+/// nothing else happens — no call leaves the nest, no row is written, no push
+/// is sent.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AddressAdmitRequest {
+    /// The text typed so far, in the far network's own spelling.
+    pub address: String,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// The admitting bridge — absent when none, or more than one, admits the
+/// spelling (an ordinary reply, never a refusal: unfinished text is not an
+/// error).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AddressAdmitReply {
+    #[serde(default)]
+    pub bridge_id: Option<String>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }

@@ -146,7 +146,7 @@ def test_a_recovery_phrase_is_not_a_secret_key_and_nothing_is_locked(
     app.onboarding.lock_from_the_door(kit, account=account)
 
     wait_until(
-        lambda: app.has_error(),
+        lambda: app.has_error() or not app.is_enabled("sessions-lockout-button"),
         DOOR_OUTCOME_S,
         diagnose=lambda: "a recovery phrase must refuse on error-message, not sit silent",
     )
@@ -156,7 +156,11 @@ def test_a_recovery_phrase_is_not_a_secret_key_and_nothing_is_locked(
     assert app.driver.is_visible_scrolled("sessions-lockout-button"), (
         "the user stays on the door to paste the right thing"
     )
-    assert S.onboarding.emergency_lockout.invalid_secret in (app.error_text() or "")
+    # An app painting the lock from the shared draft answer offers it
+    # disabled for this paste (the refusal within eyeshot, never driven); one
+    # that lets the press through refuses on `error-message` by name.
+    if app.is_enabled("sessions-lockout-button") or app.has_error():
+        assert S.onboarding.emergency_lockout.invalid_secret in (app.error_text() or "")
     assert _verify_refusal(nest_url, user) is None, (
         "a refused paste must lock nothing"
     )

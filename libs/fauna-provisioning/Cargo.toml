@@ -44,6 +44,11 @@ semver = { workspace = true }
 rand = { workspace = true }
 getrandom = { version = "0.2", optional = true }
 tokio = { workspace = true, optional = true }
+# The cross-target sleep (tokio natively, the browser timer on wasm32) for the
+# Spaceship registrar's async-operation wait. A workspace path crate that
+# `fauna-onboarding-machine` (this crate's consumer on every app, web included)
+# already links, so the lock gains an edge and no package.
+fauna-sleep = { workspace = true }
 uniffi = { workspace = true, optional = true }
 # Direct path dep (not the workspace dep) so we can disable defaults.
 # fauna-core's `network` default pulls in tokio + redb + hickory-resolver,

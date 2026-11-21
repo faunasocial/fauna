@@ -38,8 +38,6 @@ def test_unclaimed_nest_routes_to_claim_code(app):
             "args": {"domain": "example.com"},
         },
         "continue_enabled": True,
-        "control_checkbox_visible": False,
-        "control_checkbox_checked": False,
     })
     assert app.is_enabled("handle-entry-continue-button"), (
         "UnregisteredUnclaimedNest should enable Continue: "

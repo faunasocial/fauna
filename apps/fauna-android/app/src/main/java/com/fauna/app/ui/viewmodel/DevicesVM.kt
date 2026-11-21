@@ -7,7 +7,10 @@ import com.fauna.app.R
 import com.fauna.app.core.ApiClient
 import com.fauna.app.core.HexUtil
 import com.fauna.app.core.ResolveService
+import com.fauna.app.ui.util.askForm
 import com.fauna.app.ui.util.firstListingRefusal
+import com.fauna.app.ui.util.answerRefusal
+import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.util.getStringFmt
 import com.fauna.app.ui.util.loadFailureText
 import com.fauna.app.core.SecureStorage
@@ -21,6 +24,15 @@ import com.fauna.ffi.FfiFolderDevice
 import com.fauna.ffi.FfiPendingShare
 import com.fauna.ffi.FfiRowReadErrors
 import com.fauna.ffi.actorIdFromSecret
+import com.fauna.ffi.folderFollowPossibility
+import com.fauna.ffi.folderPaywallPossibility
+import com.fauna.ffi.folderWebdavServePossibility
+import com.fauna.ffi.folderWizardCreatePossibility
+import com.fauna.ffi.folderWizardNextPossibility
+import com.fauna.ffi.folderSharePossibility
+import com.fauna.ffi.custodyMintPossibility
+import uniffi.fauna_core.Possibility
+import uniffi.fauna_core.ReadState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -225,18 +237,43 @@ class DevicesVM @Inject constructor(
     // Gates each owner row's folder-webdav-toggle — disabled + hinted rather than
     // clicking into a NoMsek that has already committed the nest flag
     // (webdav-server.md § Independent enablement point 2). Starts false: a control
-    // that cannot succeed is not offered.
+    // that cannot succeed is not offered. Never read alone: the toggle is painted
+    // from [webdavAnswer], which keeps an unanswered read ([webdavRead]) apart
+    // from "no MSEK" (`ui/folders.md` § Errors & edge cases, *Own-tier and mail
+    // gates*).
     private val _canServeWebdav = MutableStateFlow(false)
     val canServeWebdav: StateFlow<Boolean> = _canServeWebdav
+
+    /** Where the custody read behind [canServeWebdav] stands: `PENDING` while a
+     *  visit's read ([refresh]) is out, `FAILED` when the latest read failed,
+     *  else `RESOLVED`. */
+    private val _webdavRead = MutableStateFlow(ReadState.PENDING)
+    val webdavRead: StateFlow<ReadState> = _webdavRead
 
     // The creator's own subscription tier names (ascending by rank) — the option set
     // `folder-paywall-tier-select` (website-enabled rows) offers. Same page-level-read shape
     // as canServeWebdav above (the keyless DevicesMachine can't own it): fetched off
     // the key-bearing ApiClient, re-read on every refresh() (folders.md § Web
-    // paywall). A failed read degrades to empty — the select renders disabled with a
-    // "create a tier first" hint, since there is nothing to paywall to.
+    // paywall). A failed read leaves no names and says so on [ownTiersRead]: the
+    // select is painted from [paywallAnswer], so a pending or failed read is never
+    // shown as "create a tier first" (`ui/folders.md` § Errors & edge cases,
+    // *Own-tier and mail gates*).
     private val _ownTiers = MutableStateFlow<List<String>>(emptyList())
     val ownTiers: StateFlow<List<String>> = _ownTiers
+
+    /** Where the own-tier read behind [ownTiers] stands (as [webdavRead]). */
+    private val _ownTiersRead = MutableStateFlow(ReadState.PENDING)
+    val ownTiersRead: StateFlow<ReadState> = _ownTiersRead
+
+    /** `folder-webdav-toggle`'s answer — the shared `webdav_serve_possibility`
+     *  over the custody read. The toggle is painted from it and its press asks it. */
+    fun webdavAnswer(): Possibility =
+        askForm { folderWebdavServePossibility(_webdavRead.value, _canServeWebdav.value) }
+
+    /** `folder-paywall-tier-select`'s answer — the shared own-tier answer (use
+     *  `Paywall`) over the own-tier read. Painted from, and asked by the press. */
+    fun paywallAnswer(): Possibility =
+        askForm { folderPaywallPossibility(_ownTiersRead.value, _ownTiers.value.size.toUInt()) }
 
     // The owner's default conflict policy for new folders
     // (`sync-default-conflict-policy-select`'s persisted value) — a page-level
@@ -293,6 +330,22 @@ class DevicesVM @Inject constructor(
     // `error-message` instead of a picker whose confirm can never succeed.
     private val _mintCandidates = MutableStateFlow<List<CustodyMintCandidateView>?>(null)
     val mintCandidates: StateFlow<List<CustodyMintCandidateView>?> = _mintCandidates
+
+    // `custody-mint-button`'s entry answer — the shared `custody_mint_possibility`
+    // over the candidates this visit read (`ui/devices.md` § Errors & edge cases):
+    // not enabled before the read, blocked with the start-a-conversation step over
+    // none. The gate is at the entry, never a refusal on click.
+    private val _mintEntry = MutableStateFlow<Possibility>(
+        Possibility.Blocked(LocalizedText(key = "common.still_loading", args = emptyMap())),
+    )
+    val mintEntry: StateFlow<Possibility> = _mintEntry
+
+    /** Read the offer's host options and repaint the entry from them; `null` when unread. */
+    private fun readMintCandidates(): List<CustodyMintCandidateView>? {
+        val read = runCatching { api.custodyMintCandidates() }.getOrNull()
+        _mintEntry.value = runCatching { custodyMintPossibility(read) }.getOrElse { _mintEntry.value }
+        return read
+    }
 
     private val observer = object : DevicesObserver {
         override fun onChanged() {
@@ -395,6 +448,12 @@ class DevicesVM @Inject constructor(
     fun refresh() {
         val m = ensureMachine() ?: return
         viewModelScope.launch { m.refresh() }
+        // A visit's custody read is out until it answers: the toggle says
+        // "still loading", never the last visit's answer (`ui/folders.md`
+        // § Errors & edge cases, *Own-tier and mail gates*; tui's hydrate
+        // does the same). A background [resync] keeps the standing answer.
+        _webdavRead.value = ReadState.PENDING
+        _canServeWebdav.value = false
         refreshWebdavCapability()
         refreshOwnTiers()
     }
@@ -422,16 +481,20 @@ class DevicesVM @Inject constructor(
     /**
      * Re-read the per-actor WebDAV serve capability. Rides [refresh] (every nav to the
      * page), so enabling mail elsewhere and returning re-enables the toggles without a
-     * restart. A failed read degrades to `false` — the toggle stays disabled + hinted,
-     * because not offering a control is the safe failure and offering one that cannot
-     * succeed is not.
+     * restart. A failed read degrades to `false` with [webdavRead] `FAILED` — the
+     * toggle stays disabled, saying the read failed rather than "set up mail first".
      */
-    private fun refreshWebdavCapability() {
+    internal fun refreshWebdavCapability() {
         viewModelScope.launch {
-            _canServeWebdav.value = try {
-                api.canServeWebdav()
+            try {
+                val holds = api.canServeWebdav()
+                _canServeWebdav.value = holds
+                _webdavRead.value = ReadState.RESOLVED
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                false
+                _canServeWebdav.value = false
+                _webdavRead.value = ReadState.FAILED
             }
         }
     }
@@ -439,15 +502,20 @@ class DevicesVM @Inject constructor(
     /**
      * Re-read the creator's own subscription tier names. Rides [refresh] (every nav
      * to the page), so a tier created elsewhere shows up in the paywall select without
-     * a restart. A failed read degrades to an empty list — same safe-failure shape as
-     * [refreshWebdavCapability].
+     * a restart. A failed read degrades to an empty list with [ownTiersRead]
+     * `FAILED` — same shape as [refreshWebdavCapability].
      */
-    private fun refreshOwnTiers() {
+    internal fun refreshOwnTiers() {
         viewModelScope.launch {
-            _ownTiers.value = try {
-                api.subscriptionTiersList().sortedBy { it.rank }.map { it.name }
+            try {
+                val names = api.subscriptionTiersList().sortedBy { it.rank }.map { it.name }
+                _ownTiers.value = names
+                _ownTiersRead.value = ReadState.RESOLVED
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                emptyList()
+                _ownTiers.value = emptyList()
+                _ownTiersRead.value = ReadState.FAILED
             }
         }
     }
@@ -463,12 +531,22 @@ class DevicesVM @Inject constructor(
     fun deviceName(deviceId: String): String? = machine?.deviceName(deviceId)
 
     /**
-     * `device-rename-confirm-button` — the machine seals and sends the name, ignores a blank or
-     * unchanged one, and paints any refusal on `error-message` (`devices.md` § Device names).
+     * `device-rename-confirm-button`'s answer over the typed draft — the shared
+     * `DevicesMachine::rename_possibility` (`ui/devices.md` § Errors & edge cases); absent with
+     * no machine.
      */
-    fun renameDevice(deviceId: String, label: String) {
-        val m = machine ?: return
-        viewModelScope.launch { m.renameDevice(deviceId, label) }
+    fun renamePossibility(deviceId: String, draft: String): Possibility =
+        machine?.renamePossibility(deviceId, draft) ?: Possibility.Absent
+
+    /**
+     * `device-rename-confirm-button` — the machine asks the same answer, seals and sends the
+     * name (an unchanged one sends nothing) and paints any refusal or failure on
+     * `error-message`. [onResult] gets whether the save went through: the editor closes only
+     * then, and stays open with the text otherwise (`ui/devices.md` § Errors & edge cases).
+     */
+    fun renameDevice(deviceId: String, label: String, onResult: (Boolean) -> Unit) {
+        val m = machine ?: return onResult(false)
+        viewModelScope.launch { onResult(m.saveDeviceName(deviceId, label)) }
     }
 
     // ── Members without a matching entry — devices.md § Members without a matching entry ──
@@ -918,6 +996,17 @@ class DevicesVM @Inject constructor(
      * `folder-share-role-select`, multi-writer Phase 1).
      */
     fun shareFolder(name: String, recipientInput: String, access: String?, onResult: (Boolean) -> Unit) {
+        // The submit asks the shared `share_possibility` its button was painted
+        // from (folders.md § Errors & edge cases; README § Offer only what is
+        // possible, rule 4): a blank recipient or an app with no machine, nest,
+        // secret or live conversations session refuses with the reason on
+        // `error-message`, and `onResult(false)` keeps the sheet open with what
+        // was typed — it closes only once the share op was issued and landed.
+        folderFormRefusal { folderSharePossibility(recipientInput, folderShareReady()) }?.let {
+            _sharingError.value = it
+            onResult(false)
+            return
+        }
         val m = machine ?: run { onResult(false); return }
         viewModelScope.launch {
             _sharingError.value = null
@@ -945,6 +1034,14 @@ class DevicesVM @Inject constructor(
      * the form; `false` keeps what the user typed beside the error.
      */
     fun followFolder(owner: String, folderName: String, onResult: (Boolean) -> Unit) {
+        // The shared `follow_possibility` the button was painted from, asked
+        // again: a blank box or a not-ready app refuses with its reason on
+        // `error-message` and keeps the form open, never a silent return.
+        folderFormRefusal { folderFollowPossibility(owner, folderName, folderFollowReady()) }?.let {
+            _sharingError.value = it
+            onResult(false)
+            return
+        }
         val m = machine ?: run { onResult(false); return }
         viewModelScope.launch {
             _sharingError.value = null
@@ -959,6 +1056,21 @@ class DevicesVM @Inject constructor(
                 onResult(false)
             }
         }
+    }
+
+    /**
+     * `folder-follow-confirm`'s `ready` (`fauna_client_folders::forms`): the
+     * devices machine, the nest channel and the identity secret are all held.
+     */
+    fun folderFollowReady(): Boolean = machine != null && api.folderOpsReady(withSession = false)
+
+    /** `folder-share-confirm`'s `ready`: [folderFollowReady]'s and the live conversations session. */
+    fun folderShareReady(): Boolean = machine != null && api.folderOpsReady(withSession = true)
+
+    /** The localized refusal of a folder form predicate, or `null` when the draft may go (fails open like the paint). */
+    private fun folderFormRefusal(predicate: () -> Possibility): String? {
+        val form = askForm(predicate)
+        return if (form is Possibility.Blocked) resolveLocalized(appContext, form.reason) else null
     }
 
     /**
@@ -1026,8 +1138,14 @@ class DevicesVM @Inject constructor(
      * reflects the persisted state (mirrors linux `FaunaClient::serve_set_folder` /
      * web `changeWebdav`). Errors (e.g. no MSEK — mail not set up yet) surface on
      * [sharingError] (the shared error-message banner; disable-with-hint is 6b-2).
+     * The press asks [webdavAnswer] first, the answer the toggle was painted from,
+     * and refuses with its reason (README § Offer only what is possible, rule 6).
      */
     fun serveSetFolder(name: String, mlsGroupIdHex: String?, enable: Boolean) {
+        folderFormRefusal { webdavAnswer() }?.let {
+            _sharingError.value = it
+            return
+        }
         val m = machine ?: return
         viewModelScope.launch {
             _sharingError.value = null
@@ -1045,9 +1163,14 @@ class DevicesVM @Inject constructor(
      * Paywall a website-enabled folder to a subscription tier — the production caller of
      * `folder-paywall-tier-select`. v1 is set-only (no clear affordance). Same
      * author-orchestration-then-refresh shape as [serveSetFolder]; errors (e.g. no
-     * enrolled web-serve holder) surface on [sharingError].
+     * enrolled web-serve holder) surface on [sharingError]. The press asks
+     * [paywallAnswer] first and refuses with its reason, as [serveSetFolder].
      */
     fun paywallSetFolder(name: String, mlsGroupIdHex: String?, tier: String) {
+        folderFormRefusal { paywallAnswer() }?.let {
+            _sharingError.value = it
+            return
+        }
         val m = machine ?: return
         viewModelScope.launch {
             _sharingError.value = null
@@ -1106,7 +1229,12 @@ class DevicesVM @Inject constructor(
             }
             val deviceId = secureStorage.resolveDeviceId()
             if (shown && folder.role != "member" && !deviceId.isNullOrEmpty()) {
-                runCatching { api.ensureFolderPlace(folder.name, deviceId) }
+                val wrote = runCatching { api.ensureFolderPlace(folder.name, deviceId) }.getOrDefault(false)
+                // The enrol is nest state the expanded row shows: re-read the
+                // roster so the new seat paints at once, as a desktop's bind
+                // does (`file-sync.md` § 4, *A local presence writes the place
+                // it needs*).
+                if (wrote) loadFolderPlaces(folder.name)
             }
             runCatching { onDemandToggle.replan() }
         }
@@ -1280,6 +1408,7 @@ class DevicesVM @Inject constructor(
         viewModelScope.launch {
             api.custodyDrive()
             runCatching { api.custodyFacetLoad() }.getOrNull()?.let { applyCustodyFacet(it) }
+            readMintCandidates()
         }
     }
 
@@ -1377,19 +1506,17 @@ class DevicesVM @Inject constructor(
     }
 
     /**
-     * `custody-mint-button`: open the flow over this account's 1:1
-     * conversations, or — with no one to ask — keep it closed and say on
-     * `error-message` to start a conversation first.
+     * `custody-mint-button`: re-read this account's 1:1 conversations and ask the
+     * same entry answer the button was painted from — open the flow over them, or
+     * refuse with its reason on `error-message` (start a conversation first).
      */
     private fun openCustodyMint() {
         _sharingError.value = null
-        val candidates = runCatching { api.custodyMintCandidates() }.getOrElse { e ->
-            _sharingError.value = e.message ?: e.toString()
-            return
-        }
-        if (candidates.isEmpty()) {
+        val candidates = readMintCandidates()
+        val refusal = answerRefusal(appContext, _mintEntry.value)
+        if (candidates == null || refusal != null) {
             _mintCandidates.value = null
-            _sharingError.value = appContext.getString(R.string.devices_custody_mint_no_contacts)
+            _sharingError.value = refusal?.reason
         } else {
             _mintCandidates.value = candidates
         }
@@ -1455,7 +1582,16 @@ class DevicesVM @Inject constructor(
     fun wizardSetFlags(index: Int, originates: Boolean, accepts: Boolean, appliesDeletes: Boolean) {
         machine?.wizard()?.setDeviceFlags(index.toUInt(), originates, accepts, appliesDeletes)
     }
-    fun wizardNext() { machine?.wizard()?.next() }
+    /** `wizard-next-button`: asks the shared `wizard_next_possibility` its button
+     *  was painted from and refuses with the reason on `error-message`. */
+    fun wizardNext() {
+        val wizard = machine?.wizard() ?: return
+        folderFormRefusal { folderWizardNextPossibility(wizard.snapshot()) }?.let {
+            _sharingError.value = it
+            return
+        }
+        wizard.next()
+    }
     fun wizardBack() { machine?.wizard()?.back() }
 
     /**
@@ -1473,6 +1609,14 @@ class DevicesVM @Inject constructor(
      */
     fun wizardSubmit() {
         val m = machine ?: return
+        // The press asks `wizard_create_possibility`, the answer Create was
+        // painted from (README § Offer only what is possible, rule 6).
+        m.wizard()?.let { wizard ->
+            folderFormRefusal { folderWizardCreatePossibility(wizard.snapshot()) }?.let {
+                _sharingError.value = it
+                return
+            }
+        }
         viewModelScope.launch {
             val wizard = m.wizard() ?: return@launch
             closeIfDone(m, wizard.submit())

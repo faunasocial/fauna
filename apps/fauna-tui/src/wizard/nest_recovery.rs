@@ -69,22 +69,28 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
         }
     }
 
-    // Both methods are gated on a selection — the client mirrors the machine's
-    // `require_selected_recovery_box` guard rather than letting the user click
-    // into an error.
-    let has_selection = selected.is_some();
-    out.push(Element::button(
-        ids::RECOVER_METHOD_CLOUD_BUTTON,
-        t::METHOD_CLOUD,
-        has_selection,
-        Action::RecoverViaCloud,
-    ));
-    out.push(Element::button(
-        ids::RECOVER_METHOD_SELFHOSTED_BUTTON,
-        t::METHOD_SELFHOSTED,
-        has_selection,
-        Action::RecoverViaSelfhosted,
-    ));
+    // Both methods wait on a chosen box: the machine's one answer, which its
+    // own guard asks too, painted by the seam with its reason (`ui/README.md`
+    // § Offer only what is possible, rule 6) — never re-derived here.
+    let methods = w.machine.recovery_method_possibility();
+    out.push(
+        Element::button(
+            ids::RECOVER_METHOD_CLOUD_BUTTON,
+            t::METHOD_CLOUD,
+            true,
+            Action::RecoverViaCloud,
+        )
+        .possible(methods.clone()),
+    );
+    out.push(
+        Element::button(
+            ids::RECOVER_METHOD_SELFHOSTED_BUTTON,
+            t::METHOD_SELFHOSTED,
+            true,
+            Action::RecoverViaSelfhosted,
+        )
+        .possible(methods),
+    );
     // `back()` returns to handle_entry on the came-from-identity entry (Q2-A);
     // the came-from-launch entry stays put by design — the launch glue owns that
     // exit.

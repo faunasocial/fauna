@@ -617,7 +617,9 @@ pub struct SnapshotStampLabelsReply {
 /// a 48 h pending action (the soft-delete path; folder or message-kind
 /// row both supported). Distinct from the owner-only
 /// `delete_immediate` override. Refused with `hard_floor_breach` if it
-/// would breach the floor of 3 active snapshots.
+/// would breach the floor of 3 active snapshots. A row already pending
+/// deletion answers its existing pending action; a soft-deleted row is
+/// refused with `already_deleted` (`backup-restore.md` § 7).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SnapshotDeleteRequest {
     pub snapshot_id: i64,

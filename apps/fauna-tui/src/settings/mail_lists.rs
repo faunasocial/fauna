@@ -45,6 +45,7 @@ use fauna_client_mail_settings::{
     ListDraft, ListView, MailListsAction, MailListsMachine, MailListsSnapshot,
     archive_url_needs_confirm,
 };
+use fauna_core::possibility::Possibility;
 use fauna_i18n::strings::mail_lists as t;
 
 use super::{Action, SettingsField, SettingsState};
@@ -221,6 +222,17 @@ impl MailListsState {
     /// The action a submit dispatches, or `None` when the sheet cannot yet make
     /// a legal request. Create needs both halves of the posting address; edit
     /// keeps the address it already has, so it needs neither.
+    /// `mail-lists-add-sheet-submit-button`'s answer, the shared
+    /// `list_submit_possibility` over what is typed.
+    pub(super) fn submit_answer(&self) -> Possibility {
+        fauna_client_mail_settings::list_submit_possibility(
+            self.editing.is_some(),
+            self.local_part_input.clone(),
+            self.domain_input.clone(),
+            self.per_send_cap_input.clone(),
+        )
+    }
+
     pub(super) fn submit_action(&self) -> Option<MailListsAction> {
         let draft = self.draft();
         match &self.editing {
@@ -242,12 +254,12 @@ impl MailListsState {
 pub(super) fn mail_lists_elements(state: &SettingsState) -> Vec<Element> {
     let l = &state.mail_lists;
     let snapshot = l.snapshot.as_ref();
-    // Creating a list needs a domain to create it on. The machine derives the
-    // options from rows the user already owns; with mail not enabled there are
-    // none and the nest would reject, so the affordance is disabled and the page
-    // says why (linux's `has_domain`).
+    // Creating a list needs a domain to create it on: the add affordance paints
+    // from the shared `MailListsSnapshot::create_possibility` (`ui/README.md`
+    // § Offer only what is possible, rule 6) — blocked with the reason while
+    // the user owns no domain; not known before the first snapshot (rule 5).
     let domains = l.domains();
-    let has_domain = !domains.is_empty();
+    let create = snapshot.map_or(Possibility::once_read(false), |s| s.create_possibility());
 
     let mut els = vec![
         Element::label(ids::PAGE_HEADING, t::TITLE),
@@ -255,13 +267,14 @@ pub(super) fn mail_lists_elements(state: &SettingsState) -> Vec<Element> {
         Element::gesture_button(
             ids::MAIL_LISTS_ADD_BUTTON,
             t::ADD_BUTTON,
-            has_domain,
+            create.is_possible(),
             Gesture::Settings(Action::MailListsOpenAdd),
-        ),
+        )
+        .possible(create.clone()),
     ];
     // The honest reason the add affordance is dead, once the snapshot has
     // resolved and carries no error of its own to show instead.
-    if snapshot.is_some() && !has_domain {
+    if snapshot.is_some() && !create.is_possible() {
         els.push(Element::chrome(t::NO_DOMAIN));
     }
 
@@ -333,15 +346,18 @@ pub(super) fn mail_lists_elements(state: &SettingsState) -> Vec<Element> {
         );
         // The off-server archive confirm relabels Submit in place — the two-click
         // confirm's only visible affordance (`common.md` § Two-click confirm).
-        els.push(Element::gesture_button(
-            ids::MAIL_LISTS_ADD_SHEET_SUBMIT_BUTTON,
-            if l.archive_confirm_is_armed() {
-                t::ARCHIVE_OFF_SERVER_CONFIRM
-            } else {
-                t::SUBMIT
-            },
-            true,
-            Gesture::Settings(Action::MailListsSubmit { editing }),
+        els.push(super::mail::gated_button(
+            Element::gesture_button(
+                ids::MAIL_LISTS_ADD_SHEET_SUBMIT_BUTTON,
+                if l.archive_confirm_is_armed() {
+                    t::ARCHIVE_OFF_SERVER_CONFIRM
+                } else {
+                    t::SUBMIT
+                },
+                true,
+                Gesture::Settings(Action::MailListsSubmit { editing }),
+            ),
+            l.submit_answer(),
         ));
         els.push(Element::gesture_button(
             ids::MAIL_LISTS_ADD_SHEET_CANCEL_BUTTON,

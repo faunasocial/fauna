@@ -54,6 +54,7 @@ import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from helpers.mail_aliases import default_alias_domain
+from helpers.mail_client_ui import turn_mail_on
 
 pytestmark = [
     pytest.mark.tier_3,
@@ -67,6 +68,13 @@ pytestmark = [
 ]
 
 DOMAIN = "aliases-import-ux-e2e.test"
+
+
+@pytest.fixture(autouse=True)
+def _mail_on(logged_in_app):
+    """Every test here opens a mail sub-page on the session-shared account, and
+    each opens behind the mail-usable gate — see `helpers.mail_client_ui.turn_mail_on`."""
+    turn_mail_on(logged_in_app)
 
 
 def _admin_client(nest_instance):

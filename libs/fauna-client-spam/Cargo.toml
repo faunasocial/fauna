@@ -11,6 +11,10 @@ license.workspace = true
 # workspace builds re-enable `p2p` via Cargo feature unification. The path form
 # is required to override `default-features` (mirrors fauna-client-search).
 fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# `Possibility` / `ReadState` — the answer `save-spam-prefs`'s shared predicate
+# gives (`possibility.rs`). Already in this crate's tree through fauna-protocol;
+# defaults off for the same wasm reason.
+fauna-core = { path = "../fauna-core", default-features = false }
 
 # wasm: forward fauna-protocol's `js` feature (fauna-core's js-sys time
 # backend) so the transitive wasm build resolves. Off on native. Cargo merges

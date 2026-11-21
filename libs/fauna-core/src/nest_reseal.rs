@@ -30,6 +30,7 @@ use anyhow::{Context, Result};
 use crate::chunk::ChunkManifest;
 use crate::data::ContentHash;
 use crate::file_download::{BlobFetcher, FileDownloadKeys, ManifestWalk, verify_file_by_manifest};
+use crate::manifest_paging::PagingRule;
 
 /// Where a re-seal's sealed artifacts go — the chunk-store write legs, as one
 /// seam. The sync engine binds it to its pooled transfer path, the Media page's
@@ -51,10 +52,75 @@ pub trait ChunkStoreSink: crate::MaybeSendSync {
         relative_path: &str,
     ) -> Result<usize>;
 
-    /// Store the canonical manifest under `manifest_hash` — called only after
-    /// every chunk it names was stored.
-    async fn put_manifest(&self, manifest_hash: ContentHash, manifest_bytes: Vec<u8>)
-    -> Result<()>;
+    /// The paging rule this sink's destination is written under
+    /// (`file-sync.md` § Paged manifests): [`PagingRule::STANDARD`] in
+    /// production; a test sink may answer the small rule so the paged path is
+    /// reached without a 64 GB file.
+    fn paging_rule(&self) -> PagingRule {
+        PagingRule::STANDARD
+    }
+
+    /// The gate a paged result passes **before any chunk is stored**
+    /// (`file-sync.md` § Paged manifests → *Compatibility*): a destination
+    /// that does not advertise `paged-manifests` would garbage-collect the
+    /// chunks a root's pages name, so the sink refuses with the typed
+    /// [`FileTooLargeForNest`] — never posting a root it cannot carry. Called
+    /// only when the re-sealed manifest of `chunks` entries pages under
+    /// [`Self::paging_rule`].
+    async fn admit_paged_manifest(&self, chunks: usize) -> Result<()>;
+
+    /// Store the manifest under `manifest_hash` — called only after every
+    /// chunk it names was stored. `pages` is empty for a single manifest;
+    /// for a paged root it holds the encoded pages in file order, which the
+    /// sink stores (skipping any the destination already holds) **before**
+    /// the root, so a root never rests naming a page that is not at rest.
+    async fn put_manifest(
+        &self,
+        manifest_hash: ContentHash,
+        manifest_bytes: Vec<u8>,
+        pages: Vec<Vec<u8>>,
+    ) -> Result<()>;
+}
+
+/// A file refused because its manifest must be paged and the destination
+/// does not advertise `paged-manifests` (`file-sync.md` § Paged manifests →
+/// *Compatibility*): an older nest would reclaim the chunks a root's pages
+/// name, so nothing of the file is sent. Permanent while the nest stays as it
+/// is — a retry meets the same nest. Every writer of a paged manifest — the
+/// sync engine's upload and every [`ChunkStoreSink`] — refuses with this one
+/// type; find it in an error chain with [`is_file_too_large_for_nest`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileTooLargeForNest {
+    /// The file's chunk count — over the inline bound. `None` when the sync
+    /// engine repeated the refusal from the file's recorded refusal (its size
+    /// and mtime unchanged) without cutting the file again (`conflicts.md`
+    /// § Refused uploads reach the review list).
+    pub chunks: Option<usize>,
+}
+
+impl std::fmt::Display for FileTooLargeForNest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.chunks {
+            Some(chunks) => write!(f, "file too large for this nest: its {chunks} chunks")?,
+            None => write!(
+                f,
+                "file too large for this nest (unchanged since it was refused)"
+            )?,
+        }
+        write!(
+            f,
+            " need a nest that stores a large file's list of parts in pages, and this nest \
+             does not offer it"
+        )
+    }
+}
+
+impl std::error::Error for FileTooLargeForNest {}
+
+/// Whether `err` is (or wraps) a [`FileTooLargeForNest`] refusal.
+pub fn is_file_too_large_for_nest(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.downcast_ref::<FileTooLargeForNest>().is_some())
 }
 
 /// What one served-set walk did — "counted", in the verified-row ruling's
@@ -195,6 +261,16 @@ pub async fn reseal_nest_copy_windowed(
         .context("re-seal: the nest copy does not verify against its recorded head")?;
     let walk =
         ManifestWalk::open(fetcher, keys, manifest_hash, content_stamp, relative_path).await?;
+    // The chunk count is the source's, so whether the result pages is known
+    // before one chunk is sealed: a destination that cannot carry a paged
+    // root refuses here, before anything is sent.
+    let rule = sink.paging_rule();
+    let chunks = walk.manifest().chunk_hashes.len();
+    if rule.is_paged(chunks) {
+        sink.admit_paged_manifest(chunks)
+            .await
+            .with_context(|| format!("re-seal: {path_r} cannot be stored paged here"))?;
+    }
     let mut hasher = blake3::Hasher::new();
     let mut total = 0u64;
     let mut stored = Vec::with_capacity(walk.manifest().chunk_hashes.len());
@@ -239,13 +315,17 @@ pub async fn reseal_nest_copy_windowed(
         stored_hashes: seal_root.map(|_| stored),
         sealed_hashes: None,
         min_reader: None,
+        pages: None,
     };
-    let manifest_bytes = crate::encoding::canonical_encode(
-        &manifest.wire_form(seal_root.map(|(secret, _)| secret).as_ref())?,
-    )
-    .context("re-seal: serializing manifest")?;
+    // Cut under the sink's paging rule (the writer every upload uses): the
+    // single manifest's wire form at or under the inline bound, else the root
+    // and its pages — the pages posted before the root.
+    let (manifest_bytes, pages) = manifest
+        .clone()
+        .into_wire_parts_with(&rule, seal_root.map(|(secret, _)| secret).as_ref())
+        .context("re-seal: serializing manifest")?;
     let new_hash = ContentHash::of_raw(&manifest_bytes);
-    sink.put_manifest(new_hash, manifest_bytes)
+    sink.put_manifest(new_hash, manifest_bytes, pages)
         .await
         .context("re-seal: uploading manifest")?;
     Ok(ResealedManifest {
@@ -255,3 +335,7 @@ pub async fn reseal_nest_copy_windowed(
         content_stamp: seal_root.and_then(|(_, stamp)| stamp),
     })
 }
+
+#[cfg(test)]
+#[path = "nest_reseal_tests.rs"]
+mod tests;

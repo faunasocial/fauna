@@ -147,12 +147,20 @@ private struct ThreadDetailContent: View {
     /// dispatches straight to `client.api`, the same shape `onMarkAsSpam`
     /// above uses for its own orthogonal write. Re-reads the shared roster
     /// after, so every other painted mark (this thread's other chips, the
-    /// contacts badge) clears in step.
+    /// contacts badge) clears in step. A failed write or re-read says so on
+    /// `error-message` (`settings.recovery_kit.review_keep_failed`), the mark
+    /// staying — never log-only (`conversations.md` § Errors & edge cases →
+    /// *The new-thread composer offers only what it can send*; tui's
+    /// `Outcome::MemberReviews`).
     private func keepMemberReview(person: Data) {
         guard let client else { return }
         Task {
-            _ = try? await client.api.memberReviewKeep(person: person)
-            await client.reloadMemberReviewRoster()
+            do {
+                _ = try await client.api.memberReviewKeep(person: person)
+                try await client.refreshMemberReviewRoster()
+            } catch {
+                vm.clientErrorMessage = memberKeepFailureText(detail: error.localizedDescription)
+            }
         }
     }
 

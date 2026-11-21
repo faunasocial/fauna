@@ -57,6 +57,7 @@ struct QuickSwitcherView: View {
                             ForEach(Array(results.enumerated()), id: \.offset) { index, result in
                                 QuickSwitcherRow(result: result, isSelected: index == selectedIndex)
                                     .id(index)
+                                    .faunaActsOnClick()
                                     .onTapGesture {
                                         selectedIndex = index
                                         openSelected()
@@ -85,6 +86,7 @@ struct QuickSwitcherView: View {
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
+                        .faunaActsOnClick()
                         .onTapGesture {
                             appState.selectedSidebar = item
                             dismiss()
@@ -143,7 +145,7 @@ struct QuickSwitcherView: View {
         // Gate the Admin shortcut on `am-i-admin` — non-admins must not reach the
         // admin shell via the command palette either (admin.md § Navigation model:
         // "non-admins do not see admin entries"), matching the gated sidebar row.
-        appState.isAdmin ? SidebarItem.allCases : SidebarItem.standardCases
+        appState.adminEntry.isShown ? SidebarItem.allCases : SidebarItem.standardCases
     }
 
     // MARK: - Search

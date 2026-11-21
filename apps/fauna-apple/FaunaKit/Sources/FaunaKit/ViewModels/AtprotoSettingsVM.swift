@@ -26,6 +26,12 @@ public final class AtprotoSettingsVM {
     /// both are surfaced through `errorMessage`.
     public private(set) var connectError: String?
 
+    /// The machine could not be built for this session (`atproto.md` § Errors
+    /// & edge cases): the page then paints one `page_unavailable` line in
+    /// place of every control — each would act on a machine that does not
+    /// exist. Set only while no machine was ever built.
+    public private(set) var buildFailed = false
+
     /// Secrets revealed (by mint or explicit reveal) this session, keyed by
     /// `credentialId`. Never persisted, never part of the snapshot.
     public private(set) var revealedSecrets: [String: String] = [:]
@@ -75,7 +81,10 @@ public final class AtprotoSettingsVM {
         } catch {
             // A concurrent build that succeeded owns the page; this one's
             // failure is not the page's.
-            if machine == nil { connectError = DisplayError.message(error) }
+            if machine == nil {
+                connectError = DisplayError.message(error)
+                buildFailed = true
+            }
             return
         }
         // Re-entrant `configure` (a `.task` firing again mid-build): the build
@@ -105,6 +114,27 @@ public final class AtprotoSettingsVM {
     public var snapshot: AtprotoSettingsSnapshot? {
         _ = _observerTick
         return machine?.snapshot() ?? Self.prefetchSnapshot
+    }
+
+    /// Whether selecting the depth rung `level` can succeed now — the machine's
+    /// own `rung_possibility`, the predicate `select_level` asks too
+    /// (`ui/README.md` § Offer only what is possible, rule 6): blocked
+    /// *still loading* until the status read resolves (and while the machine
+    /// is still being built), the hosted gate's reason on entering a gated
+    /// rung, *failed to load* when the machine could not be built.
+    public func rungAnswer(_ level: String) -> Possibility {
+        _ = _observerTick
+        return machinePossibility(machine, buildFailed: buildFailed) {
+            $0.rungPossibility(targetLevel: level)
+        }
+    }
+
+    /// Whether `atproto-delegation-authorize` can succeed now — the machine's
+    /// `authorize_possibility`: blocked with the no-identity reason at the
+    /// entry while no signing identity is held (rule 4).
+    public var authorizeAnswer: Possibility {
+        _ = _observerTick
+        return machinePossibility(machine, buildFailed: buildFailed) { $0.authorizePossibility() }
     }
 
     /// The page-level `error-message`: the connect failure first, else the

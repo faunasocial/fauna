@@ -290,11 +290,6 @@ const ERROR_STRING_ALLOWLIST: &[(&str, &str, &str)] = &[
         "fetching {path}'s manifest",
         "held address, reserved name plus hashes",
     ),
-    (
-        "fauna-client-sync/reseed_pull.rs",
-        "for {path} failed hash",
-        "held address, reserved name plus hashes",
-    ),
     // The chunk-by-chunk pull (`pull_as_is`) names the same held address per chunk.
     (
         "fauna-client-sync/reseed_pull.rs",

@@ -37,7 +37,11 @@ import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.AutomationAttributePack
 import com.fauna.app.ui.util.SuppressScreenCapture
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.faunaFormGate
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.isPossible
+import uniffi.fauna_core.Possibility
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.resolveComposed
 import com.fauna.app.ui.util.stringResourceFmt
@@ -64,6 +68,10 @@ import uniffi.fauna_client_pair.historyLineText
 import uniffi.fauna_client_pair.principalScopeLabels
 import uniffi.fauna_client_pair.trustStatusLabel
 import com.fauna.app.ui.util.resolveLocalized
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.TextButton
 
 /**
  * The "Connected apps" Settings sub-page (`ui.yaml` page `connected-apps`;
@@ -118,6 +126,15 @@ fun ConnectedAppsScreen(
     LaunchedEffect(Unit) { vm.visit() }
     val error = localized(snapshot?.error)
     LaunchedEffect(error) { error?.let { appMessages.showError(it) } }
+    // A press the page refused (the switch asked before the read) says why
+    // on the same `error-message`.
+    val refusal by vm.refusalMessage.collectAsState()
+    LaunchedEffect(refusal) { refusal?.let { appMessages.showError(it) } }
+    // The switch's answer over this snapshot — painted from, and asked again
+    // by [ConnectedAppsVM.toggleExternalApps].
+    val externalAppsAnswer = remember(snapshot) {
+        askForm { ConnectedAppsVM.externalAppsAnswer(snapshot) }
+    }
 
     ConnectedAppsContent(
         snapshot = snapshot,
@@ -132,7 +149,9 @@ fun ConnectedAppsScreen(
         onBlockRequest = vm::blockRequest,
         onSetFolder = vm::setFolder,
         onUnblock = vm::unblock,
-        onSetExternalAppsEnabled = vm::setExternalAppsEnabled,
+        // The VM writes the flip of the snapshot's confirmed value.
+        onSetExternalAppsEnabled = { vm.toggleExternalApps() },
+        externalAppsAnswer = externalAppsAnswer,
         onSetLens = vm::setLens,
         onToggleRecord = vm::toggleRecord,
         onArmRevoke = vm::armRevoke,
@@ -182,6 +201,10 @@ fun ConnectedAppsContent(
     onOpenSettingsCard: () -> Unit = {},
     // A pick on a bare folder card's picker (page-local, no nest call).
     onSetFolder: (consentIdHex: String, id: Long) -> Unit = { _, _ -> },
+    // `atproto-external-apps-enable`'s answer (`ConnectedAppsVM.externalAppsAnswer`,
+    // the shared `external_apps_possibility`); the default is for the
+    // stateless harness only.
+    externalAppsAnswer: Possibility = Possibility.Possible,
 ) {
     // security.md § On-screen secret exposure, rule 2: a minted, revocable
     // secret suppresses capture for exactly the reveal window. The guard
@@ -263,11 +286,19 @@ fun ConnectedAppsContent(
 
             // ── 3. The external-apps switch, then the roster it pauses ──
             // At every integration level (`connected-apps.md` § Layout & flow).
-            // Rendered unconditionally and bound to the snapshot's own answer —
-            // an absent snapshot paints the flag's default, ON — never a local
-            // guess. A dispatch-on-change toggle IS the commit, so the switch
-            // itself declares its gate.
-            val externalAppsGate = faunaGate("fauna.bridges.atproto.set_external_apps_enabled")
+            // Rendered and bound to the snapshot's own answer — an absent
+            // snapshot paints the flag's default, ON — never a local guess, but
+            // not live before the read returns (`externalAppsAnswer`: still
+            // loading), so that default is never written back as a choice. A
+            // dispatch-on-change toggle IS the commit, so the switch itself
+            // declares its offline gate too; the answer's reason wins.
+            val externalAppsGate = faunaFormGate(
+                externalAppsAnswer,
+                faunaGate(
+                    "fauna.bridges.atproto.set_external_apps_enabled",
+                    enabled = externalAppsAnswer.isPossible,
+                ),
+            )
             val externalAppsOn = snapshot?.externalAppsOff != true
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -277,12 +308,14 @@ fun ConnectedAppsContent(
                     stringResource(R.string.atproto_settings_external_apps_toggle),
                     modifier = Modifier.weight(1f),
                 )
-                Switch(
-                    checked = externalAppsOn,
-                    onCheckedChange = onSetExternalAppsEnabled,
-                    enabled = externalAppsGate.enabled,
-                    modifier = Modifier.testTag(Ids.ATPROTO_EXTERNAL_APPS_ENABLE),
-                )
+                if (externalAppsGate.shown) {
+                    Switch(
+                        checked = externalAppsOn,
+                        onCheckedChange = onSetExternalAppsEnabled,
+                        enabled = externalAppsGate.enabled,
+                        modifier = Modifier.testTag(Ids.ATPROTO_EXTERNAL_APPS_ENABLE),
+                    )
+                }
             }
             DisabledControlReasonText(externalAppsGate.reason)
             Text(

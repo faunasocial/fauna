@@ -27,7 +27,11 @@
     aliasIsExtendable,
     parseCount,
     parseCountI64,
+    readPossibility,
+    mailUsableUnbuilt,
   } from '#lib/wasm';
+  import { blockedReason, paintAnswer, refusal } from '#lib/mail-affordances';
+  import type { Possibility } from '#lib/possibility';
   import { resolveLocalized } from '#lib/i18n/localized';
   import { localTimestamp } from '#lib/value-format';
   import { onMount } from 'svelte';
@@ -137,7 +141,35 @@
   let armedRevoke = $state<string | null>(null);
   let armedDelete = $state<string | null>(null);
 
-  const hasDomain = $derived(snap?.default_domain != null);
+  // Add, import and the disposable mint all create on the default domain, so
+  // they paint from ONE shared answer — `MailAliasesSnapshot::create_possibility`
+  // over the machine's LIVE snapshot (`mail-settings.md` § Errors & edge cases,
+  // *The in-page predicates*; `ui/README.md` § Offer only what is possible,
+  // rules 2 and 6), never an app-side domain test. Before the first snapshot
+  // the answer is blocked, waiting (`Possibility::once_read(false)`, rule 5) —
+  // `null` only while the wasm core itself is still loading.
+  let unread = $state<Possibility | null>(null);
+  const createAnswer = $derived.by(() =>
+    snap && machine ? (machine.createPossibility() as Possibility) : unread,
+  );
+  const create = $derived(paintAnswer(createAnswer));
+
+  // A gesture whose machine is missing refuses with the shared unbuilt reason
+  // on the page's `error-message`, never silently (rule 7).
+  function refuseUnbuilt(): void {
+    error = resolveLocalized(blockedReason(mailUsableUnbuilt()));
+  }
+
+  // The create gestures ask the same answer again at the press (rule 6).
+  function createRefused(): boolean {
+    if (!machine) {
+      refuseUnbuilt();
+      return true;
+    }
+    const verdict = refusal(machine.createPossibility() as Possibility);
+    if (verdict.refused && verdict.reason) error = resolveLocalized(verdict.reason);
+    return verdict.refused;
+  }
 
   // The open history when it is row `v`'s own, else null.
   function auditFor(v: AliasView): AliasAuditView | null {
@@ -167,6 +199,7 @@
     if (!id?.secretHex) return;
     try {
       await ensureWasm();
+      unread = readPossibility('pending');
       machine = await mailAliasesMachine(id.secretHex);
       await machine.hydrate();
       applySnapshot();
@@ -215,6 +248,7 @@
   }
 
   function openAdd(): void {
+    if (createRefused()) return;
     editingId = null;
     pickedKind = 'exact';
     patternInput = '';
@@ -255,7 +289,10 @@
   );
 
   async function submitSheet(): Promise<void> {
-    if (!machine) return;
+    if (!machine) {
+      refuseUnbuilt();
+      return;
+    }
     const pattern = patternInput.trim();
     const label = labelInput.trim();
     // Shared validators (value-formatting.md § Mail-knob validation): spam
@@ -289,6 +326,7 @@
   }
 
   function openImport(): void {
+    if (createRefused()) return;
     importText = '';
     error = '';
     importResultDismissed = true;
@@ -300,7 +338,10 @@
   }
 
   async function submitImport(): Promise<void> {
-    if (!machine) return;
+    if (!machine) {
+      refuseUnbuilt();
+      return;
+    }
     const lines = importText.split('\n');
     error = '';
     try {
@@ -332,7 +373,10 @@
   // Dispatch a fire-and-render action (generate / revoke / delete), then
   // re-render from the resulting snapshot.
   async function dispatch(action: unknown): Promise<void> {
-    if (!machine) return;
+    if (!machine) {
+      refuseUnbuilt();
+      return;
+    }
     try {
       await machine.dispatch(action);
       applySnapshot();
@@ -345,6 +389,7 @@
   // One-click disposable mint with the per-user defaults; the nest derives
   // <handle>+<domain> from the actor's canonical exact alias server-side.
   async function generateDisposable(): Promise<void> {
+    if (createRefused()) return;
     await dispatch({ GenerateDisposable: { ttl_days: null, uses: null, label: '' } });
   }
 
@@ -390,19 +435,19 @@
   <p class="muted small">{t.mail_aliases.description}</p>
 
   <div class="actions">
-    <button class="btn" data-testid={IDS.MAIL_ALIASES_ADD_BUTTON} disabled={!hasDomain} onclick={openAdd}>
+    <button class="btn" data-testid={IDS.MAIL_ALIASES_ADD_BUTTON} disabled={create.disabled} onclick={openAdd}>
       {t.mail_aliases.add_button}
     </button>
-    <button class="btn" data-testid={IDS.MAIL_ALIASES_GENERATE_DISPOSABLE_BUTTON} disabled={!hasDomain} data-copied={mintedAddress || undefined} onclick={generateDisposable}>
+    <button class="btn" data-testid={IDS.MAIL_ALIASES_GENERATE_DISPOSABLE_BUTTON} disabled={create.disabled} data-copied={mintedAddress || undefined} onclick={generateDisposable}>
       {t.mail_aliases.generate_button}
     </button>
-    <button class="btn" data-testid={IDS.MAIL_ALIASES_IMPORT_BUTTON} disabled={!hasDomain} onclick={openImport}>
+    <button class="btn" data-testid={IDS.MAIL_ALIASES_IMPORT_BUTTON} disabled={create.disabled} onclick={openImport}>
       {t.mail_aliases.import_button}
     </button>
   </div>
 
-  {#if !hasDomain}
-    <p class="muted small">{t.mail_aliases.no_default_domain}</p>
+  {#if create.reason}
+    <p class="muted small">{resolveLocalized(create.reason)}</p>
   {/if}
   {#if mintedToast}
     <p class="muted small minted">{mintedToast}</p>

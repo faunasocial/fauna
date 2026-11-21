@@ -1,0 +1,182 @@
+package com.fauna.app.core
+
+import com.fauna.ffi.FfiNestClient
+
+/**
+ * The [ApiClient] members the **kids** build type excises — **the excised
+ * half** (`family-safety.md` § The account age band, the kids-app bullet,
+ * item (4); `dynamic-features.md` § Compile-time excision). Compiled into the
+ * `kids` build type only, in place of the `src/noKids/` twin.
+ *
+ * It declares only the members `src/main` still names, each inert or an honest
+ * refusal, and deliberately names **no** symbol the kids `fauna-ffi` flavor lacks: that
+ * absence is what turns a half-excised build into a compile error rather than
+ * a silent leak. Everything else the built twin carries (the feed, search,
+ * every bridge, web publishing, the subscriptions author calls, connected apps,
+ * the labeler catalog) is called only from `src/noKids/`, which this build type
+ * never compiles. These are inert rather than silently dropped commands: no
+ * caller in this flavor can reach a surface that would need them.
+ */
+abstract class KidsExcisedApi {
+    /**
+     * A Profile-header picture — this nest's blob route only: the shared
+     * post-blob plane that reaches a relayed profile's home rides the feed,
+     * which this flavor compiles out, so a relayed profile's pictures stay
+     * empty here (the ruled degrade of a failed fetch). `null` on any failure.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    suspend fun fetchProfilePicture(relayedFrom: String?, homeNestActorId: String?, hashHex: String): ByteArray? {
+        if (relayedFrom != null) return null
+        return try {
+            (this as ApiClient).fetchBlobBytes(hashHex)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Excised — no sweep (the registry's only feeder is compiled out). */
+    fun startCriticalAlertSweep() = Unit
+
+    // The kids flavor carries no connected apps (`connected-apps` is excised),
+    // so a version's author line is the recorder alone: `null` here paints
+    // the plain wording, and there is no roster to read.
+    fun versionAuthor(authorDisplay: String, depositedBy: String?): uniffi.fauna_core.LocalizedText? = null
+
+    suspend fun readDepositorRoster(depositedBy: List<String>) = Unit
+
+    /** Excised — this flavor has no feed composer, so no `posts` draft rail to flush at a leave door. */
+    internal fun captureFeedLeaveFlush(): (suspend () -> Unit)? = null
+
+    /** Excised — this flavor holds no feed / search / atproto singleton to tear down. */
+    internal fun detachKidsExcised(): () -> Unit = {}
+
+    // Archive import (phase two's archive links) is compiled out of this
+    // flavor: no Contacts row paints an archive-link affordance, and nothing
+    // drives the links the full build's session registers.
+
+    /** Excised — the Contacts rows paint no archive-link affordance. */
+    val archiveLinkPainter: kotlinx.coroutines.flow.StateFlow<ArchiveLinkPainter> =
+        kotlinx.coroutines.flow.MutableStateFlow(ArchiveLinkPainter.NONE)
+
+    /** Excised — the kids FFI flavor builds no archive links. */
+    @Suppress("UNUSED_PARAMETER")
+    internal fun startArchiveLinks(client: FfiNestClient) = Unit
+
+    /** Excised — no links, so nothing to re-read. */
+    suspend fun refreshArchiveLinks() = Unit
+
+    /** Excised — the kids app has no archive import, so no `Archive` rail to read. */
+    @Suppress("UNUSED_PARAMETER")
+    suspend fun refreshArchiveThreads(session: uniffi.fauna_conversations.ConversationsSession) = Unit
+
+    /** Excised — no row offers the question in this flavor. */
+    @Suppress("UNUSED_PARAMETER")
+    suspend fun answerArchiveLink(contact: String, platform: String, yes: Boolean) = Unit
+
+    /** Excised — no row offers unlink in this flavor. */
+    @Suppress("UNUSED_PARAMETER")
+    suspend fun unlinkArchiveLink(contact: String, platform: String) = Unit
+
+    /** Excised — the TLS auto-renew cadence rides the DNS machine (a bridge); a
+     *  kids account is never the admin who would renew a certificate. */
+    internal fun startAutoRenewCadence() = Unit
+
+    /** Excised — the mail machine is compiled out of this flavor, so no connect-time refresh. */
+    @Suppress("UNUSED_PARAMETER")
+    internal fun startMailEpochRefresh(client: FfiNestClient) = Unit
+
+    /** Excised — the subscriptions author plane (monetization) is compiled out. */
+    @Suppress("UNUSED_PARAMETER")
+    internal fun startSubscriptionsAuthorPump(client: FfiNestClient, secretBytes: ByteArray) = Unit
+
+    /** Excised — the mail-relay hook is a bridge; the caller builds the plain machine. */
+    @Suppress("UNUSED_PARAMETER")
+    internal fun linkedNestsMachineWithMailRelay(
+        client: FfiNestClient,
+        secretBytes: ByteArray,
+    ): uniffi.fauna_client_pair.LinkedNestsMachine? = null
+
+    /** Excised — local domains ride the `mail-admin` plane; a kids account is
+     *  never the admin whose `nest_retire` entry would read them. */
+    suspend fun retireLocalDomains(): List<String> = emptyList()
+
+    /** Excised — the DNS credential store rides the `mail-admin` plane. Only the
+     *  admin's provisioning wizard captures a credential, and a kids account is
+     *  never that admin, so the post-auth glue never has one to seal here. */
+    @Suppress("UNUSED_PARAMETER")
+    suspend fun sealCapturedDnsCredential(
+        credential: com.fauna.ffi.onboarding.CapturedDnsCredential,
+    ) = Unit
+
+    // The subscriptions author calls (monetization). Their surfaces — the
+    // profile Tiers tab, the Offers tab and the Follow button — carry
+    // `!BuildConfig.KIDS` and are not rendered in this flavor, so nothing
+    // reaches these; a call that somehow did is refused, never faked.
+
+    @Suppress("UNUSED_PARAMETER")
+    suspend fun subscriptionCreateTier(
+        name: String,
+        rank: UInt,
+        description: String?,
+        priceHint: String?,
+        paymentUrl: String?,
+        autoApprove: Boolean,
+        askingPriceSats: ULong? = null,
+    ): Boolean = throw excised("subscriptions")
+
+    @Suppress("UNUSED_PARAMETER")
+    suspend fun subscriptionApproveRequest(
+        request: com.fauna.ffi.FfiPendingRequest,
+    ): com.fauna.ffi.FfiApproveReply = throw excised("subscriptions")
+
+    @Suppress("UNUSED_PARAMETER")
+    suspend fun subscriptionRemoveSubscriber(tierName: String, subscriberId: ByteArray): Unit =
+        throw excised("subscriptions")
+
+    @Suppress("UNUSED_PARAMETER")
+    suspend fun subscriptionSubscribe(
+        authorIdHex: String,
+        tier: String,
+        homeNestUrl: String? = null,
+    ): com.fauna.ffi.FfiSubscribeReply = throw excised("subscriptions")
+
+    @Suppress("UNUSED_PARAMETER")
+    suspend fun subscriptionSubscribeAndCheckout(
+        authorIdHex: String,
+        tier: String,
+        paymentUrl: String,
+        homeNestUrl: String?,
+    ): SubscribeCheckout? = throw excised("subscriptions")
+
+    @Suppress("UNUSED_PARAMETER")
+    suspend fun subscriptionUnsubscribe(
+        authorId: ByteArray,
+        tier: String,
+        homeNestUrl: String?,
+    ): com.fauna.ffi.FfiUnsubscribeReply = throw excised("subscriptions")
+
+    // Sealed tier-1 spam training rides the mail-settings machine, a bridge:
+    // there is no sealed model here, so the callers take their non-mail path.
+
+    /** No sealed model here, so only the nest half of the correction flow runs. */
+    internal suspend fun trainModerationCorrection(contentId: String, isSpam: Boolean) {
+        (this as ApiClient).submitModerationTrain(contentId, if (isSpam) "spam" else "ham")
+    }
+
+    @Suppress("UNUSED_PARAMETER")
+    internal suspend fun trainSpamModelClient(text: String, isSpam: Boolean): Boolean = false
+
+    @Suppress("UNUSED_PARAMETER")
+    internal suspend fun trainSpamModelClientMail(
+        text: String,
+        isSpam: Boolean,
+        messageId: ByteArray,
+        mailbox: String,
+        subject: String,
+    ) = Unit
+
+    private fun excised(plane: String) =
+        ApiException("the $plane plane is not part of Fauna Kids")
+}

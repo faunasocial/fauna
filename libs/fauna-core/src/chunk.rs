@@ -58,12 +58,43 @@ pub struct ChunkManifest {
     /// [`Self::check_min_reader`] error instead of a hash-mismatch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_reader: Option<u32>,
+    /// Set on a paged manifest's ROOT only: the file's pages, in file order
+    /// (`file-sync.md` § Paged manifests). A root carries no chunk entries of
+    /// its own — its pages ([`crate::manifest_paging::ManifestPage`]) do —
+    /// and stamps `min_reader = 3`. `None` on every single manifest, so a
+    /// manifest of at most [`crate::manifest_paging::MANIFEST_INLINE_MAX_CHUNKS`]
+    /// chunks encodes byte for byte as it did before the field existed. A
+    /// root is read only through [`crate::manifest_paging::PageWalk`]:
+    /// [`Self::store_keys`] refuses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pages: Option<Vec<crate::manifest_paging::ManifestPageRef>>,
 }
 
 /// The newest `ChunkManifest::min_reader` this binary can operate: 2 = it can
-/// open `sealed_hashes` manifests (given the root). Bumped only when a future
-/// manifest evolution makes older readers unsafe.
-pub const MANIFEST_READER_VERSION: u32 = 2;
+/// open `sealed_hashes` manifests (given the root); 3 = it can walk a paged
+/// root ([`ChunkManifest::pages`]). Bumped only when a future manifest
+/// evolution makes older readers unsafe.
+pub const MANIFEST_READER_VERSION: u32 = 3;
+
+/// The `min_reader` a sealed single manifest stamps ([`ChunkManifest::seal_hashes`])
+/// — unchanged by paging, so a sealed manifest of an ordinary file keeps its
+/// bytes and its dedup identity.
+pub const MANIFEST_SEALED_READER: u32 = 2;
+
+/// The `min_reader` a paged root stamps: a reader that predates paging gets
+/// the honest "update this client" refusal, never an empty chunk list.
+pub const MANIFEST_PAGED_READER: u32 = 3;
+
+/// A paged root asked for its chunk list directly: a root carries no chunk
+/// entries, so [`ChunkManifest::store_key`]/[`ChunkManifest::store_keys`]
+/// refuse it rather than answer an empty list a garbage collector would read
+/// as "references nothing". Read a root through
+/// [`crate::manifest_paging::PageWalk`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "manifest is a paged root: its store keys live in its pages — read it through the manifest walk"
+)]
+pub struct PagedRootError;
 
 /// The `file_hash` a sealed-only manifest carries in place of the real one
 /// (the all-zero digest): the field is not optional on the wire, so a blanked
@@ -76,21 +107,40 @@ impl ChunkManifest {
     /// The content-addressed storage key for chunk `i` — its [`Self::stored_hashes`]
     /// entry when present (a client-side-encrypted chunk keyed by ciphertext hash),
     /// else `chunk_hashes[i]` (the plaintext == stored key for unencrypted chunks).
-    pub fn store_key(&self, i: usize) -> ContentHash {
-        self.stored_hashes
+    ///
+    /// A paged root has no chunk entries of its own: [`PagedRootError`].
+    pub fn store_key(&self, i: usize) -> Result<ContentHash, PagedRootError> {
+        if self.is_paged() {
+            return Err(PagedRootError);
+        }
+        Ok(self
+            .stored_hashes
             .as_ref()
             .and_then(|s| s.get(i))
             .copied()
-            .unwrap_or_else(|| self.chunk_hashes[i])
+            .unwrap_or_else(|| self.chunk_hashes[i]))
     }
 
     /// The full ordered list of storage keys (one per chunk) — [`Self::stored_hashes`]
     /// when present, else a clone of `chunk_hashes`. This is what `check_chunks` and
     /// the download path address the blob store by.
-    pub fn store_keys(&self) -> Vec<ContentHash> {
-        self.stored_hashes
+    ///
+    /// A paged root has no chunk entries of its own: [`PagedRootError`], so a
+    /// caller not yet moved to [`crate::manifest_paging::PageWalk`] fails
+    /// loudly instead of reading an empty list.
+    pub fn store_keys(&self) -> Result<Vec<ContentHash>, PagedRootError> {
+        if self.is_paged() {
+            return Err(PagedRootError);
+        }
+        Ok(self
+            .stored_hashes
             .clone()
-            .unwrap_or_else(|| self.chunk_hashes.clone())
+            .unwrap_or_else(|| self.chunk_hashes.clone()))
+    }
+
+    /// Whether this manifest is a paged root ([`Self::pages`] set).
+    pub fn is_paged(&self) -> bool {
+        self.pages.is_some()
     }
 
     /// Whether this manifest carries sealed plaintext hashes that a reader
@@ -105,11 +155,17 @@ impl ChunkManifest {
     /// "needs a newer client" surface, so a future format bump fails here
     /// instead of as a cryptic hash-mismatch downstream.
     pub fn check_min_reader(&self) -> anyhow::Result<()> {
+        self.check_min_reader_for(MANIFEST_READER_VERSION)
+    }
+
+    /// [`Self::check_min_reader`] as a reader of version `reader` runs it —
+    /// the gate an older client applies, which the tests pin.
+    pub fn check_min_reader_for(&self, reader: u32) -> anyhow::Result<()> {
         let required = self.min_reader.unwrap_or(1);
-        if required > MANIFEST_READER_VERSION {
+        if required > reader {
             anyhow::bail!(
                 "manifest requires reader version {required} (this client supports \
-                 {MANIFEST_READER_VERSION}) — update this client"
+                 {reader}) — update this client"
             );
         }
         Ok(())
@@ -128,6 +184,9 @@ impl ChunkManifest {
         if self.sealed_hashes.is_some() {
             anyhow::bail!("manifest hashes are already sealed");
         }
+        if self.is_paged() {
+            anyhow::bail!("sealing a paged root as a single manifest");
+        }
         if stored.len() != self.chunk_hashes.len() {
             anyhow::bail!(
                 "manifest lists {} store keys for {} chunk hashes",
@@ -144,7 +203,7 @@ impl ChunkManifest {
         self.sealed_hashes = Some(sealed);
         self.file_hash = blank_file_hash();
         self.chunk_hashes = Vec::new();
-        self.min_reader = Some(MANIFEST_READER_VERSION);
+        self.min_reader = Some(MANIFEST_SEALED_READER);
         Ok(self)
     }
 
@@ -168,7 +227,13 @@ impl ChunkManifest {
     /// hashes: a sealed-chunk manifest still naming its plaintext
     /// `file_hash`/`chunk_hashes` is the confirmation oracle that field
     /// closes, so it is refused rather than tolerated.
+    ///
+    /// A paged root ([`Self::pages`]) is checked by its own arm,
+    /// [`Self::check_root_shape`].
     pub fn check_hash_shape(&self) -> anyhow::Result<()> {
+        if self.is_paged() {
+            return self.check_root_shape();
+        }
         match (&self.stored_hashes, &self.sealed_hashes) {
             (None, None) => Ok(()),
             (None, Some(_)) => anyhow::bail!("sealed manifest without stored_hashes"),
@@ -195,6 +260,9 @@ impl ChunkManifest {
     /// opened — and before a progress event reports `total_size` — and a
     /// counterparty cannot declare a size its own chunk list contradicts.
     pub fn check_sizes(&self) -> anyhow::Result<()> {
+        if self.is_paged() {
+            return self.check_root_shape();
+        }
         let chunks = self
             .stored_hashes
             .as_ref()
@@ -223,6 +291,63 @@ impl ChunkManifest {
         Ok(())
     }
 
+    /// The shape every paged root must have before any page is fetched
+    /// (`file-sync.md` § Paged manifests; `mls-group-key-material.md` § M2 →
+    /// *Paged manifests*): at least one page; no chunk entries, sizes or store
+    /// keys of its own; every page between one entry and
+    /// [`crate::manifest_paging::MANIFEST_PAGE_MAX`]; page byte lengths that
+    /// sum to [`Self::total_size`] and that the page's entry count can hold;
+    /// `min_reader` at least [`MANIFEST_PAGED_READER`]; and the seal's pairing
+    /// — a sealed root blanks its `file_hash`, a plaintext one carries it.
+    pub fn check_root_shape(&self) -> anyhow::Result<()> {
+        let Some(pages) = &self.pages else {
+            anyhow::bail!("not a paged root");
+        };
+        if pages.is_empty() {
+            anyhow::bail!("paged root names no pages");
+        }
+        if !self.chunk_hashes.is_empty()
+            || !self.chunk_sizes.is_empty()
+            || self.stored_hashes.is_some()
+        {
+            anyhow::bail!("paged root carries chunk entries beside its pages");
+        }
+        if self.min_reader.unwrap_or(1) < MANIFEST_PAGED_READER {
+            anyhow::bail!("paged root does not stamp min_reader {MANIFEST_PAGED_READER}");
+        }
+        if self.sealed_hashes.is_some() && self.file_hash != blank_file_hash() {
+            anyhow::bail!("sealed paged root carries its plaintext file hash");
+        }
+        let max_chunk = u64::from(crate::chunker::MAX_CHUNK);
+        let mut bytes = 0u64;
+        for (i, page) in pages.iter().enumerate() {
+            let count = page.chunk_count as usize;
+            if count == 0 || count > crate::manifest_paging::MANIFEST_PAGE_MAX {
+                anyhow::bail!(
+                    "paged root names page {i} of {count} entries (1..={} allowed)",
+                    crate::manifest_paging::MANIFEST_PAGE_MAX
+                );
+            }
+            if page.byte_len > u64::from(page.chunk_count) * max_chunk {
+                anyhow::bail!(
+                    "paged root names page {i} of {} bytes in {count} chunks — more than \
+                     its chunks can hold",
+                    page.byte_len
+                );
+            }
+            bytes = bytes
+                .checked_add(page.byte_len)
+                .ok_or_else(|| anyhow::anyhow!("paged root page lengths overflow"))?;
+        }
+        if bytes != self.total_size {
+            anyhow::bail!(
+                "paged root declares total size {} but its pages sum to {bytes}",
+                self.total_size
+            );
+        }
+        Ok(())
+    }
+
     /// Open [`Self::sealed_hashes`] under the set's chunk root and return the
     /// manifest with `file_hash`/`chunk_hashes` restored (the plaintext view
     /// every downstream consumer expects). A plaintext manifest is returned
@@ -231,6 +356,9 @@ impl ChunkManifest {
     /// blanked plaintext fields.
     pub fn unseal_hashes(mut self, root_secret: &[u8; 32]) -> anyhow::Result<Self> {
         self.check_hash_shape()?;
+        if self.is_paged() {
+            return Err(PagedRootError.into());
+        }
         let Some(sealed) = self.sealed_hashes.take() else {
             return Ok(self);
         };
@@ -381,6 +509,7 @@ mod tests {
             stored_hashes: sealed.then_some(hashes),
             sealed_hashes: sealed.then(|| vec![0u8; 4]),
             min_reader: None,
+            pages: None,
         }
     }
 
@@ -425,6 +554,7 @@ mod tests {
             stored_hashes: None,
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
 
         let encoded = crate::encoding::canonical_encode(&manifest).expect("serialize");
@@ -452,9 +582,10 @@ mod tests {
             stored_hashes: None,
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
-        assert_eq!(plain.store_key(0), hash_from_byte(1));
-        assert_eq!(plain.store_keys(), plain.chunk_hashes);
+        assert_eq!(plain.store_key(0).unwrap(), hash_from_byte(1));
+        assert_eq!(plain.store_keys().unwrap(), plain.chunk_hashes);
 
         // Encrypted manifest: store key is the ciphertext hash, distinct from the
         // plaintext hash; serde round-trips it.
@@ -466,9 +597,10 @@ mod tests {
             stored_hashes: Some(vec![hash_from_byte(0xF1), hash_from_byte(0xF2)]),
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
-        assert_eq!(enc.store_key(0), hash_from_byte(0xF1));
-        assert_eq!(enc.store_key(1), hash_from_byte(0xF2));
+        assert_eq!(enc.store_key(0).unwrap(), hash_from_byte(0xF1));
+        assert_eq!(enc.store_key(1).unwrap(), hash_from_byte(0xF2));
         let bytes = crate::encoding::canonical_encode(&enc).expect("serialize");
         let back: ChunkManifest = crate::encoding::canonical_decode(&bytes).expect("deserialize");
         assert_eq!(back.stored_hashes, enc.stored_hashes);
@@ -489,6 +621,7 @@ mod tests {
             stored_hashes: None,
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
         let encoded = crate::encoding::canonical_encode(&manifest).expect("serialize");
         // dag-cbor map keys are UTF-8 text on the wire, so a substring scan is
@@ -521,6 +654,7 @@ mod tests {
             stored_hashes: None,
             sealed_hashes: None,
             min_reader: Some(MANIFEST_READER_VERSION),
+            pages: None,
         };
         manifest
             .check_min_reader()
@@ -553,6 +687,7 @@ mod tests {
             stored_hashes: Some(stored_hashes.clone()),
             sealed_hashes: Some(sealed.clone()),
             min_reader: Some(2),
+            pages: None,
         };
         assert!(manifest.is_sealed());
         let opened = manifest.clone().unseal_hashes(&root).expect("unseal");
@@ -560,7 +695,7 @@ mod tests {
         assert_eq!(opened.chunk_hashes, chunk_hashes);
         assert!(!opened.is_sealed());
         // Store addressing never depended on the sealed fields.
-        assert_eq!(opened.store_keys(), stored_hashes);
+        assert_eq!(opened.store_keys().unwrap(), stored_hashes);
 
         // Wrong root ⇒ fail closed, never fall through to the blanked fields.
         assert!(manifest.clone().unseal_hashes(&[9u8; 32]).is_err());
@@ -585,6 +720,7 @@ mod tests {
             stored_hashes: Some(vec![hash_from_byte(0xF1), hash_from_byte(0xF2)]),
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
         // The pre-flip shape: store keys, plaintext hashes, no seal — refused.
         assert!(plain_view.check_hash_shape().is_err());
@@ -593,7 +729,7 @@ mod tests {
         let sealed = plain_view.clone().seal_hashes(&root).expect("seal");
         assert!(sealed.chunk_hashes.is_empty());
         assert_eq!(sealed.file_hash, blank_file_hash());
-        assert_eq!(sealed.min_reader, Some(MANIFEST_READER_VERSION));
+        assert_eq!(sealed.min_reader, Some(MANIFEST_SEALED_READER));
         sealed.check_hash_shape().expect("the written shape");
         sealed.check_min_reader().expect("this reader opens it");
         let opened = sealed.clone().unseal_hashes(&root).expect("unseal");
@@ -631,6 +767,7 @@ mod tests {
             stored_hashes: None,
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
 
         // v2 has chunks [B, C, D] — A removed, D added, B and C unchanged
@@ -642,6 +779,7 @@ mod tests {
             stored_hashes: None,
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
 
         let diff = v2.diff(&v1);

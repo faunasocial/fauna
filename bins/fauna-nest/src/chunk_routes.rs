@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Json};
+use axum::response::{IntoResponse, Json, Response};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -678,45 +678,89 @@ pub async fn upload_manifest(
     // it uploaded via `/api/v1/chunks`, and GC classifies by reference class, not
     // by `content_type`. Closing that needs record-time validation; see
     // `backup-restore.md` § 9.
-    if fauna_core::encoding::canonical_decode::<fauna_core::chunk::ChunkManifest>(&body).is_err() {
+    let Ok(manifest) =
+        fauna_core::encoding::canonical_decode::<fauna_core::chunk::ChunkManifest>(&body)
+    else {
         return (
             StatusCode::BAD_REQUEST,
             "body is not a canonical ChunkManifest",
         )
             .into_response();
+    };
+
+    // A paged root (`file-sync.md` § Paged manifests) passes the door only
+    // whole: the root's own shape (no chunk entries of its own, pages within
+    // the bounds, `min_reader` 3), and every page it names already at rest
+    // and holding exactly what the root says — the upload order is chunks,
+    // then pages, then the root. So a manifest-typed root is walkable by
+    // construction, and garbage collection's fail-close on an absent or
+    // corrupt page (`backup-restore.md` § 9 step 4) answers only to at-rest
+    // corruption, never to a client that uploaded a root ahead of its pages.
+    if manifest.is_paged() {
+        if let Err(e) = manifest.check_root_shape() {
+            return (StatusCode::BAD_REQUEST, format!("invalid paged root: {e}")).into_response();
+        }
+        let src = crate::manifest_walk::StorePages {
+            store: &store,
+            at_rest_key: backup_svc.encryption_key(),
+        };
+        match crate::manifest_walk::store_keys(&manifest, &src).await {
+            Ok(_) => {}
+            Err(crate::manifest_walk::WalkError::Source(e)) => {
+                tracing::error!("manifest root: reading its pages failed: {e:#}");
+                return ApiError::internal("storage error").into_response();
+            }
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, format!("invalid paged root: {e}"))
+                    .into_response();
+            }
+        }
     }
 
+    store_manifest_class_blob(&state, backup_svc, &store, &body, "manifest").await
+}
+
+/// Write a door-checked manifest-class body (a manifest, a root or a page)
+/// framed by `encode_blob` under the BLAKE3 of its plaintext, with its
+/// `blob_metadata` row, and answer `201 {hash}`.
+async fn store_manifest_class_blob(
+    state: &AppState,
+    backup_svc: &crate::backup::service::BackupService,
+    store: &Arc<dyn crate::blob_store::BlobStoreBackend>,
+    body: &[u8],
+    content_type: &str,
+) -> Response {
     // Hash is always computed on the plaintext.
-    let hash_bytes: [u8; 32] = *blake3::hash(&body).as_bytes();
+    let hash_bytes: [u8; 32] = *blake3::hash(body).as_bytes();
     let hash = fauna_core::data::ContentHash::from_digest_raw(hash_bytes);
 
     let to_store = match crate::backup::encode_blob(
-        &body,
+        body,
         backup_svc.encryption_key(),
         backup_svc.compression(),
     ) {
         Ok(data) => data,
         Err(e) => {
-            tracing::error!("manifest encode error: {e}");
+            tracing::error!("{content_type} encode error: {e}");
             return ApiError::internal("encryption error").into_response();
         }
     };
 
     if let Err(e) = store.put(&hash, &to_store).await {
-        tracing::error!("manifest upload error: {e}");
+        tracing::error!("{content_type} upload error: {e}");
         return ApiError::internal("storage error").into_response();
     }
 
     // Same no-false-ACK contract as `upload_chunk` above: the metadata row is
-    // the manifest's only durable trace until a reference row lands, so a
-    // failed write must fail the request, not ACK a blob GC can only
-    // over-retain and the `__index` purge's keep-check can't see.
+    // the blob's only durable trace until a reference row lands, so a failed
+    // write must fail the request, not ACK a blob GC can only over-retain and
+    // the `__index` purge's keep-check can't see.
     if let Err(e) = state
         .db
-        .put_blob_metadata(&hash_bytes, body.len() as i64, "manifest", None, None)
+        .put_blob_metadata(&hash_bytes, body.len() as i64, content_type, None, None)
         .await
     {
-        tracing::error!("failed to record manifest metadata: {e}");
+        tracing::error!("failed to record {content_type} metadata: {e}");
         return ApiError::internal("storage error").into_response();
     }
 
@@ -725,6 +769,38 @@ pub async fn upload_manifest(
         Json(json!({ "hash": hex::encode(hash_bytes) })),
     )
         .into_response()
+}
+
+/// POST /api/v1/manifest-pages -- Upload one page of a paged manifest
+/// (`file-sync.md` § Paged manifests → *Transport and order*), returns its
+/// content hash. Pages go up after the chunks they name and before their
+/// root; a page is fetched back, like the root, from
+/// `GET /api/v1/manifests/{hash}`.
+///
+/// The door accepts only a canonical `ManifestPage` within the page bounds —
+/// never a manifest or a root (a page names no page), never junk — so a
+/// `manifest_page`-typed blob really is a page. It carries the chunk body
+/// limit, not the manifest route's: a full page of a sealed upload is under
+/// 6 MB. Garbage collection keeps a page while a live root names it
+/// (`backup-restore.md` § 9 step 4) and reclaims it past grace once none does.
+pub async fn upload_manifest_page(
+    State(state): State<Arc<AppState>>,
+    _auth: crate::auth::BulkWriteAuth,
+    body: Bytes,
+) -> impl IntoResponse {
+    let backup_svc = match &state.backup_service {
+        Some(svc) => svc,
+        None => return (StatusCode::SERVICE_UNAVAILABLE, "backup not configured").into_response(),
+    };
+    let store = backup_svc.local_blob_store();
+    if let Err(e) = fauna_core::manifest_paging::ManifestPage::decode_checked(&body) {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("body is not a canonical manifest page: {e:#}"),
+        )
+            .into_response();
+    }
+    store_manifest_class_blob(&state, backup_svc, &store, &body, "manifest_page").await
 }
 
 /// GET /api/v1/manifests/:hash -- Download a manifest by content hash.

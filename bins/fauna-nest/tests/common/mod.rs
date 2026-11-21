@@ -1588,6 +1588,7 @@ pub async fn put_manifest(store: &DiskBlobStore, db: &CacheDb, body: &[u8]) -> C
         stored_hashes: None,
         sealed_hashes: None,
         min_reader: None,
+        pages: None,
     };
     let bytes = fauna_core::encoding::canonical_encode(&manifest).unwrap();
     let h = ContentHash::of_raw(&bytes);
@@ -1629,6 +1630,7 @@ pub async fn put_manifest_over(
         stored_hashes: None,
         sealed_hashes: None,
         min_reader: None,
+        pages: None,
     };
     let bytes = fauna_core::encoding::canonical_encode(&manifest).unwrap();
     let h = ContentHash::of_raw(&bytes);

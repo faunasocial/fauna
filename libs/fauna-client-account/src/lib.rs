@@ -29,6 +29,23 @@ pub use fauna_protocol::account;
 
 pub mod sessions;
 pub mod sessions_view;
+
+use fauna_core::possibility::Possibility;
+
+/// Whether the admin entry points — the `admin-tab` sidebar row, the Bridges
+/// page's hosted-plugin section — are offered to this person
+/// (`docs/goal/ui/README.md` § Offer only what is possible, rules 2 and 6;
+/// `admin.md` § Shell). `is_admin` is the `fauna.account.am_i_admin` gate's
+/// answer, read once post-auth and `false` until it answers or on any error:
+/// a role this person lacks is absent, never a disabled control. The nest
+/// re-refuses every admin kind whatever this says.
+pub fn admin_entry_possibility(is_admin: bool) -> Possibility {
+    if is_admin {
+        Possibility::Possible
+    } else {
+        Possibility::Absent
+    }
+}
 pub use sessions::{SessionsAct, SessionsClient, SessionsError, SessionsPass};
 
 /// Typed `fauna.account.*` / `fauna.quota.get` / `fauna.profile.handle.change`
@@ -307,6 +324,12 @@ mod tests {
         let rec = std::sync::Arc::new(RecordingRequester::new(reply));
         let client = AccountClient::new(rec.clone());
         (rec, client)
+    }
+
+    #[test]
+    fn the_admin_entry_is_absent_for_a_non_admin() {
+        assert_eq!(admin_entry_possibility(true), Possibility::Possible);
+        assert_eq!(admin_entry_possibility(false), Possibility::Absent);
     }
 
     #[test]

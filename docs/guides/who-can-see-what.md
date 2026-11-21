@@ -141,9 +141,16 @@ for visitors to see anything:
 | Public | anyone can read it |
 
 **There is a third switch, in another place, and it is off until you turn it
-on.** Your site is served at your own web address, and that address is opt-in: switch on **Publish my website** in **Settings → Web**. Until it is on, visitors to your address get
-the nest's own placeholder page rather than your site — so if you have published
-a folder and see a "Fauna Nest" page instead of your own, that switch is why.
+on.** Your site is served at your own web address, and that address is opt-in: switch on **Publish my website** in **Settings → Web**. Until it is on, your nest has no
+security certificate for your address, so a visitor's browser warns about it
+(opened with `http://`, it shows a plain "not found" page instead), and past
+the warning is the nest's front page: the member's website your admin chose for
+it, or the built-in info page titled "Fauna nest". Right after you switch it
+on, the warning, or the "not found" page, can stay for a few minutes while
+your nest gets the certificate. So if
+you have published a folder and your address shows a certificate warning, a
+"not found" page, your admin's chosen website or the "Fauna nest" info page
+instead of your own site, check that switch first.
 
 You can turn the folder switch on first and make the folder public later; the
 app tells you the site is not visible yet rather than hiding the switch. Two combinations
@@ -180,8 +187,8 @@ Nostr is a public relay network. When you turn on **Expose content** on the Nost
   keyword and **count** them (how many posts you've made, how many replies
   reference a given post). This is normal for a public relay.
 - **Your direct messages stay private.** Nostr direct messages travel in encrypted envelopes that hide what is said, and who sent it, from the relays that carry them. Your nest opens the ones that reach you as they arrive, wraps the ones you send, and stores them encrypted for you. The relays can still see who a message is addressed to and roughly how large it is.
-- **Who sees it:** anyone, for your exposed public posts.
-- **Turning it off:** turn off **Expose content**. Your relay stops serving the posts it already serves, and serves no new ones except those your nest still publishes for you: a post **Auto-publish posts** sends, or a quote of or reply to a Nostr note (a reply only while **Publish replies** is on). Copies other people already fetched remain, and so do posts already sent to other relays.
+- **Who sees it:** anyone, for your exposed public posts and for the teaser of a post you sell that you chose to **Advertise on Nostr**, whether or not **Expose content** is on.
+- **Turning it off:** turn off **Expose content**. Your relay stops serving the posts it already serves, apart from the teaser of a post you sell that you chose to **Advertise on Nostr**, and serves no new ones except those your nest still publishes for you: a post **Auto-publish posts** sends, a quote of or reply to a Nostr note (a reply only while **Publish replies** is on), or the teaser of a post you advertise. You can still advertise while the switch is off; to take a teaser down, choose **Stop advertising on Nostr** on your post's **⋯** menu in the feed: it deletes the note from your nest's relay and, while your nest holds your Nostr key, asks your Nostr relays to delete their copies, though some may keep them. Copies other people already fetched remain, and so do posts already sent to other relays.
 
 ### The Fediverse (ActivityPub / Mastodon-compatible)
 
@@ -237,6 +244,7 @@ A monetized post has two parts: a short **free preview** you write, and the
 - **The free preview is public** — it appears on the paywall page for anyone, and
   it shows up in search, exactly like any public text. Write it knowing it is
   visible to everyone.
+- **You can advertise a post you sell on Nostr, one post at a time.** Choose **Advertise on Nostr** on your post's **⋯** menu in the feed, and its free preview — the teaser — goes out as a public Nostr note with its price, and with a link to its page on your website when the post is published there. Anyone on Nostr can read the note, whether or not **Expose content** is on, and turning **Expose content** off does not withdraw it. **Stop advertising on Nostr**, on the same menu, deletes the note from your nest's relay and, while your nest holds your Nostr key, asks your Nostr relays to delete their copies, though some may keep them (see [Nostr](#nostr)); removing the post's asking price with **Change price…** or deleting the post withdraws it the same way. Advertising is refused for a sold post with no asking price.
 - **The full body is stored encrypted** and opens only for people who hold a valid subscription — and, for a paid post on your website, for your nest, which opens it for each visitor with a valid code. It never travels to Bluesky, Nostr, or the Fediverse.
 - **Your tier names and prices are public.** So the paywall and other networks can
   show them, your subscription tiers, their prices, and payment links are readable
@@ -367,7 +375,7 @@ None of the following is visible to an outsider — anonymous, another user, or 
 |---|---|---|
 | **A bridge** (Bluesky / Nostr / Fediverse) | that network's whole view of your posts | anything already sent to that network |
 | **Mail** | the mail server and all its ports (a scanner finds nothing) | public DNS records (until your nest's admin removes them) |
-| **Expose content** (Nostr) | your relay serving your posts, apart from new ones your nest still publishes for you (see [Nostr](#nostr)) | copies already fetched, and posts already sent to other relays |
+| **Expose content** (Nostr) | your relay serving your posts, apart from new ones your nest still publishes for you and teasers of posts you advertise (see [Nostr](#nostr)) | copies already fetched, and posts already sent to other relays |
 | **A public web page or custom domain** | the page and future visits | the certificate already in the public logs |
 | **A public folder** (back to private) | outside access to it, and its files are encrypted again | anything already downloaded, indexed, or archived while it was public |
 

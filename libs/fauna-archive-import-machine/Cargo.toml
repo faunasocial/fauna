@@ -59,6 +59,10 @@ feed-sink = ["dep:fauna-feed", "dep:fauna-protocol"]
 # hickory) out of wasm builds; the path form is required to override defaults
 # (mirrors libs/fauna-archive).
 fauna-core = { path = "../fauna-core", default-features = false }
+# A refusal is the sentence the page paints for the same answer
+# (`machine::refusal` resolves the reason's key); a workspace crate with no
+# dependencies of its own.
+fauna-i18n = { path = "../fauna-i18n" }
 # The archive model, the zip seam and the parsers this machine drives.
 fauna-archive = { path = "../fauna-archive" }
 # Canonical DAG-CBOR — every `state/`, `model/` and marker file in the archive
@@ -131,8 +135,6 @@ fauna-sync-engine = { path = "../fauna-sync-engine", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
-# `snapshot.rs`'s vocabulary test: every shared label key is a shipped string.
-fauna-i18n = { path = "../fauna-i18n" }
 # `fauna_archive::testing::{fixture_zip, zip_of}` — the generated corpus.
 fauna-archive = { path = "../fauna-archive", features = ["test-helpers"] }
 # Self-dev-dependency: turns `test-helpers` on for this package's own test

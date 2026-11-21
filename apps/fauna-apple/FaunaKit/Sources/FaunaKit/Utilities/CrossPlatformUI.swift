@@ -115,13 +115,70 @@ public extension NSColor {
 
 /// Write a string to the system pasteboard. Mirrors `CopyButton`'s internal logic.
 public enum Pasteboard {
+    /// Fire-and-forget copy, for the call sites with no copy outcome to paint.
     public static func copy(_ string: String) {
+        try? write(string)
+    }
+
+    /// Write `string`, throwing when the pasteboard refused it (macOS answers
+    /// `setString` with `false`; iOS's setter has no failure). The door a copy
+    /// whose outcome is painted goes through — ``CopyOutcome/attempt(_:writer:)``.
+    public static func write(_ string: String) throws {
         #if os(macOS)
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(string, forType: .string)
+        guard NSPasteboard.general.setString(string, forType: .string) else {
+            throw PasteboardWriteError()
+        }
         #else
         UIPasteboard.general.string = string
         #endif
+    }
+}
+
+/// The pasteboard refused a write (``Pasteboard/write(_:)``).
+public struct PasteboardWriteError: Error, LocalizedError, Equatable {
+    public init() {}
+    public var errorDescription: String? { "the pasteboard refused the write" }
+}
+
+/// One copy's outcome, painted on the page (`docs/goal/ui/README.md` § Offer
+/// only what is possible, rule 7 — a failure is never silent): a write that
+/// reached the pasteboard confirms on its button ("Copied!" + the `copied`
+/// attr, the `account-actor-id-copy-btn` contract); one that failed carries
+/// `common.copy_failed` for the page's error line. The twin of tui's
+/// `record_copy_outcome`.
+public enum CopyOutcome: Equatable {
+    /// The exact string now on the pasteboard.
+    case copied(String)
+    /// The rendered `common.copy_failed` line.
+    case failed(String)
+
+    /// Copy `text` through `writer` (the system pasteboard unless a test hands
+    /// its own) and answer the outcome. A success also logs the displayed
+    /// confirmation at `info` (observability.md § What must be logged,
+    /// category 1) — the confirmation TEXT only, never the copied value.
+    public static func attempt(
+        _ text: String, writer: (String) throws -> Void = Pasteboard.write
+    ) -> CopyOutcome {
+        do {
+            try writer(text)
+        } catch {
+            return .failed(L.common.copyFailed(error: error.localizedDescription))
+        }
+        logMessage(level: .info, target: "fauna.copy_button", message: L.common.copied)
+        return .copied(text)
+    }
+
+    /// The string the copy put on the pasteboard; `nil` after a failure.
+    public var copiedText: String? {
+        if case .copied(let text) = self { return text }
+        return nil
+    }
+
+    /// The page's error line for a failed copy; `nil` after a success.
+    public var failure: String? {
+        if case .failed(let message) = self { return message }
+        return nil
     }
 }
 

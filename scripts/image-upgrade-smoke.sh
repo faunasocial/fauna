@@ -160,6 +160,8 @@ trap cleanup EXIT
 # the SNI router's :443, the production path (deployment-threat-model.md § Concern 1a).
 boot_and_wait_healthy() {
     local image=$1 cname=$2 port body
+    # Joins no core fence: this runs on CI runners (build-nest-image.yml's
+    # upgrade smoke) and ships publicly, where there is no fence to join.
     docker run -d --name "$cname" \
         -v "$VOLUME":/data \
         -p 127.0.0.1::443 \
@@ -187,7 +189,31 @@ boot_and_wait_healthy() {
 
 echo "[upgrade-smoke] previous release: $OLD_IMAGE"
 echo "[upgrade-smoke] candidate image: $NEW_IMAGE"
-docker pull --platform "$PLATFORM" "$OLD_IMAGE" >/dev/null
+# The image resolved above, so a pull answered `not found` is the registry
+# missing a read it just served (GHCR did so 0.7 s after the inspect, and the
+# same tag pulled minutes later): retry it, bounded, rather than red the leg on
+# one miss. Any other pull failure, or a miss that outlasts the retries, fails.
+pull_attempt=1
+while :; do
+    set +e
+    PULL_OUT=$(docker pull --platform "$PLATFORM" "$OLD_IMAGE" 2>&1)
+    PULL_RC=$?
+    set -e
+    [ "$PULL_RC" -eq 0 ] && break
+    case "$PULL_OUT" in
+        *"not found"*|*"manifest unknown"*|*"MANIFEST_UNKNOWN"*)
+            if [ "$pull_attempt" -lt 4 ]; then
+                echo "[upgrade-smoke] pull of $OLD_IMAGE answered not found (attempt $pull_attempt); retrying" >&2
+                sleep $(( pull_attempt * 5 ))
+                pull_attempt=$(( pull_attempt + 1 ))
+                continue
+            fi
+            ;;
+    esac
+    echo "[upgrade-smoke] FAIL: could not pull $OLD_IMAGE:" >&2
+    printf '%s\n' "$PULL_OUT" >&2
+    exit 1
+done
 
 echo "[upgrade-smoke] phase 1: boot the previous release on a fresh volume $VOLUME"
 boot_and_wait_healthy "$OLD_IMAGE" "$OLD_C" >/dev/null

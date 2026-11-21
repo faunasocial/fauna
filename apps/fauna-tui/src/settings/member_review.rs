@@ -96,6 +96,8 @@ pub(super) fn review_rows(
             )
             .within(ids::MEMBER_REVIEW_ROW, i),
         );
+        // Remove evicts through the conversations session, so it is not live
+        // without one — the seam disables it with why (rule 5).
         els.push(
             Element::gesture_button(
                 ids::MEMBER_REVIEW_REMOVE_BUTTON,
@@ -105,7 +107,10 @@ pub(super) fn review_rows(
                     person: review.person,
                 }),
             )
-            .within(ids::MEMBER_REVIEW_ROW, i),
+            .within(ids::MEMBER_REVIEW_ROW, i)
+            .possible(fauna_core::data::member_review_remove_possibility(
+                manager.is_some(),
+            )),
         );
     }
     els

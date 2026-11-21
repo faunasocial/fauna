@@ -9,7 +9,16 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.fauna.app.R
+import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.localized
 import social.fauna.generated.Ids
+import uniffi.fauna_core.Possibility
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.TextButton
 
 /**
  * The Profile's **private section** (`profile.md` § The private section) — the
@@ -35,6 +44,9 @@ fun ProfilePrivateSection(
     onSave: () -> Unit,
     modifier: Modifier = Modifier,
     labelSuggestions: (typed: String) -> List<String> = { emptyList() },
+    // Save's answer (`ProfilePrivateVM.saveAnswer`, the shared
+    // `save_possibility`); the default is for the stateless harness only.
+    saveAnswer: Possibility = Possibility.Possible,
 ) {
     var labelInput by remember { mutableStateOf("") }
     Column(
@@ -114,9 +126,10 @@ fun ProfilePrivateSection(
         }
         Button(
             onClick = onSave,
-            enabled = !saving,
+            enabled = saveAnswer.isPossible && !saving,
             modifier = Modifier.testTag(Ids.PROFILE_PRIVATE_SAVE_BUTTON),
         ) { Text(stringResource(R.string.profile_private_save)) }
+        DisabledControlReasonText(localized(saveAnswer.blockedReason))
     }
 }
 

@@ -112,7 +112,9 @@ struct MemberReviewRowView: View {
                 .automationActivate(Ids.memberReviewRemoveButton) {
                     Task { await vm.remove(person: row.person) }
                 }
+                .faunaPossible(vm.removeAnswer)
             }
+            FaunaPossibilityReason(vm.removeAnswer)
         }
         // Keep BOTH the row id AND the child button ids queryable (a bare
         // container id would clobber children — memory note / MailListMembersView).

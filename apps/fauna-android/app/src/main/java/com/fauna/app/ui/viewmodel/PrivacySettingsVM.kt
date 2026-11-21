@@ -8,9 +8,11 @@ import com.fauna.app.core.ApiClient
 import com.fauna.app.core.HexUtil
 import com.fauna.app.core.InheritedFilterMarks
 import com.fauna.app.core.SecureStorage
+import com.fauna.app.ui.util.answerRefusal
 import com.fauna.ffi.FfiEmailFilter
 import com.fauna.ffi.FfiFilterActionInputs
 import com.fauna.ffi.FfiFilterRuleInputs
+import com.fauna.ffi.FfiSpamPreferences
 import com.fauna.ffi.actorIdFromSecret
 import com.fauna.ffi.describeEmailFilterActionInputs
 import com.fauna.ffi.describeEmailFilterRuleInputs
@@ -20,12 +22,15 @@ import com.fauna.ffi.encodeEmailFilterRuleInputs
 import com.fauna.ffi.parseEmailFilterPriority
 import com.fauna.ffi.perMilleToProbability
 import com.fauna.ffi.probabilityToPerMille
+import com.fauna.ffi.spamSavePreferencesPossibility
 import com.fauna.ffi.spamThresholdBand
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import uniffi.fauna_core.Possibility
+import uniffi.fauna_core.ReadState
 import javax.inject.Inject
 
 /** Everything the shared filter form holds — the condition and action inputs
@@ -83,6 +88,55 @@ class PrivacySettingsVM @Inject constructor(
     val spamPrefsLoading = MutableStateFlow(false)
     val spamPrefsSaved = MutableStateFlow(false)
     val spamPrefsError = MutableStateFlow<String?>(null)
+
+    // What the nest last confirmed (the read's reply or a save's echo) and where
+    // that read stands — `save-spam-prefs` is offered only while a threshold
+    // differs from it (the shared `save_preferences_possibility`; settings.md,
+    // the spam-moderation row; ui/README.md § Offer only what is possible).
+    private var spamSaved: FfiSpamPreferences? = null
+    private var spamRead = ReadState.PENDING
+
+    private val _saveSpamAnswer = MutableStateFlow(spamAnswerNow())
+
+    /** `save-spam-prefs`' answer; [saveSpamPreferences] asks it again. */
+    val saveSpamAnswer: StateFlow<Possibility> = _saveSpamAnswer
+
+    private fun spamAnswerNow(): Possibility = spamSavePreferencesPossibility(
+        spamRead,
+        spamSaved,
+        spamThreshold.value.toString(),
+        phishingThreshold.value.toString(),
+    )
+
+    /** Re-ask the answer after a slider, the read or the saved value moved. */
+    private fun repaintSpamAnswer() {
+        _saveSpamAnswer.value = spamAnswerNow()
+    }
+
+    fun setSpamThreshold(value: Float) {
+        spamThreshold.value = value
+        repaintSpamAnswer()
+    }
+
+    fun setPhishingThreshold(value: Float) {
+        phishingThreshold.value = value
+        repaintSpamAnswer()
+    }
+
+    /** The preferences read landed ([prefs]) or threw (`null`): fold the read
+     *  state and the saved pair, then re-ask. Internal so the VM tests drive it
+     *  without a nest. */
+    internal fun applySpamRead(prefs: FfiSpamPreferences?) {
+        if (prefs != null) {
+            spamThreshold.value = fromPerMille(prefs.spamThreshold)
+            phishingThreshold.value = fromPerMille(prefs.phishingThreshold)
+            spamSaved = prefs
+            spamRead = ReadState.RESOLVED
+        } else if (spamRead != ReadState.RESOLVED) {
+            spamRead = ReadState.FAILED
+        }
+        repaintSpamAnswer()
+    }
 
     // Shared spam-prefs presentation contract (fauna_protocol::spam, via the
     // fauna-ffi UniFFI face) — every app reads the same threshold-band buckets
@@ -264,25 +318,36 @@ class PrivacySettingsVM @Inject constructor(
     private fun loadSpamPreferences() {
         viewModelScope.launch {
             try {
-                val prefs = api.getSpamPreferences()
-                spamThreshold.value = fromPerMille(prefs.spamThreshold)
-                phishingThreshold.value = fromPerMille(prefs.phishingThreshold)
+                applySpamRead(api.getSpamPreferences())
             } catch (_: Exception) {
-                // Defaults remain if server doesn't support spam prefs
+                // Defaults remain if server doesn't support spam prefs; the
+                // button says the read failed instead of offering a save.
+                applySpamRead(null)
             }
         }
     }
 
     fun saveSpamPreferences() {
+        // The button's own answer first: a press it would not offer is refused
+        // on the page's error line, never sent to be echoed back unchanged.
+        val refusal = answerRefusal(appContext, spamAnswerNow())
+        if (refusal != null) {
+            spamPrefsError.value = refusal.reason
+            return
+        }
         viewModelScope.launch {
             spamPrefsLoading.value = true
             spamPrefsSaved.value = false
             spamPrefsError.value = null
             try {
-                api.updateSpamPreferences(
+                val echo = api.updateSpamPreferences(
                     spamThreshold = toPerMille(spamThreshold.value),
                     phishingThreshold = toPerMille(phishingThreshold.value),
                 )
+                // The nest's echo is the new baseline: nothing to save until the next edit.
+                spamSaved = echo
+                spamRead = ReadState.RESOLVED
+                repaintSpamAnswer()
                 spamPrefsSaved.value = true
             } catch (e: Exception) {
                 spamPrefsError.value = e.message

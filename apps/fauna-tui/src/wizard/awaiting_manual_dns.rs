@@ -54,27 +54,26 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
         // `Claimed`/`Error{cause}` each carry their own key, so the state is
         // never re-derived here.
         Element::label(ids::AWAITING_DNS_STATUS, super::localized(&snap.message)),
+        // Every button below is enabled by the seam from the machine's answer
+        // (`ui/README.md` § Offer only what is possible, rule 6), its reason
+        // painted; this page re-derives none of them. The recheck is off while
+        // a probe or claim is in flight (the probe is single-shot).
         Element::button(
             ids::AWAITING_DNS_RECHECK_BUTTON,
             t::RECHECK_BUTTON,
-            // The probe is single-shot; disabling it while one is in flight is
-            // what stops a keyboard-mashing user from stacking probes.
-            !matches!(
-                snap.state,
-                fauna_onboarding_machine::AwaitingDnsState::Checking
-                    | fauna_onboarding_machine::AwaitingDnsState::Claiming
-            ),
+            true,
             Action::RecheckManualDns,
-        ),
+        )
+        .possible(w.machine.awaiting_dns_recheck_possibility()),
+        // Nothing to copy in the records-less mode, so the button is inert
+        // there rather than answering a click with an empty clipboard.
         Element::button(
             ids::AWAITING_DNS_COPY_BUTTON,
             t::COPY_BUTTON,
-            // Nothing to copy in the records-less mode, so the button is inert
-            // there rather than answering a click with an empty clipboard. The
-            // machine decides; this page does not re-derive the rule.
-            w.machine.awaiting_dns_copy_enabled(),
+            true,
             Action::CopyDnsRecords,
-        ),
+        )
+        .possible(w.machine.awaiting_dns_copy_possibility()),
         // The exit for a box that will never answer (`onboarding-provisioning.md`
         // § "Almost ready" surface → *Exit*): the mirror of `launch_retry`'s
         // `launch-fallthrough-button`, so it borrows that surface's label rather
@@ -85,8 +84,9 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
         Element::button(
             ids::AWAITING_DNS_FALLTHROUGH_BUTTON,
             launch_t::USE_DIFFERENT_NEST,
-            w.machine.awaiting_dns_fallthrough_enabled(),
+            true,
             Action::AbandonAwaitingManualDns,
-        ),
+        )
+        .possible(w.machine.awaiting_dns_fallthrough_possibility()),
     ]
 }

@@ -73,6 +73,14 @@ struct MacConversationsView: View {
             // The standing community-room invitations, atop the list.
             RoomInvitationsSection()
 
+            // Empty state, chrome with no id — painted only once the room list
+            // has loaded (`ConversationsVM.showsEmptyState`).
+            if vm.showsEmptyState {
+                Text(L.conversations.list.noConversations)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 12)
+            }
+
             List(selection: selectionBinding) {
                 ForEach(Array(vm.rows.enumerated()), id: \.element.id) { index, row in
                     ConversationListRow(model: row)
@@ -92,6 +100,9 @@ struct MacConversationsView: View {
                         .automationScope(Ids.conversationItem, index: index)
                 }
             }
+            // A click on a row selects the thread (ui/README.md § Text the person
+            // reads can be copied, rule 3): its labels stay controls.
+            .faunaActsOnClick()
 
             // Always-present page-level error element (Rule 2).
             ErrorBanner(message: vm.pageError)

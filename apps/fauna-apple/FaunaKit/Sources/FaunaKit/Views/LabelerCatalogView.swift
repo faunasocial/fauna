@@ -149,14 +149,12 @@ struct LabelerCatalogRow: View {
                     Button(L.labelerCatalog.subscribe) {
                         Task { await vm.subscribe(index: index) }
                     }
-                    .disabled(!vm.subscribeEnabled(index: index))
                     .accessibilityIdentifier(Ids.labelerCatalogItemSubscribeButton)
-                    .automationActivate(
-                        Ids.labelerCatalogItemSubscribeButton,
-                        isEnabled: { vm.subscribeEnabled(index: index) }
-                    ) {
+                    .automationActivate(Ids.labelerCatalogItemSubscribeButton) {
                         Task { await vm.subscribe(index: index) }
                     }
+                    .faunaPossible(vm.subscribeAnswer(index: index))
+                    FaunaPossibilityReason(vm.subscribeAnswer(index: index))
                 }
             }
             if entry.subscribed {

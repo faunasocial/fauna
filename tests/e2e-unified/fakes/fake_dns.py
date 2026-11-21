@@ -48,6 +48,13 @@ _RCODE_NOERROR = 0
 _RCODE_SERVFAIL = 2
 _RCODE_NXDOMAIN = 3
 
+#: The reserved leading label under which the fake serves, as a TXT answer, how
+#: many TXT queries it has answered for the rest of the name — the shared
+#: venue's replacement for reading ``docker logs``, which a remote harness
+#: cannot (`e2e-gated-seeds.md` § The ACME directory seed → *The shared
+#: venue*, decision 6). A query under it is never counted itself.
+QUERY_COUNT_LABEL = "_fake-dns-queries"
+
 
 class FakeDns:
     """A loopback/sidecar DNS server answering a fixed set of A/TXT records, over
@@ -96,7 +103,12 @@ class FakeDns:
     ``log_queries`` prints one ``fake_dns query <name> <type>`` line per query
     to stdout — the sidecar's ``docker logs`` — so a test can wait for a client's
     lookup to have HAPPENED (the ACME propagation gate's first probe missing,
-    ``test_admin_dns_cert_manual_issue.py``) instead of sleeping past it."""
+    ``test_admin_dns_cert_manual_issue.py``) instead of sleeping past it.
+
+    Every TXT query is also counted per name, and the count is served as a TXT
+    answer under ``_fake-dns-queries.<name>`` (:data:`QUERY_COUNT_LABEL`) —
+    the same witness for a harness that cannot read the sidecar's logs (the
+    shared venue on the Linux dev VM, reached from the macOS and Windows dev VMs)."""
 
     def __init__(
         self,
@@ -128,6 +140,8 @@ class FakeDns:
         # TXT for that name. Guarded by `_lock`: the UDP and TCP threads both
         # read it and the TCP thread writes it.
         self._updates: dict[str, list[str]] = {}
+        # TXT queries answered, per name (lowercase, no trailing dot).
+        self._txt_query_counts: dict[str, int] = {}
         self._lock = threading.Lock()
         self._sock, self._tcp = self._bind_pair(host, port)
         self.host, self.port = self._sock.getsockname()[:2]
@@ -378,6 +392,16 @@ class FakeDns:
         name = qname.lower()
         if self._log_queries:
             print(f"fake_dns query {name} {qtype}", flush=True)
+        rd = flags & 0x0100
+        if qclass == _CLASS_IN and qtype == _TYPE_TXT:
+            prefix = QUERY_COUNT_LABEL + "."
+            if name.startswith(prefix):
+                with self._lock:
+                    count = self._txt_query_counts.get(name[len(prefix):], 0)
+                header = struct.pack(">HHHHHH", txn_id, 0x8000 | 0x0400 | rd, 1, 1, 0, 0)
+                return header + question + self._txt_answer(str(count))
+            with self._lock:
+                self._txt_query_counts[name] = self._txt_query_counts.get(name, 0) + 1
         answers = b""
         ancount = 0
         rcode = _RCODE_NOERROR
@@ -411,7 +435,6 @@ class FakeDns:
             rcode = _RCODE_NXDOMAIN
 
         # QR=1, Opcode copied, AA=1, RD copied, RA=0, RCODE.
-        rd = flags & 0x0100
         resp_flags = 0x8000 | 0x0400 | rd | rcode
         header = struct.pack(">HHHHHH", txn_id, resp_flags, 1, ancount, 0, 0)
         return header + question + answers

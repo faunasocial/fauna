@@ -4,6 +4,7 @@
 //! the page error.
 
 use fauna_core::localized::LocalizedText;
+use fauna_core::possibility::Possibility;
 use serde::{Deserialize, Serialize};
 
 pub use fauna_atproto_settings_machine::{ConsentCardRow, ConsentSetRow};
@@ -244,4 +245,58 @@ pub struct ConnectedAppsSnapshot {
     pub record: Option<OracleRecord>,
     /// The page error (`error-message`), if the last gesture or read failed.
     pub error: Option<LocalizedText>,
+}
+
+impl ConnectedAppsSnapshot {
+    /// `atproto-external-apps-enable`'s answer (`docs/goal/ui/README.md`
+    /// § Offer only what is possible, rule 5; the ruling is
+    /// `docs/goal/ui/connected-apps.md` § Errors & edge cases): not possible
+    /// until the page's read has returned. The switch is read in the same pass
+    /// as the roster, so `loaded` is that read's answer; before it,
+    /// `external_apps_off` holds only the type's default, and flipping it would
+    /// write a guess.
+    pub fn external_apps_possibility(&self) -> Possibility {
+        Possibility::once_read(self.loaded)
+    }
+}
+
+/// The reason `connected-apps-connect-submit` gives over a blank code.
+pub const CONNECT_CODE_REQUIRED_KEY: &str = "connected_apps.code_required";
+
+/// `connected-apps-connect-submit`'s answer, and the input's Enter
+/// (`docs/goal/ui/README.md` § Offer only what is possible, rule 4): a code to
+/// look up. Both ask it before the lookup, so a blank code is never sent.
+pub fn connect_code_possibility(code: &str) -> Possibility {
+    if code.trim().is_empty() {
+        Possibility::blocked(LocalizedText::key(CONNECT_CODE_REQUIRED_KEY))
+    } else {
+        Possibility::Possible
+    }
+}
+
+/// The switch's answer for an app holding no snapshot yet: still loading.
+pub fn external_apps_possibility(snapshot: Option<&ConnectedAppsSnapshot>) -> Possibility {
+    snapshot.map_or_else(
+        || Possibility::once_read(false),
+        ConnectedAppsSnapshot::external_apps_possibility,
+    )
+}
+
+#[cfg(test)]
+mod possibility_tests {
+    use super::*;
+
+    #[test]
+    fn the_external_apps_switch_waits_for_the_read() {
+        let key = |p: Possibility| p.reason().map(|r| r.key.clone());
+        let loading = Some("common.still_loading".to_string());
+        assert_eq!(key(external_apps_possibility(None)), loading);
+        let unread = ConnectedAppsSnapshot::default();
+        assert_eq!(key(external_apps_possibility(Some(&unread))), loading);
+        let read = ConnectedAppsSnapshot {
+            loaded: true,
+            ..Default::default()
+        };
+        assert!(external_apps_possibility(Some(&read)).is_possible());
+    }
 }

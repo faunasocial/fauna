@@ -16,7 +16,6 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -40,6 +39,7 @@ import uniffi.fauna_conversations.RoomSearchResultKind
 import uniffi.fauna_conversations.RoomSearchResultSnapshot
 import uniffi.fauna_conversations.RoomSearchSnapshot
 import uniffi.fauna_conversations.RoomSearchStatus
+import com.fauna.app.ui.controls.OutlinedTextField
 
 /**
  * The community room's search strip (`docs/goal/behavior/room-search.md` § The

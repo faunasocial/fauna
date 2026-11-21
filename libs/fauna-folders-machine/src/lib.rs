@@ -20,12 +20,15 @@
 uniffi::setup_scaffolding!("fauna_folders_machine");
 
 pub mod error;
+pub mod first_folder;
+mod headless;
 pub mod machine;
 pub mod nest_api;
 pub mod nest_place;
 pub mod observer;
 pub mod on_demand_presence;
 pub mod photo_library;
+pub mod possibility;
 pub mod snapshots;
 pub mod state;
 
@@ -33,9 +36,9 @@ pub use error::FolderWizardError;
 pub use machine::FolderWizardMachine;
 #[cfg(any(test, feature = "test-helpers"))]
 pub use nest_api::FakeFolderNestApi;
-#[cfg(feature = "rpc-glue")]
-pub use nest_api::build_folder_wizard_machine;
 pub use nest_api::{FolderApiError, FolderNestApi};
+#[cfg(feature = "rpc-glue")]
+pub use nest_api::{build_first_folder_maker, build_folder_wizard_machine};
 pub use nest_place::*;
 pub use observer::FolderWizardObserver;
 pub use snapshots::*;

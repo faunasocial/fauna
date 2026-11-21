@@ -3,12 +3,16 @@
   import { logMessage } from '#lib/wasm';
   import { t } from '#lib/i18n/strings';
   import { IDS } from '#lib/generated/uiIds';
+  import { applyMessageUpdate, type MessageUpdate } from '#lib/message-update';
 
   // Not under SSR (the prerender pass) — what Kit 2's `$app/environment`
   // `browser` said.
   const browser = !import.meta.env.SSR;
 
-  let { error = $bindable(''), warning = $bindable(''), info = $bindable('') } = $props();
+  // `standDown`: an open modal form is showing its own `error-message`
+  // (`ui/README.md` § Offer only what is possible, rule 7), so the page's
+  // error line is not drawn meanwhile — at most one `error-message` shows.
+  let { error = $bindable(''), warning = $bindable(''), info = $bindable(''), standDown = false } = $props();
 
   // Test builds only (testing.md § Test-agent build exclusion): mirror the
   // banner texts onto `window.__fauna_messages` for the e2e bridge. Stripped
@@ -16,7 +20,10 @@
   $effect(() => {
     if (__FAUNA_E2E_AUTOMATION__ && browser) {
       (window as any).__fauna_messages = {
-        error: error || null,
+        // Stood down → not on screen, so not in the mirror either: the bridge
+        // reads this before the element and would otherwise report the
+        // page's error over the open form's own `error-message`.
+        error: (!standDown && error) || null,
         warning: warning || null,
         info: info || null,
       };
@@ -72,11 +79,11 @@
           ((window as unknown as { __fauna_message_banner_mount_count?: number })
             .__fauna_message_banner_mount_count ?? 0) + 1;
       }
+      // The update rule is `applyMessageUpdate`'s — `withdrawWarning` takes
+      // the warning down only while it still shows one of its texts.
       handler = (e: Event) => {
-        const detail = (e as CustomEvent).detail;
-        if (detail.error !== undefined) error = detail.error;
-        if (detail.warning !== undefined) warning = detail.warning;
-        if (detail.info !== undefined) info = detail.info;
+        const detail = (e as CustomEvent).detail as MessageUpdate;
+        ({ error, warning, info } = applyMessageUpdate({ error, warning, info }, detail));
       };
       window.addEventListener('fauna-message-update', handler);
     }
@@ -92,7 +99,7 @@
   });
 </script>
 
-{#if error}
+{#if error && !standDown}
 <div class="message-banner error-banner" role="alert">
   <span class="banner-text" data-testid={IDS.ERROR_MESSAGE}>{error}</span>
   <button class="dismiss-btn" onclick={() => error = ''} aria-label={t.common.dismiss}>&times;</button>

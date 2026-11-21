@@ -108,7 +108,7 @@ public struct QuotedPostCard: View {
         .accessibilityIdentifier(Ids.quotedPost)
         // Register the container itself for the in-process driver so
         // `count`/`is_visible("quoted-post")` resolve (the countable-container
-        // pattern — ProviderRow / device-card / admin-stat-card): a bare
+        // pattern — ProviderButtonRow / device-card / admin-stat-card): a bare
         // `.accessibilityIdentifier` populates only the a11y tree, NOT the
         // AutomationRegistry the in-process driver reads.
         .automationValue(Ids.quotedPost, text: { paintedText })

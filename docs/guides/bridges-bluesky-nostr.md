@@ -37,7 +37,7 @@ never looks like a removed feature.
 
 ### Keeping bridged posts out of — or in — your Search results
 
-The Bluesky card on Settings → AT Protocol and the ActivityPub card on the Bridges page each have two settings: **Show in search** — whether that network's public posts you receive show up when you search Fauna — and **Limit posts in search**, a cap on how many of a bridge's newest posts stay searchable at once (older ones drop off as new ones arrive, so a busy bridge doesn't crowd out everything else). The Nostr page doesn't offer them yet.
+The Bluesky card on Settings → AT Protocol and the ActivityPub card on the Bridges page each have two settings: **Show in search** — whether that network's public posts you receive show up when you search Fauna — and **Limit posts in search**, a cap on how many of a bridge's newest posts stay searchable at once (older ones drop off as new ones arrive, so a busy bridge doesn't crowd out everything else). The Nostr page doesn't offer them.
 Nothing private — DMs, gift-wrapped Nostr events — is ever searchable this
 way, on any bridge; the toggle only ever governs a bridge's public content.
 Both settings save the moment you change them.
@@ -71,7 +71,7 @@ nest a session, and from then on **your nest is your Bluesky client**:
   linked, say — is refused on the spot with a message naming the page where
   you can fix it, and nothing is posted. A post shows its author the way Bluesky knows them — their
   display name, or their handle when they have not set one — and the same
-  goes for a post that reached you from the fediverse or from Nostr. One thing still to come: the author's picture is not shown on their posts yet.
+  goes for a post that reached you from the fediverse or from Nostr. The author's picture is not shown on their posts.
 - **The whole conversation around a Bluesky post.** Open a Bluesky post and
   choose **View Thread**: you see the posts it answers, oldest first, then
   the post itself, marked, then the replies to it — replies from people you
@@ -343,6 +343,8 @@ all — only for records it creates itself. Revoking the app on Settings →
 **Connected apps** cuts its access at once, and the records it wrote stay in
 your account.
 
+An app can also ask to put files into one of your folders, or to read one. If it asks without naming which, its approval card shows a **Folder** choice listing only the folders it can use — to put files in, a folder that keeps its files on your nest; to read, one you serve over WebDAV — and approving gives it the folder you picked and no other. Until you pick one the card cannot be approved, and if none of your folders fits, the card says why. The Windows app does not offer the **Folder** choice: there, a card that asks for a folder without naming one cannot be approved, so answer it from another of your Fauna apps.
+
 If an app you already connected asks again with a **new key** — after a
 reinstall, say — the card says so under its list: approving ends the access the
 old key was given (or, when only its signing key changed, the old key's
@@ -373,7 +375,7 @@ have an explanation months later. An app you allowed to ask your nest for
 short-lived Bluesky service tokens — signed with your account's key, which never
 leaves your nest — also shows how many your nest issued for it in the current
 window and which service the most recent one was for, and when; an app asking
-far more often than you expect is easy to spot, and to disconnect. The time your nest last saw the app is when it last noticed it — when it renews its access, and whenever your nest or a Fauna app of yours does something for it — so a recent time means it is still in use, while an older one only means neither has happened lately. Revoking it there
+far more often than you expect is easy to spot, and to disconnect. An app given keys or permissions in your account — keys to records it keeps there or to a folder of yours it may read, or permission to put files into one of your folders, to post or edit your profile as you, to get short-lived Bluesky service tokens, to sign with a key your nest keeps for you, or to read or send in your conversations, among others — also shows, under its row, what it was given: **Now** lists each one — what it opens or what it lets the app do, until when, and whether it is still active — and **History** lists when each was given and when it was taken back. On the row of an app your nest has acted for — those service tokens, say, or posts and profile edits it made for the app — **Show what Fauna did for this app** lists the most recent of those acts, newest first: when it happened, what Fauna did in the approval card's words, and exactly what it was. **Hide what Fauna did for this app** closes the list again. The list is read from your nest each time you open it, and says **Nothing recorded for this app yet** when there is nothing to show. The Windows app does not show **Now**, **History** or **Show what Fauna did for this app** yet; your other Fauna apps do. The time your nest last saw the app is when it last noticed it — when it renews its access, and whenever your nest or a Fauna app of yours does something for it — so a recent time means it is still in use, while an older one only means neither has happened lately. Revoking it there
 ends the connection: the app stops being able to refresh, and drops off within
 about fifteen minutes. The **Allow external apps** switch on Settings → **Connected apps** pauses every app it affects at once — immediately rather than at its next renewal, including apps that talk to your nest directly rather than through Bluesky — and is reversible: flip it back and the apps you kept are usable again, with nothing to set up afresh. The note under the switch says as much. While it is off, every app it affects stays on the list marked **Paused**,
 with a reminder of how to turn it back on, so you can still see what you
@@ -560,9 +562,9 @@ shares only with their followers are not direct messages and are not shown.
 | Feature | Status |
 |---|---|
 | Unified feed & conversations with per-network source badges | **Available** |
-| Show in search / limit posts in search, on the Bluesky and ActivityPub cards | **Available** — not yet on the Nostr page |
+| Show in search / limit posts in search, on the Bluesky and ActivityPub cards | **Available** — not on the Nostr page |
 | Bluesky: link your existing account (OAuth) | **Available** |
-| Bluesky: timeline into your feed; custom-feed subscriptions | **Available** — polled every few minutes; author pictures are not shown yet |
+| Bluesky: timeline into your feed; custom-feed subscriptions | **Available** — polled every few minutes; author pictures are not shown |
 | Bluesky: like/reply/repost/quote from Fauna | **Available** — on any Bluesky post in your feed; replies under your own cross-posted posts thread on Bluesky too |
 | Bluesky: notifications & DMs in Fauna | **Available** |
 | Bluesky: cross-posting (off / auto / per-post) | **Available** |

@@ -9,9 +9,11 @@
 //! link it directly, FaunaKit **and the windows C# app** consume it via the
 //! UniFFI wrapper in `fauna-ffi`. The first (and so far only) consumer is the
 //! per-file
-//! completed-sync desktop notification: [`synced_filename`] filters the event
-//! stream down to `FileStatusChanged{Synced}` basenames, and the platform
-//! shell turns each into a native notification. Further event consumers
+//! completed-upload desktop notification: [`uploaded_filename`] filters the
+//! event stream down to `UploadComplete` basenames, and the platform shell
+//! turns each into a native notification. `FileStatusChanged{Synced}` is NOT
+//! the trigger: the agent pushes it for downloads and hydrations too, and the
+//! notice says "uploaded". Further event consumers
 //! belong here too, not in per-client socket loops.
 //!
 //! Split mirrors `convergence`: the blocking loop + filter are shared; only
@@ -26,20 +28,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(any(unix, windows))]
 use crate::endpoint::AgentEndpoint;
-use crate::sync::{EventKind, FileStatus};
+use crate::sync::EventKind;
 use crate::sync_pipe_client::SyncPipeClient;
 
-/// Whether a pushed [`EventKind`] should surface as a completed-sync
+/// Whether a pushed [`EventKind`] should surface as a completed-upload
 /// notification, and if so, the filename it names (basename only — a
 /// notification body has no room for a full path, and the path's prefix is
-/// the user's own folder anyway).
-pub fn synced_filename(event: &EventKind) -> Option<String> {
-    let EventKind::FileStatusChanged { path, status } = event else {
+/// the user's own folder anyway). Only [`EventKind::UploadComplete`] does: a
+/// `FileStatusChanged{Synced}` also settles downloads and hydrations, which
+/// the "{filename} uploaded" body would misstate.
+pub fn uploaded_filename(event: &EventKind) -> Option<String> {
+    let EventKind::UploadComplete { path } = event else {
         return None;
     };
-    if *status != FileStatus::Synced {
-        return None;
-    }
     Some(
         Path::new(path)
             .file_name()
@@ -49,7 +50,7 @@ pub fn synced_filename(event: &EventKind) -> Option<String> {
 }
 
 /// Block on `client`'s pushed events, calling `on_synced` with the basename of
-/// every `FileStatusChanged{Synced}`; every other event kind/status is ignored.
+/// every `UploadComplete`; every other event kind is ignored.
 /// Returns when `stop` is set or the socket errors (agent restarted / went
 /// away) — either way the caller decides whether to reconnect.
 pub fn run_event_loop(
@@ -60,7 +61,7 @@ pub fn run_event_loop(
     while !stop.load(Ordering::Relaxed) {
         match client.recv_event() {
             Ok(event) => {
-                if let Some(filename) = synced_filename(&event.event) {
+                if let Some(filename) = uploaded_filename(&event.event) {
                     on_synced(filename);
                 }
             }
@@ -128,14 +129,13 @@ pub fn spawn_event_listener(
 #[cfg(test)]
 mod filter_tests {
     use super::*;
-    use crate::sync::ConnectionState;
+    use crate::sync::{ConnectionState, FileStatus};
 
     #[test]
-    fn synced_status_yields_the_basename() {
+    fn upload_complete_yields_the_basename() {
         assert_eq!(
-            synced_filename(&EventKind::FileStatusChanged {
+            uploaded_filename(&EventKind::UploadComplete {
                 path: "/home/user/Fauna/sub/report.bin".into(),
-                status: FileStatus::Synced,
             }),
             Some("report.bin".to_string())
         );
@@ -145,32 +145,37 @@ mod filter_tests {
     /// windows is the arm that understands them.
     #[test]
     fn a_windows_path_yields_the_basename_too() {
-        let synced = synced_filename(&EventKind::FileStatusChanged {
+        let uploaded = uploaded_filename(&EventKind::UploadComplete {
             path: r"C:\Users\user\Fauna\sub\report.bin".into(),
-            status: FileStatus::Synced,
         });
         #[cfg(windows)]
-        assert_eq!(synced, Some("report.bin".to_string()));
+        assert_eq!(uploaded, Some("report.bin".to_string()));
         // On unix a backslash is an ordinary filename character, so the whole
         // string is one component — asserted so the expectation is stated, not
         // silently platform-dependent.
         #[cfg(not(windows))]
         assert_eq!(
-            synced,
+            uploaded,
             Some(r"C:\Users\user\Fauna\sub\report.bin".to_string())
         );
     }
 
+    /// The bug this filter once had: it fired on every `FileStatusChanged
+    /// {Synced}`, which the agent pushes for a download, an on-demand
+    /// hydration and a fetched superseding head as well as an upload — so the
+    /// apps said "{filename} uploaded" for a file that came DOWN. No file
+    /// status, `Synced` included, is a notification trigger.
     #[test]
-    fn non_synced_status_is_ignored() {
+    fn no_file_status_notifies_synced_included() {
         for status in [
+            FileStatus::Synced,
             FileStatus::Syncing,
             FileStatus::CloudOnly,
             FileStatus::Error,
             FileStatus::NotTracked,
         ] {
             assert_eq!(
-                synced_filename(&EventKind::FileStatusChanged {
+                uploaded_filename(&EventKind::FileStatusChanged {
                     path: "/home/user/Fauna/report.bin".into(),
                     status,
                 }),
@@ -181,9 +186,9 @@ mod filter_tests {
     }
 
     #[test]
-    fn non_file_status_changed_events_are_ignored() {
+    fn other_events_are_ignored() {
         assert_eq!(
-            synced_filename(&EventKind::ConnectionStateChanged(
+            uploaded_filename(&EventKind::ConnectionStateChanged(
                 ConnectionState::Connected
             )),
             None
@@ -247,7 +252,7 @@ mod tests {
     /// `unix_transport::serve` the agent runs) must reach the listener loop
     /// and call the injected callback with just the basename.
     #[tokio::test]
-    async fn file_status_changed_synced_over_the_real_socket_notifies_with_the_filename() {
+    async fn upload_complete_over_the_real_socket_notifies_with_the_filename() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("sync-agent.sock");
 
@@ -277,9 +282,8 @@ mod tests {
 
         event_tx
             .send(Event {
-                event: EventKind::FileStatusChanged {
+                event: EventKind::UploadComplete {
                     path: "/home/user/Fauna/sub/report.bin".into(),
-                    status: FileStatus::Synced,
                 },
             })
             .unwrap();
@@ -319,9 +323,8 @@ mod tests {
         // lands after it has connected and parked in recv_event().
         for _ in 0..200 {
             let _ = event_tx.send(Event {
-                event: EventKind::FileStatusChanged {
+                event: EventKind::UploadComplete {
                     path: "/home/user/Fauna/late.bin".into(),
-                    status: FileStatus::Synced,
                 },
             });
             if !recording.snapshot().is_empty() {

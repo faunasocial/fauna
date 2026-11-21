@@ -41,11 +41,15 @@
     ensureWasm,
     importSelectedTotals,
     importSourceKindLabel,
+    importSourceKinds,
     importTlsModeLabel,
     mailImportConnectActions,
     transferTiming,
+    mailUsableUnbuilt,
     type TransferTiming,
   } from '#lib/wasm';
+  import { blockedReason, importSourceKindsOffered, paintAnswer, refusal } from '#lib/mail-affordances';
+  import type { Possibility } from '#lib/possibility';
   import { byteSize, durationSecs } from '#lib/value-format';
   import { confirmSummaryText } from '#lib/mail-import-confirm';
   import { resolveLocalized } from '#lib/i18n/localized';
@@ -156,6 +160,43 @@
   const appPasswordKind = $derived(snap?.source_kind === 'Gmail' || snap?.source_kind === 'ICloud');
   const imapFieldsKind = $derived(snap?.source_kind === 'Outlook' || snap?.source_kind === 'Generic');
 
+  // The Outlook source's shared answer — `MailImportSnapshot::
+  // outlook_source_possibility` over the machine's LIVE snapshot
+  // (`mailbox-migration.md`; `mail-settings.md` § Errors & edge cases, *The
+  // in-page predicates*; `ui/README.md` § Offer only what is possible, rule 2).
+  // Web has no Microsoft sign-in transport until the relay lands, so the answer
+  // is absent here: Outlook leaves the source picker and no sign-in button is
+  // painted — nothing on this app could make it work. `snap` is read so the
+  // answer re-reads on every snapshot.
+  const outlookAnswer = $derived.by(() =>
+    snap && machine ? (machine.outlookSourcePossibility() as Possibility) : null,
+  );
+  const outlookPaint = $derived(paintAnswer(outlookAnswer));
+
+  // Next off Scope and the Start, from the machine's own answers (zero
+  // mailboxes, a malformed since date — `mailbox-migration.md` § Wizard
+  // steps): Next over the typed since-date draft, which only Next commits.
+  // Each press asks the same answer again (`refuseUnless`).
+  function scopeNextAnswer(): Possibility | null {
+    return snap && machine ? (machine.nextPossibility(dateFromInput) as Possibility) : null;
+  }
+  // Reads `snap` and `dateFromInput`, so it repaints on either.
+  const scopeNextPaint = $derived.by(() => paintAnswer(scopeNextAnswer()));
+  const startPaint = $derived(paintAnswer(snap && machine ? (machine.startPossibility() as Possibility) : null));
+
+  /** Rule 6 at the press: `true` (refused, its reason on `error-message`)
+   *  unless `answer` is possible. With no machine the caller goes on to
+   *  `dispatch`, whose unbuilt refusal says why (rule 7). */
+  function refuseUnless(answer: Possibility | null): boolean {
+    const verdict = refusal(answer);
+    if (!verdict.refused) return false;
+    if (verdict.reason) error = resolveLocalized(verdict.reason);
+    return true;
+  }
+  // The picker's kinds are the shared `SOURCE_KINDS` over wasm (read once a
+  // snapshot exists, i.e. once wasm is loaded — the picker paints only then).
+  const sourceKinds = $derived(importSourceKindsOffered(snap ? importSourceKinds() : [], outlookAnswer));
+
   // The source the account remembers (`mailbox-migration.md` § Credential
   // handling): the machine prefilled the Source step, so this visit's drafts
   // fill from it once — never over what the user typed — and empty when a
@@ -229,7 +270,12 @@
   // Scope→Confirm advance can never observe a half-committed scope (the tui
   // `MailImportDispatch` rule).
   async function dispatch(...actions: unknown[]): Promise<void> {
-    if (!machine) return;
+    if (!machine) {
+      // Rule 7: a gesture whose machine is missing refuses with the shared
+      // unbuilt reason on the page's `error-message`, never silently.
+      error = resolveLocalized(blockedReason(mailUsableUnbuilt()));
+      return;
+    }
     try {
       for (const action of actions) await machine.dispatch(action);
       applySnapshot();
@@ -269,6 +315,7 @@
   // buffer falls back to the machine's own default rather than sending a
   // stale/zero value (tui's `scope_next_actions`).
   function scopeNext(): void {
+    if (machine && refuseUnless(scopeNextAnswer())) return;
     const mb = Number.parseInt(maxSizeInput.trim(), 10);
     const bytes = Number.isInteger(mb) && mb > 0 ? mb * MB : (snap?.max_size_bytes ?? MB);
     void dispatch(
@@ -367,10 +414,10 @@
           onchange={(e) => selectSourceKind((e.currentTarget as HTMLSelectElement).value)}
           disabled={busy}
         >
-          <option value="Gmail">{t.mail_import.source_gmail}</option>
-          <option value="Outlook">{t.mail_import.source_outlook}</option>
-          <option value="ICloud">{t.mail_import.source_icloud}</option>
-          <option value="Generic">{t.mail_import.source_generic}</option>
+          <!-- Outlook is offered only where its shared answer is not absent. -->
+          {#each sourceKinds as k (k)}
+            <option value={k}>{sourceLabel(k)}</option>
+          {/each}
         </select>
 
         <!-- Painted for every provider kind — nothing in ui.yaml scopes
@@ -399,12 +446,18 @@
           </p>
         {/if}
 
-        {#if snap.source_kind === 'Outlook'}
-          <!-- Painted because ui.yaml requires the element exist, but never
-               actuable: no app wires the Microsoft Graph dance yet
-               (mailbox-migration.md's own "Not in scope" list). The IMAP
-               fallback below is the real path for an Outlook account. -->
-          <button class="btn" data-testid={IDS.MAIL_IMPORT_SOURCE_OAUTH_BUTTON} disabled>
+        {#if snap.source_kind === 'Outlook' && outlookPaint.shown}
+          <!-- Painted from the shared Outlook answer (absent on web: no
+               Microsoft sign-in transport yet, so never painted here). Web has
+               no sign-in handler, so even a shown button stays disabled; its
+               blocked reason rides the title. The IMAP fallback below is the
+               real path for an Outlook account. -->
+          <button
+            class="btn"
+            data-testid={IDS.MAIL_IMPORT_SOURCE_OAUTH_BUTTON}
+            disabled
+            title={outlookPaint.reason ? resolveLocalized(outlookPaint.reason) : undefined}
+          >
             {t.mail_import.source_oauth_button}
           </button>
         {/if}
@@ -518,10 +571,19 @@
           <button class="btn" data-testid={IDS.WIZARD_BACK_BUTTON} onclick={() => dispatch('Back')} disabled={busy}>
             {t.mail_import.back}
           </button>
-          <button class="btn primary" data-testid={IDS.WIZARD_NEXT_BUTTON} onclick={scopeNext} disabled={busy}>
+          <button
+            class="btn primary"
+            data-testid={IDS.WIZARD_NEXT_BUTTON}
+            onclick={scopeNext}
+            disabled={busy || scopeNextPaint.disabled}
+            title={scopeNextPaint.reason ? resolveLocalized(scopeNextPaint.reason) : undefined}
+          >
             {t.mail_import.next}
           </button>
         </div>
+        {#if scopeNextPaint.reason}
+          <p class="muted small">{resolveLocalized(scopeNextPaint.reason)}</p>
+        {/if}
       </div>
     {/if}
 
@@ -534,10 +596,22 @@
           <button class="btn" data-testid={IDS.WIZARD_BACK_BUTTON} onclick={() => dispatch('Back')} disabled={busy}>
             {t.mail_import.back}
           </button>
-          <button class="btn primary" data-testid={IDS.MAIL_IMPORT_START_BUTTON} onclick={() => dispatch('Start')} disabled={busy}>
+          <button
+            class="btn primary"
+            data-testid={IDS.MAIL_IMPORT_START_BUTTON}
+            onclick={() => {
+              if (machine && refuseUnless(machine.startPossibility() as Possibility)) return;
+              void dispatch('Start');
+            }}
+            disabled={busy || startPaint.disabled}
+            title={startPaint.reason ? resolveLocalized(startPaint.reason) : undefined}
+          >
             {t.mail_import.start_button}
           </button>
         </div>
+        {#if startPaint.reason}
+          <p class="muted small">{resolveLocalized(startPaint.reason)}</p>
+        {/if}
       </div>
     {/if}
 

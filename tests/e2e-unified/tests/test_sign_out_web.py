@@ -677,9 +677,18 @@ def test_web_sign_out_residue_outlives_a_reload_and_a_clean_reload_says_nothing(
     load's silent re-sweep fails and the view comes back with its line; holder
     gone → the load's re-sweep erases the store and the view never appears.
 
-    The holder lives in a SECOND tab, opened on the signed-out screen before the
-    sign-in, because a connection in the signing-out tab would die with its
-    reload and take the fault with it.
+    The holder lives in a SECOND tab, because a connection in the signing-out
+    tab would die with its reload and take the fault with it. That tab runs no
+    app (`open_lock_holder_tab`): a second SPA tab adopts the identity the first
+    one signs in, keeps it after the sign-out and wins the account's
+    conversations-engine role once the signing-out tab lets go, so the reload's
+    sweep refuses with the other-window line instead of saying what is left.
+    That race failed this test about three runs in four.
+    The serving-presence lock now closes the gap it showed — a second SPA tab
+    declares the account, so the signing-out tab is refused outright beside it
+    (`account-scoping.md` § Concurrent instances → *Web's serving-presence
+    lock*, witnessed by `test_sign_out_refused_other_tab_web.py`) — and an
+    app-less holder stays the way to keep a store held across the sign-out.
     """
     from conftest import _make_user
     from i18n.strings import S
@@ -692,7 +701,7 @@ def test_web_sign_out_residue_outlives_a_reload_and_a_clean_reload_says_nothing(
     actor = user["actor_id_hex"]
     store = f"{ACCOUNT_STORE_ROOT}/{actor}"
     driver = app.driver
-    holder = driver.open_same_context_tab()
+    holder = driver.open_lock_holder_tab()
     expected = S.settings.sign_out_residue(count="1")
 
     def await_line(what: str) -> None:

@@ -1,0 +1,275 @@
+# The main use cases — what most people do with Fauna, as data.
+#
+# Owner of the schema, the rules a use case obeys and the score:
+# docs/goal/behavior/main-use-cases.md. This file holds the rows only.
+#
+#   just ui-score                 # destinations and pages by score
+#   just ui-score <page>          # one page's elements by score and band
+#   just ui-score --unscored      # interactive elements no use case touches
+#   just ui-score --check         # the refusals (the UI lint runs them)
+#
+# A step is a gesture on an element, `{page, element}`: `page` is a ui.yaml page
+# key, an onboarding stage key, or `navigation` for the primary-nav tabs and the
+# shell rail rows (`settings-nav-row[<page>]`, `admin-nav-row[<page>]`,
+# `account-settings-link`). An indexed element is written `base[<what>]` and
+# scored as its base id. A `user` or `admin` use case starts on the feed after
+# sign-in; a `new-user` use case starts at the first onboarding stage.
+#
+# `journey` is the test that walks the use case, relative to this directory. It
+# carries `@pytest.mark.use_case("<id>")` and ends with
+# `assert_use_case_walked(<driver>, "<id>")` (helpers/use_case_walk.py), which
+# compares the gestures the driver recorded with `steps`.
+# `pending_journeys` lists the use cases no test walks by gestures yet: their
+# journey file does not exist, or exists but reaches a step by a shortcut and so
+# carries no marker. `--check` tolerates a missing file or a missing marker only
+# for those, and refuses an entry whose journey now carries its marker. The list
+# empties as the journey rows land, and the tolerance goes with it.
+#
+# Weights are frequency (5 daily … 1 once per account) × earliness (3 first
+# session, 2 first week, 1 later): a judgement, reviewed like any other line.
+
+pending_journeys:
+
+use_cases:
+  - id: join-a-nest
+    title: Ask to join a nest and get in once the admin approves
+    actor: new-user
+    reviewer: true
+    frequency: 1
+    earliness: 3
+    journey: tests/test_pending_invite_journey.py
+    steps:
+      - {page: identity_choice, element: create-identity-button}
+      - {page: identity_created, element: identity-continue-button}
+      - {page: recovery_kit, element: recovery-kit-confirm-button}
+      - {page: handle_entry, element: handle-input}
+      - {page: handle_entry, element: handle-check-button}
+      - {page: handle_entry, element: handle-entry-continue-button}
+      - {page: invite_request, element: invite-request-submit-button}
+      - {page: trust_prompt, element: trust-box-skip-button}
+
+  - id: claim-a-nest
+    title: Claim a fresh nest as its first admin
+    actor: admin
+    reviewer: false
+    frequency: 1
+    earliness: 3
+    journey: tests/test_mail_enable_at_admin_claim.py
+    steps:
+      - {page: identity_choice, element: create-identity-button}
+      - {page: identity_created, element: identity-continue-button}
+      - {page: recovery_kit, element: recovery-kit-confirm-button}
+      - {page: handle_entry, element: handle-input}
+      - {page: handle_entry, element: handle-check-button}
+      - {page: handle_entry, element: handle-entry-continue-button}
+      - {page: claim_code, element: claim-code-input}
+      - {page: claim_code, element: claim-code-submit-button}
+      - {page: nat_mode_choice, element: nat-mode-confirm-button}
+      - {page: trust_prompt, element: trust-box-skip-button}
+
+  - id: save-recovery-kit
+    title: Create an account and keep its recovery kit
+    actor: new-user
+    reviewer: false
+    frequency: 1
+    earliness: 3
+    journey: tests/test_recovery_kit_create_journey.py
+    steps:
+      - {page: identity_choice, element: create-identity-button}
+      - {page: identity_created, element: identity-continue-button}
+      - {page: recovery_kit, element: recovery-kit-confirm-button}
+      - {page: handle_entry, element: handle-input}
+      - {page: handle_entry, element: handle-check-button}
+      - {page: handle_entry, element: handle-entry-continue-button}
+      - {page: trust_prompt, element: trust-box-skip-button}
+
+  - id: read-feed-and-post
+    title: Read the feed and publish a post
+    actor: user
+    reviewer: true
+    frequency: 5
+    earliness: 3
+    journey: tests/test_feed.py
+    steps:
+      - {page: feed, element: compose-text-field}
+      - {page: feed, element: post-submit-button}
+
+  - id: message-someone
+    title: Start a conversation with someone and send a message
+    actor: user
+    reviewer: true
+    frequency: 5
+    earliness: 3
+    journey: tests/test_use_case_user_journeys.py
+    steps:
+      - {page: navigation, element: conversations-tab}
+      - {page: conversations, element: new-conversation-button}
+      - {page: conversations, element: recipient-picker-input}
+      - {page: conversations, element: dm-text-field}
+      - {page: conversations, element: dm-send-button}
+
+  - id: send-a-mail
+    title: Send a mail to someone outside the nest
+    actor: user
+    reviewer: true
+    frequency: 5
+    earliness: 3
+    journey: tests/test_mail_client_send.py
+    steps:
+      - {page: navigation, element: conversations-tab}
+      - {page: conversations, element: new-conversation-button}
+      - {page: conversations, element: recipient-picker-input}
+      - {page: conversations, element: topic-toggle-button}
+      - {page: conversations, element: subject-input}
+      - {page: conversations, element: dm-text-field}
+      - {page: conversations, element: dm-send-button}
+
+  - id: add-a-contact
+    title: Add a person on the same nest as a contact
+    actor: user
+    reviewer: true
+    frequency: 3
+    earliness: 3
+    journey: tests/test_use_case_user_journeys.py
+    steps:
+      - {page: navigation, element: contacts-tab}
+      - {page: contacts, element: contact-actor-id-field}
+      - {page: contacts, element: contact-actor-id-lookup}
+      - {page: contacts, element: contacts-add-button}
+
+  - id: add-a-calendar-event
+    title: Add an event to the calendar
+    actor: user
+    reviewer: false
+    frequency: 4
+    earliness: 2
+    journey: tests/test_events_fresh_account.py
+    steps:
+      - {page: navigation, element: events-tab}
+      - {page: events, element: new-event-btn}
+      - {page: events, element: event-summary}
+      - {page: events, element: event-dtstart}
+      - {page: events, element: event-dtend}
+      - {page: events, element: create-event}
+
+  - id: share-a-folder
+    title: Share a folder with another person
+    actor: user
+    reviewer: false
+    frequency: 3
+    earliness: 2
+    journey: tests/test_folder_cross_nest_share_picker.py
+    steps:
+      - {page: navigation, element: settings-tab}
+      - {page: navigation, element: "settings-nav-row[folders]"}
+      - {page: folders, element: folder-add-button}
+      - {page: folders, element: wizard-name-input}
+      - {page: folders, element: wizard-next-button}
+      - {page: folders, element: wizard-next-button}
+      - {page: folders, element: wizard-create-button}
+      - {page: folders, element: "folder-row[<folder>]"}
+      - {page: folders, element: folder-share-button}
+      - {page: folders, element: recipient-picker-input}
+      - {page: folders, element: folder-share-confirm}
+
+  - id: invite-someone
+    title: Approve a person's request to join the nest
+    actor: admin
+    reviewer: false
+    frequency: 2
+    earliness: 2
+    journey: tests/test_use_case_admin_journeys.py
+    steps:
+      - {page: navigation, element: admin-tab}
+      - {page: navigation, element: "admin-nav-row[admin-users]"}
+      - {page: admin-users, element: "invite-request-row-approve-button[<request>]"}
+
+  - id: turn-mail-on
+    title: Turn mail on for the nest
+    actor: admin
+    reviewer: false
+    frequency: 1
+    earliness: 3
+    journey: tests/test_use_case_admin_journeys.py
+    steps:
+      - {page: navigation, element: admin-tab}
+      - {page: navigation, element: "admin-nav-row[admin-mail]"}
+      - {page: admin-mail, element: admin-mail-enabled-toggle}
+
+  - id: back-up-and-restore
+    title: Back up a folder and get a file back from the backup
+    actor: user
+    reviewer: false
+    frequency: 2
+    earliness: 2
+    journey: tests/test_use_case_backup_journey.py
+    steps:
+      - {page: navigation, element: settings-tab}
+      - {page: navigation, element: "settings-nav-row[folders]"}
+      - {page: folders, element: folder-add-button}
+      - {page: folders, element: wizard-name-input}
+      - {page: folders, element: wizard-next-button}
+      - {page: folders, element: wizard-next-button}
+      - {page: folders, element: wizard-create-button}
+      - {page: folders, element: "folder-row[<folder>]"}
+      - {page: folders, element: folder-location-path-input}
+      - {page: folders, element: folder-location-add-button}
+      - {page: navigation, element: backups-tab}
+      - {page: backups, element: backup-folder-selector}
+      - {page: backups, element: snapshot-create-button}
+      - {page: backups, element: "snapshot-item[<snapshot>]"}
+      - {page: backups, element: "snapshot-file-download-button[<file>]"}
+
+  - id: export-my-data
+    title: Export everything the account holds
+    actor: user
+    reviewer: true
+    frequency: 1
+    earliness: 1
+    journey: tests/test_export_my_data_journey.py
+    steps:
+      - {page: navigation, element: settings-tab}
+      - {page: navigation, element: account-settings-link}
+      - {page: settings, element: settings-export-data-button}
+
+  - id: restore-on-a-new-device
+    title: Get the account back on a new device from the recovery kit
+    actor: new-user
+    reviewer: false
+    frequency: 1
+    earliness: 1
+    journey: tests/test_recovery_kit_restore.py
+    steps:
+      - {page: identity_choice, element: restore-from-recovery-kit-button}
+      - {page: recovery_entry, element: recovery-entry-phrase-field}
+      - {page: recovery_entry, element: recovery-entry-account-field}
+      - {page: recovery_entry, element: recovery-entry-submit-button}
+      - {page: handle_entry, element: handle-check-button}
+      - {page: handle_entry, element: handle-entry-continue-button}
+
+  - id: report-and-block
+    title: Report someone and block them
+    actor: user
+    reviewer: true
+    frequency: 2
+    earliness: 1
+    journey: tests/test_abuse_reporting.py
+    steps:
+      - {page: feed, element: "feed-post-actions-button[<post>]"}
+      - {page: feed, element: feed-post-report-button}
+      - {page: feed, element: report-reason-select}
+      - {page: feed, element: report-block-author-checkbox}
+      - {page: feed, element: report-submit-button}
+
+  - id: sign-out-other-devices
+    title: Sign out everywhere else
+    actor: user
+    reviewer: true
+    frequency: 1
+    earliness: 1
+    journey: tests/test_sessions_page.py
+    steps:
+      - {page: navigation, element: settings-tab}
+      - {page: navigation, element: "settings-nav-row[sessions]"}
+      - {page: sessions, element: sessions-revoke-others-button}
+      - {page: sessions, element: sessions-revoke-others-confirm-button}

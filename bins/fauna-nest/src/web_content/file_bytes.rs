@@ -138,6 +138,85 @@ pub(crate) async fn fetch_decoded(
     Ok(crate::backup::decode_blob(&raw, at_rest_key).ok())
 }
 
+/// Pages read through [`fetch_decoded`], so a withhold binds a page exactly as
+/// it binds the manifest and every chunk.
+pub(crate) struct GatedPages<'a> {
+    pub db: &'a crate::db::CacheDb,
+    pub store: &'a Arc<dyn BlobStoreBackend>,
+    pub at_rest_key: Option<&'a BackupKey>,
+}
+
+impl crate::manifest_walk::PageSource for GatedPages<'_> {
+    type Error = FileOpenError;
+
+    fn page(
+        &self,
+        hash: &ContentHash,
+    ) -> impl std::future::Future<Output = Result<Option<Vec<u8>>, FileOpenError>> + Send {
+        let hash = *hash;
+        async move { fetch_decoded(self.db, self.store, self.at_rest_key, &hash).await }
+    }
+}
+
+/// A walk error as this walk's refusal: an absent page is a missing
+/// manifest-class blob, a page that fails the walk's checks a decode failure.
+impl From<crate::manifest_walk::WalkError<FileOpenError>> for FileOpenError {
+    fn from(e: crate::manifest_walk::WalkError<FileOpenError>) -> Self {
+        use crate::manifest_walk::WalkError;
+        match e {
+            WalkError::MissingPage(h) => Self::MissingManifest(hex::encode(h.digest())),
+            WalkError::Source(e) => e,
+            e @ WalkError::Invalid(_) => Self::Decode(e.to_string()),
+        }
+    }
+}
+
+/// Walk a paged root's pages into the single-manifest view the rest of this
+/// file reads: every page fetched (through the withhold gate) and verified
+/// against the root, its entries concatenated in file order. Without
+/// `seal_root` a sealed root yields its store keys and sizes only; with it,
+/// the plaintext chunk hashes and the opened `file_hash` (a wrong root is a
+/// [`FileOpenError::Decode`]).
+pub(crate) async fn flatten_paged(
+    db: &crate::db::CacheDb,
+    store: &Arc<dyn BlobStoreBackend>,
+    at_rest_key: Option<&BackupKey>,
+    paged_root: &ChunkManifest,
+    seal_root: Option<&[u8; 32]>,
+) -> Result<ChunkManifest, FileOpenError> {
+    let walk = fauna_core::manifest_paging::PageWalk::open(paged_root.clone(), seal_root)
+        .map_err(|e| FileOpenError::Decode(format!("{e:#}")))?;
+    let src = GatedPages {
+        db,
+        store,
+        at_rest_key,
+    };
+    let pages = crate::manifest_walk::open_pages(&walk, 0..walk.page_count(), &src).await?;
+    let sealed = paged_root.is_sealed();
+    let mut chunk_hashes = Vec::new();
+    let mut chunk_sizes = Vec::new();
+    let mut stored = Vec::new();
+    for page in pages {
+        if let Some(hashes) = page.chunk_hashes {
+            chunk_hashes.extend(hashes);
+        }
+        chunk_sizes.extend(page.chunk_sizes);
+        stored.extend(page.store_keys);
+    }
+    Ok(ChunkManifest {
+        file_hash: walk
+            .file_hash()
+            .unwrap_or_else(fauna_core::chunk::blank_file_hash),
+        total_size: walk.total_size(),
+        chunk_hashes,
+        chunk_sizes,
+        stored_hashes: sealed.then_some(stored),
+        sealed_hashes: None,
+        min_reader: None,
+        pages: None,
+    })
+}
+
 /// Read a synced file's plaintext bytes given its manifest hash.
 ///
 /// `content_keys` are the candidate M2 content-key generations for this file's
@@ -171,6 +250,22 @@ pub async fn read_file_by_manifest(
     manifest
         .check_min_reader()
         .map_err(|e| FileOpenError::Decode(e.to_string()))?;
+    // Bounded first, before any page or chunk is read (see below for why the
+    // declared size is capped at all).
+    if manifest.total_size > MAX_SERVED_FILE_BYTES {
+        return Err(FileOpenError::Oversized);
+    }
+    // A paged root is read through the one walk (`file-sync.md` § Paged
+    // manifests): its pages, each verified against the root, flatten into the
+    // single-manifest view the rest of this walk reads — store keys and sizes
+    // here, the plaintext hashes per candidate key below. Never a chunkless
+    // file.
+    let paged_root = manifest;
+    let manifest = if paged_root.is_paged() {
+        flatten_paged(db, store, at_rest_key, &paged_root, None).await?
+    } else {
+        paged_root.clone()
+    };
 
     // The manifest is uploader-authored and reachable by an anonymous
     // GET, and nothing about its chunk list is self-verifying: it may name one
@@ -225,7 +320,11 @@ pub async fn read_file_by_manifest(
     // (`SEALED_CHUNK_OVERHEAD`).
     let mut ciphertexts = Vec::with_capacity(manifest.chunk_hashes.len());
     let mut read: u64 = 0;
-    for store_key in manifest.store_keys() {
+    // A paged root was flattened above, so this list is the file's.
+    let store_keys = manifest
+        .store_keys()
+        .map_err(|e| FileOpenError::Decode(e.to_string()))?;
+    for store_key in store_keys {
         let chunk = fetch_decoded(db, store, at_rest_key, &store_key)
             .await?
             .ok_or_else(|| FileOpenError::MissingChunk(hex::encode(store_key.digest())))?;
@@ -244,7 +343,15 @@ pub async fn read_file_by_manifest(
         // A sealed-hash manifest hides its plaintext hashes too; open them
         // under the same root before they are used as AEAD salts. Fails closed
         // on the wrong root rather than falling through to blanked fields.
-        let opened = if manifest.is_sealed() {
+        // A paged root's hashes are opened page by page under the root, which
+        // also opens its `file_hash` (sealed under the page hashes).
+        let opened = if paged_root.is_paged() {
+            match flatten_paged(db, store, at_rest_key, &paged_root, Some(&root)).await {
+                Ok(m) => m,
+                Err(e @ FileOpenError::Withheld(_)) => return Err(e),
+                Err(_) => continue,
+            }
+        } else if manifest.is_sealed() {
             match manifest.clone().unseal_hashes(&root) {
                 Ok(m) => m,
                 Err(_) => continue,
@@ -669,7 +776,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(manifest.chunk_hashes.len(), 1, "fixture is one chunk");
-        let sealed_len = fetch_decoded(&db(), &store, None, &manifest.store_keys()[0])
+        let sealed_len = fetch_decoded(&db(), &store, None, &manifest.store_keys().unwrap()[0])
             .await
             .unwrap()
             .unwrap()
@@ -711,6 +818,7 @@ mod tests {
             stored_hashes: None,
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
         let crafted = put_manifest(&store, &manifest).await;
         let err = read_file_by_manifest(&db(), &store, None, &crafted, &[])
@@ -737,6 +845,7 @@ mod tests {
                 stored_hashes: stored.clone(),
                 sealed_hashes: None,
                 min_reader: None,
+                pages: None,
             };
             let crafted = put_manifest(&store, &manifest).await;
             let key = [0xC5u8; 32];
@@ -796,5 +905,79 @@ mod tests {
                 .expect("a raw body addressing the recorded hash is served");
             assert_eq!(out, content, "the public file reads back byte-for-byte");
         }
+    }
+}
+
+#[cfg(test)]
+mod paged_tests {
+    use super::*;
+    use crate::blob_store::DiskBlobStore;
+    use crate::manifest_walk::tests::seed_paged_file;
+
+    fn store() -> (Arc<dyn BlobStoreBackend>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn BlobStoreBackend> = Arc::new(DiskBlobStore::new(dir.path()).unwrap());
+        (store, dir)
+    }
+
+    fn db() -> Arc<crate::db::CacheDb> {
+        Arc::new(crate::db::CacheDb::open_in_memory().unwrap())
+    }
+
+    fn content() -> Vec<u8> {
+        (0..300u32).map(|i| (i as u8).wrapping_mul(13)).collect()
+    }
+
+    /// A paged file is served whole through the one walk — its chunks read
+    /// across every page boundary, in file order, and verified against the
+    /// root's `file_hash` — never as an empty file.
+    #[tokio::test]
+    async fn a_paged_plaintext_file_reads_back_across_its_page_boundaries() {
+        let (store, _dir) = store();
+        let file = seed_paged_file(&store, None, None, &content(), 16, None).await;
+        assert!(file.page_chunk_counts.len() >= 3, "several pages");
+        let out = read_file_by_manifest(&db(), &store, None, &file.root.digest(), &[])
+            .await
+            .unwrap();
+        assert_eq!(out, file.content);
+    }
+
+    /// A sealed paged file opens with its content key — the pages' hashes and
+    /// the root's `file_hash` opened under it — and stays dark without one.
+    #[tokio::test]
+    async fn a_sealed_paged_file_opens_only_with_its_key() {
+        let (store, _dir) = store();
+        let key = [0x3Cu8; 32];
+        let file = seed_paged_file(&store, None, None, &content(), 16, Some(&key)).await;
+        let root = file.root.digest();
+        assert!(matches!(
+            read_file_by_manifest(&db(), &store, None, &root, &[]).await,
+            Err(FileOpenError::Sealed)
+        ));
+        let wrong = [0x01u8; 32];
+        assert!(matches!(
+            read_file_by_manifest(&db(), &store, None, &root, &[&wrong[..]]).await,
+            Err(FileOpenError::Sealed)
+        ));
+        let out = read_file_by_manifest(&db(), &store, None, &root, &[&wrong[..], &key[..]])
+            .await
+            .unwrap();
+        assert_eq!(out, file.content);
+    }
+
+    /// A page that is not held is a missing manifest-class blob — the walk
+    /// refuses, never serves the file short.
+    #[tokio::test]
+    async fn a_missing_page_refuses_the_file() {
+        let (store, _dir) = store();
+        let file = seed_paged_file(&store, None, None, &content(), 16, None).await;
+        store.delete(&file.pages[1]).await.unwrap();
+        let err = read_file_by_manifest(&db(), &store, None, &file.root.digest(), &[])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, FileOpenError::MissingManifest(h) if *h == hex::encode(file.pages[1].digest())),
+            "{err:?}"
+        );
     }
 }

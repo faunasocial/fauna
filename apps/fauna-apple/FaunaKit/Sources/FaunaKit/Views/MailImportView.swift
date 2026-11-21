@@ -210,7 +210,7 @@ public struct MailImportView: View {
                 get: { draftKind },
                 set: { selectKind($0) }
             )) {
-                ForEach(Self.sourceKinds, id: \.self) { kind in
+                ForEach(sourceKindOptions, id: \.self) { kind in
                     Text(kindLabel(kind)).tag(kind)
                 }
             }
@@ -218,9 +218,9 @@ public struct MailImportView: View {
             .automationSelect(
                 Ids.mailImportSourcePicker,
                 value: { kindLabel(draftKind) },
-                options: { Self.sourceKinds.map(kindLabel) },
+                options: { sourceKindOptions.map(kindLabel) },
                 set: { label in
-                    if let k = Self.sourceKinds.first(where: { kindLabel($0) == label }) {
+                    if let k = sourceKindOptions.first(where: { kindLabel($0) == label }) {
                         selectKind(k)
                     }
                 })
@@ -313,26 +313,26 @@ public struct MailImportView: View {
     }
 
     /// The Outlook source's Microsoft sign-in: the button, the code the grant is
-    /// waiting on beside **Open in browser**, and the sentence under them. A
-    /// deployment without a registration paints the unavailable sentence and
-    /// keeps the button inert (`MailImportSnapshot.microsoftSigninAvailable`).
+    /// waiting on beside **Open in browser**, and the sentence under them —
+    /// painted from the shared `outlook_source_possibility()`: absent → nothing
+    /// (a build that can never sign in), blocked → the button disabled with the
+    /// unavailable reason beside it, possible → live.
     @ViewBuilder
     private var microsoftSignInRows: some View {
-        let available = vm.snapshot?.microsoftSigninAvailable ?? false
-        Button(L.mailImport.sourceOauthButton) {
-            Task { await vm.signInWithMicrosoft(username: draftUsername) }
+        let answer = vm.outlookAnswer
+        if answer.isShown {
+            Button(L.mailImport.sourceOauthButton) {
+                Task { await vm.signInWithMicrosoft(username: draftUsername) }
+            }
+            .disabled(vm.microsoftSignInInFlight)
+            .accessibilityIdentifier(Ids.mailImportSourceOauthButton)
+            .automationActivate(
+                Ids.mailImportSourceOauthButton,
+                perform: { Task { await vm.signInWithMicrosoft(username: draftUsername) } })
+            .faunaPossible(answer)
+            FaunaPossibilityReason(answer)
         }
-        .disabled(!available || vm.microsoftSignInInFlight)
-        .accessibilityIdentifier(Ids.mailImportSourceOauthButton)
-        .automationActivate(
-            Ids.mailImportSourceOauthButton,
-            isEnabled: { available && !vm.microsoftSignInInFlight },
-            perform: { Task { await vm.signInWithMicrosoft(username: draftUsername) } })
-        if !available {
-            Text(L.mailImport.microsoftUnavailable)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        } else if let view = vm.snapshot?.microsoftSignin,
+        if answer.isPossible, let view = vm.snapshot?.microsoftSignin,
                   view.state == .waiting, !view.userCode.isEmpty {
             // The code and the address each ride alone as attributes — the
             // observables the cross-app journey reads (tui's `.attr("code", …)`).
@@ -422,7 +422,11 @@ public struct MailImportView: View {
                     Button(L.mailImport.next) { scopeNext() }
                         .accessibilityIdentifier(Ids.wizardNextButton)
                         .automationActivate(Ids.wizardNextButton) { scopeNext() }
+                        // Blocked while no mailbox is selected or the typed since
+                        // date is malformed (the shared answer over the draft).
+                        .faunaPossible(vm.nextAnswer(dateFrom: draftDateFrom))
                 }
+                FaunaPossibilityReason(vm.nextAnswer(dateFrom: draftDateFrom))
             }
         }
     }
@@ -434,14 +438,17 @@ public struct MailImportView: View {
             automationText(Ids.mailImportConfirmSummary, confirmSummary)
             HStack {
                 backButton
-                Button(L.mailImport.startButton) { Task { await vm.dispatch(.start) } }
+                Button(L.mailImport.startButton) { Task { await vm.pressStart() } }
                     .accessibilityIdentifier(Ids.mailImportStartButton)
                     .automationActivate(Ids.mailImportStartButton) {
-                        Task { await vm.dispatch(.start) }
+                        Task { await vm.pressStart() }
                     }
                     // The durable commit — opens the `import_sessions` row.
                     .faunaGate("fauna.bridges.start_import_session")
+                    // The scope's answer, re-asked at Start.
+                    .faunaPossible(vm.startAnswer)
             }
+            FaunaPossibilityReason(vm.startAnswer)
         }
     }
 
@@ -682,11 +689,12 @@ public struct MailImportView: View {
         Task { await vm.dispatch(.setImportDuplicates(value: next)) }
     }
 
-    /// Step 2→3: commit both Scope drafts, then advance. `scopeNextActions`
-    /// also owns the unparseable-max-size fallback.
+    /// Step 2→3: commit both Scope drafts, then advance — refused with the
+    /// painted answer's reason when it cannot (`MailImportVM.pressScopeNext`).
     private func scopeNext() {
-        let actions = scopeNextActions(dateFrom: draftDateFrom, maxSizeInput: draftMaxSizeMb)
-        Task { await vm.dispatchSequence(actions) }
+        let from = draftDateFrom
+        let size = draftMaxSizeMb
+        Task { await vm.pressScopeNext(dateFrom: from, maxSizeInput: size) }
     }
 
     /// Step 5's Resume as one ordered dispatch — the shared `resumeActions`
@@ -774,6 +782,14 @@ public struct MailImportView: View {
     // MARK: - Derived text
 
     private static let sourceKinds: [ImportSourceKind] = [.gmail, .outlook, .iCloud, .generic]
+
+    /// The picker's options: every kind, except Outlook on a build whose shared
+    /// answer is absent (`ui/README.md` § Offer only what is possible, rule 2:
+    /// what can never work here is not shown) — tui's `source_kind_options`.
+    private var sourceKindOptions: [ImportSourceKind] {
+        let outlookShown = vm.outlookAnswer.isShown
+        return Self.sourceKinds.filter { $0 != .outlook || outlookShown }
+    }
     private static let tlsModes: [ImportTlsMode] = [.implicit, .startTls]
 
     private func kindLabel(_ kind: ImportSourceKind) -> String {

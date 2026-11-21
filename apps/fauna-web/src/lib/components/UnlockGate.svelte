@@ -20,7 +20,9 @@
     identityStoreUnlockWith,
     identityStoreInstallHandedKey,
     identityStoreStartOverNow,
+    passphrasePossibility,
   } from '#lib/wasm-launch';
+  import { askPossibility, formGate, formRefusal } from '#lib/form-gate';
   import { requestStoreKeyFromTabs } from '#lib/identity-store';
   import { hasPasskeyWrap, passkeysPossible, unlockWithPasskey } from '#lib/identity-passkey';
   import { t } from '#lib/i18n/strings';
@@ -42,6 +44,15 @@
   let resetConfirming = $state(false);
   let passkeyOffered = $state(false);
   let stopHandOff: (() => void) | null = null;
+
+  // `unlock-submit-button` paints from the shared
+  // `fauna_client_accounts::passphrase_possibility` (empty, then — in create
+  // mode — mismatch; `docs/goal/ui/README.md` § Offer only what is possible,
+  // rule 4's form case) and `submit` asks it again: the gate keeps no
+  // emptiness or mismatch check of its own. The launch chunk is up before
+  // either form is painted (`identityStoreGate()` brings it up).
+  const submitAnswer = () => passphrasePossibility(passphrase, gate === 'create' ? confirm : null);
+  let submitGate = $derived(formGate(askPossibility(submitAnswer)));
 
   function open() {
     stopHandOff?.();
@@ -93,12 +104,9 @@
   async function submit() {
     if (busy || (gate !== 'create' && gate !== 'unlock')) return;
     error = '';
-    if (!passphrase) {
-      error = t.unlock.error_empty;
-      return;
-    }
-    if (gate === 'create' && passphrase !== confirm) {
-      error = t.unlock.error_mismatch;
+    const refusal = formRefusal(askPossibility(submitAnswer));
+    if (refusal !== null) {
+      error = refusal;
       return;
     }
     busy = true;
@@ -166,7 +174,8 @@
 {#if gate === 'open'}
   {@render children?.()}
 {:else if gate !== 'pending'}
-  <main class="unlock">
+  <!-- `data-root-surface`: test builds only — `#lib/e2e-root-surface`. -->
+  <main class="unlock" data-root-surface={__FAUNA_E2E_AUTOMATION__ ? 'unlock' : undefined}>
     <h1>
       {gate === 'create' ? t.unlock.create_title : t.unlock.unlock_title}
     </h1>
@@ -205,7 +214,8 @@
           class="btn primary"
           data-testid={IDS.UNLOCK_SUBMIT_BUTTON}
           onclick={() => { void submit(); }}
-          disabled={busy}
+          disabled={busy || submitGate.disabled}
+          title={submitGate.reason || undefined}
         >{gate === 'create' ? t.unlock.create_button : t.unlock.unlock_button}</button>
         {#if gate === 'unlock' && passkeyOffered}
           <button

@@ -56,6 +56,7 @@ fn seed_hostile(
         stored_hashes: Some(stored),
         sealed_hashes: None,
         min_reader: None,
+        pages: None,
     };
     let bytes =
         fauna_core::encoding::canonical_encode(&manifest.wire_form(Some(&root)).unwrap()).unwrap();

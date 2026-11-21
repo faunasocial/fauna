@@ -143,7 +143,8 @@ def _require_capture(driver) -> None:
         # before any fixture is seeded and before a file could be written.
         from helpers.windows_session import skip_unless_attached_desktop
         skip_unless_attached_desktop(
-            "the window renders no app content, so a listing shot would be blank"
+            "the window renders no app content, so a listing shot would be blank",
+            input_desktop=False,
         )
 
 

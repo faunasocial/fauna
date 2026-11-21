@@ -546,10 +546,15 @@ public sealed partial class DevicesPage : Page
     private record DeviceRow(
         string Name, string Status, int Index, bool GuardianMarked, bool ThisMarked,
         IReadOnlyList<string> FolderRoleBadges, P2pParticipationPaint? Participation, bool Keyless,
-        string? OwnFingerprint, string DeviceId, bool EditorOpen, string EditorDraft)
+        string? OwnFingerprint, string DeviceId, bool RenameOffered, bool EditorOpen, string EditorDraft)
     {
+        /// <summary><c>device-rename-button</c> — painted from
+        /// <see cref="DevicesRenameEditor.RenameOffered"/> (absent on the nest's
+        /// WebDAV pseudo-device card).</summary>
+        public Visibility RenameButtonVisibility
+            => RenameOffered ? Visibility.Visible : Visibility.Collapsed;
         public Visibility EditorVisibility
-            => EditorOpen ? Visibility.Visible : Visibility.Collapsed;
+            => RenameOffered && EditorOpen ? Visibility.Visible : Visibility.Collapsed;
         /// <summary>The card's UIA Name: the label, or a fallback when it renders
         /// empty (a sealless register, or a seal this reader cannot open —
         /// `render_devices` keeps such a row). WinUI prunes a Name-less panel from
@@ -606,6 +611,7 @@ public sealed partial class DevicesPage : Page
                     _custody.IsKeyless(d.@principal),
                     ownFingerprint,
                     d.deviceId,
+                    DevicesRenameEditor.RenameOffered(_machine, d.deviceId),
                     _rename.IsOpenFor(d.deviceId),
                     _rename.IsOpenFor(d.deviceId) ? _rename.Draft : "");
             })
@@ -686,12 +692,20 @@ public sealed partial class DevicesPage : Page
 
     /// <summary><c>device-rename-button[i]</c> — open the one editor over this card,
     /// prefilled with the machine's <c>DeviceName(deviceId)</c> (the opened name,
-    /// never the painted label with its disambiguating suffix).</summary>
+    /// never the painted label with its disambiguating suffix). Asks
+    /// <see cref="DevicesRenameEditor.RenameOffered"/> again first: a card whose
+    /// rename the nest would always refuse opens no editor.</summary>
     private void RenameOpen_Click(object sender, RoutedEventArgs e)
     {
         if (_machine is null || sender is not Button { DataContext: DeviceRow row })
         {
             ShellLog.Warn("DevicesPage", $"[rename] open dropped: machine={_machine is not null}");
+            return;
+        }
+        if (!DevicesRenameEditor.RenameOffered(_machine, row.DeviceId))
+        {
+            ShellLog.Warn("DevicesPage", "[rename] open dropped: no rename is possible on this row");
+            RenderPage();
             return;
         }
         _rename.Open(row.DeviceId, _machine.DeviceName(row.DeviceId));

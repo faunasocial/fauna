@@ -20,7 +20,7 @@
 use std::io;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::{RefuseUndecodedRequest, encode_frame};
 
@@ -79,7 +79,7 @@ pub(crate) async fn read_frame<R: AsyncReadExt + Unpin>(reader: &mut R) -> io::R
 pub(crate) async fn handle_conn<S, Req, Resp, Ev, H, F>(
     stream: S,
     handler: H,
-    mut event_rx: broadcast::Receiver<Ev>,
+    event_rx: broadcast::Receiver<Ev>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     Req: serde::de::DeserializeOwned + Send + 'static,
@@ -89,8 +89,31 @@ pub(crate) async fn handle_conn<S, Req, Resp, Ev, H, F>(
     F: std::future::Future<Output = Resp> + Send + 'static,
 {
     tracing::debug!("client connected");
-    let (mut reader, mut writer) = tokio::io::split(stream);
+    let (reader, writer) = tokio::io::split(stream);
+    serve_split(reader, writer, handler, Some(event_rx)).await;
+    tracing::debug!("client disconnected");
+}
 
+/// The serve loop of [`handle_conn`] over an already-split stream, with
+/// optional pushed events — what a door that runs its own handshake first
+/// (the conversations-oracle door) drives after admission, so the hang-up
+/// logic below has one copy. Returns when the client has gone or sent a frame
+/// with no readable `id`; a handler still pending then is detached, never
+/// cancelled.
+pub(crate) async fn serve_split<R, W, Req, Resp, Ev, H, F>(
+    mut reader: R,
+    mut writer: W,
+    handler: H,
+    event_rx: Option<broadcast::Receiver<Ev>>,
+) where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+    Req: serde::de::DeserializeOwned + Send + 'static,
+    Resp: serde::Serialize + RefuseUndecodedRequest + Send + 'static,
+    Ev: serde::Serialize + Clone + Send + 'static,
+    H: Fn(Req) -> F + Send + 'static,
+    F: std::future::Future<Output = Resp> + Send + 'static,
+{
     // Both the read loop (responses) and the event forwarder below encode
     // eagerly and hand off owned bytes, so the writer task needs no knowledge
     // of `Resp`/`Ev` and never holds a reference across an await.
@@ -105,36 +128,73 @@ pub(crate) async fn handle_conn<S, Req, Resp, Ev, H, F>(
     });
 
     let event_frame_tx = frame_tx.clone();
-    let event_task = tokio::spawn(async move {
-        loop {
-            match event_rx.recv().await {
-                Ok(evt) => match encode_frame(&evt) {
-                    Ok(frame) => {
-                        if event_frame_tx.send(frame).await.is_err() {
-                            break; // writer task gone (a write already failed)
+    let event_task = event_rx.map(|mut event_rx| {
+        tokio::spawn(async move {
+            loop {
+                match event_rx.recv().await {
+                    Ok(evt) => match encode_frame(&evt) {
+                        Ok(frame) => {
+                            if event_frame_tx.send(frame).await.is_err() {
+                                break; // writer task gone (a write already failed)
+                            }
                         }
-                    }
-                    Err(e) => tracing::warn!("failed to encode event: {e}"),
-                },
-                // A slow client that fell behind: skip the dropped events, keep serving.
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
+                        Err(e) => tracing::warn!("failed to encode event: {e}"),
+                    },
+                    // A slow client that fell behind: skip the dropped events, keep serving.
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        })
+    });
+
+    // The one reader of the client's half. It runs as its own task so that
+    // `read_frame` is never cancelled (see above) AND so that the client
+    // hanging up is seen while a handler is still running: the serve loop
+    // below awaits the handler, and a handler that never returns — wedged on
+    // a lock — used to keep the loop from ever reading the EOF, holding the
+    // socket for good (42,709 dead connections on one agent, 2026-11-19).
+    // `hung_up` flips when the reader stops: EOF, a read error, an oversized
+    // frame. A client never half-closes (the clients shut down both ways), so
+    // EOF is the client gone. Frames read ahead of the loop queue up to
+    // `WRITE_QUEUE_DEPTH`, past which the reader waits, as the old loop did.
+    let (req_tx, mut req_rx) = mpsc::channel::<Vec<u8>>(WRITE_QUEUE_DEPTH);
+    let (hung_up_tx, mut hung_up) = watch::channel(false);
+    let reader_task = tokio::spawn(async move {
+        while let Ok(payload) = read_frame(&mut reader).await {
+            if req_tx.send(payload).await.is_err() {
+                return; // the serve loop ended first
             }
         }
+        let _ = hung_up_tx.send(true);
     });
 
     // Whatever a handler ties to this connection
     // (`conn_scope::hold_for_connection`) lives until the loop below ends — the
-    // client closing, or a frame we cannot read — and drops with `scope`.
+    // client closing, or a frame we cannot read — and is dropped there by
+    // `scope.close()`, even while a detached handler still holds the scope.
     let scope = std::sync::Arc::new(crate::conn_scope::ConnectionScope::default());
 
-    loop {
-        let payload = match read_frame(&mut reader).await {
-            Ok(p) => p,
-            Err(_) => break, // client closed / EOF / oversized
-        };
+    'serve: while let Some(payload) = req_rx.recv().await {
         let resp = match crate::decode_payload::<Req>(&payload) {
-            Ok(req) => scope.run(handler(req)).await,
+            Ok(req) => {
+                let scope = std::sync::Arc::clone(&scope);
+                let fut = handler(req);
+                let mut call = Box::pin(async move { scope.run(fut).await });
+                tokio::select! {
+                    biased;
+                    resp = &mut call => resp,
+                    _ = hung_up.wait_for(|gone| *gone) => {
+                        // The client is gone and nobody waits for this answer.
+                        // The handler is never cancelled mid-way (it may be
+                        // half through a write): it finishes on its own and
+                        // its answer is dropped, while the connection is
+                        // released now.
+                        tokio::spawn(call);
+                        break 'serve;
+                    }
+                }
+            }
             Err(e) => match crate::decode_frame_id(&payload) {
                 Some(id) => {
                     tracing::warn!("refusing request {id}: its method does not decode ({e})");
@@ -157,16 +217,23 @@ pub(crate) async fn handle_conn<S, Req, Resp, Ev, H, F>(
             break; // writer task gone (a write already failed)
         }
     }
+    scope.close();
+    // The reader may still be parked on a client that stopped mid-frame, or on
+    // a full queue; either way the connection is over, and its half of the
+    // stream goes with it.
+    reader_task.abort();
+    let _ = reader_task.await;
 
     // The event forwarder has no other exit signal (the broadcast channel
     // normally outlives any one connection), so it's cancelled explicitly;
     // dropping our own `frame_tx` clone then lets the writer task's channel
     // close once the event task's clone drops too, so it flushes whatever was
     // already queued and exits.
-    event_task.abort();
+    if let Some(event_task) = event_task {
+        event_task.abort();
+    }
     drop(frame_tx);
     let _ = writer_task.await;
-    tracing::debug!("client disconnected");
 }
 
 #[cfg(test)]
@@ -379,6 +446,84 @@ mod tests {
             .await
             .expect("the connection ends")
             .expect("no panic");
+    }
+
+    /// tier_1: a client that hangs up while its request's handler is still
+    /// pending releases the connection at once — the handler never returning
+    /// must not hold the socket (a dev machine's agent held, on 2026-11-19, 42,709 such
+    /// connections behind one wedged handler, each client long gone). What the
+    /// connection held for itself drops with it, so a closed app never reads
+    /// as attached behind a stuck call, and the detached handler finishes on
+    /// its own (it is never cancelled mid-way).
+    #[tokio::test]
+    async fn a_client_hanging_up_mid_handler_releases_the_connection() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Held(Arc<AtomicUsize>);
+        impl Drop for Held {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+
+        let held = Arc::new(AtomicUsize::new(0));
+        let (release_tx, release_rx) = tokio::sync::watch::channel(false);
+        let finished = Arc::new(AtomicUsize::new(0));
+        let (h_held, h_finished) = (Arc::clone(&held), Arc::clone(&finished));
+        let handler = move |req: Request| {
+            let (held, finished) = (Arc::clone(&h_held), Arc::clone(&h_finished));
+            let mut release = release_rx.clone();
+            async move {
+                held.fetch_add(1, Ordering::SeqCst);
+                crate::conn_scope::hold_for_connection(Held(held));
+                // A handler wedged on a lock nobody releases.
+                let _ = release.wait_for(|r| *r).await;
+                finished.fetch_add(1, Ordering::SeqCst);
+                Response {
+                    id: req.id,
+                    result: ResponseResult::Ok(ResponsePayload::Empty),
+                }
+            }
+        };
+
+        let (client, server) = duplex(8192);
+        let (_event_tx, event_rx) = broadcast::channel::<Event>(4);
+        let served = tokio::spawn(handle_conn(server, handler, event_rx));
+        let (client_read, mut client_write) = tokio::io::split(client);
+        client_write
+            .write_all(
+                &encode_frame(&Request {
+                    id: 1,
+                    method: RequestMethod::GetSyncStatus,
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(held.load(Ordering::SeqCst), 1, "the handler is running");
+
+        drop(client_write);
+        drop(client_read);
+        tokio::time::timeout(Duration::from_secs(2), served)
+            .await
+            .expect("the connection is released while its handler is still pending")
+            .expect("no panic");
+        assert_eq!(
+            held.load(Ordering::SeqCst),
+            0,
+            "what the connection held outlived the client"
+        );
+
+        release_tx.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while finished.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the detached handler runs to completion, never cancelled");
     }
 
     /// tier_1: a value a handler holds for its connection

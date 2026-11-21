@@ -58,6 +58,20 @@ private final class StubEventsAPI: EventsAPI {
 
 private struct StubCreateError: Error {}
 
+/// A VM whose calendar read has landed with one calendar, so the shared
+/// create predicate is open and every compose door may open (events.md §
+/// *No calendar to hold an event*, ruling 3: a door asks the predicate first;
+/// the closed-door case is `EventsVMCreateFallbackTests`').
+@MainActor
+private func vmWithACalendar() async -> EventsVM {
+    let api = StubEventsAPI()
+    api.calendars = [FaunaCalendar(id: "cal-1", name: "One")]
+    let vm = EventsVM()
+    vm.configure(api: api)
+    await vm.loadCalendars()
+    return vm
+}
+
 private func sampleDraft(_ summary: String = "Quarterly walrus review") -> FfiEventDrafts {
     FfiEventDrafts(summary: summary, dtstart: "2026-09-01T09:00", dtend: "2026-09-01T10:00",
                     description: "bring the herring numbers", location: "Room 3")
@@ -77,7 +91,7 @@ func scheduleDraftsSaveUpdatesResumableDraftImmediately() async {
 @MainActor
 @Test("a day-cell gesture clears the rail — beginCompose(onDay:)")
 func dayCellGestureClearsTheDraft() async {
-    let vm = EventsVM()
+    let vm = await vmWithACalendar()
     vm.scheduleDraftsSave(sampleDraft())
     #expect(vm.resumableDraft != nil)
 
@@ -91,7 +105,7 @@ func dayCellGestureClearsTheDraft() async {
 @MainActor
 @Test("a day-cell slot gesture clears the rail — beginCompose(atSlot:)")
 func dayCellSlotGestureClearsTheDraft() async {
-    let vm = EventsVM()
+    let vm = await vmWithACalendar()
     vm.scheduleDraftsSave(sampleDraft())
 
     vm.beginCompose(atSlot: Date())

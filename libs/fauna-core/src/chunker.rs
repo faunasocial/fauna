@@ -64,6 +64,7 @@ pub fn chunk_file(data: &[u8]) -> ChunkManifest {
             stored_hashes: None, // plaintext: store key == plaintext hash
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         };
     }
 
@@ -86,6 +87,7 @@ pub fn chunk_file(data: &[u8]) -> ChunkManifest {
         stored_hashes: None, // plaintext: store key == plaintext hash
         sealed_hashes: None,
         min_reader: None,
+        pages: None,
     }
 }
 

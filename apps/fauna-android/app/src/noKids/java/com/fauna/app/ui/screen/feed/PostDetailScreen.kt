@@ -47,6 +47,9 @@ import uniffi.fauna_feed.postOffersThreadView
 import java.text.SimpleDateFormat
 import java.util.*
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.SuggestionChip
+import com.fauna.app.ui.controls.TextButton
 
 /**
  * `post_detail` — renders the focal post from the **same shared snapshot** the

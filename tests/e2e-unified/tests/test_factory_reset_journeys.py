@@ -41,6 +41,11 @@ of an unlocked keyring, so ``_slot_code`` reads it at rest on tui and linux
 alike; web launches through ``WebLaunchHarness`` behind the nest's own SPA
 proxy (a browser reaches a nest only through one), and its store is the
 origin's ``localStorage``, which ``helpers.registry_store`` reads the same way.
+android's store is the credential file in the app's own ``filesDir``, which no
+host path reaches: the bridge's ``GET /credentials`` reads it (the same reader),
+and a launch's ``seed_credentials`` is the one write. One emulator runs one
+instance of the app, so where a journey needs a second app process — the member
+case's admin — android's second seat is the lead app, tui.
 """
 
 from __future__ import annotations
@@ -78,6 +83,7 @@ from helpers.registry_store import (
     credential_store_path,
     describe_registry,
     read_registry_index,
+    read_store_map,
     read_store_slot,
 )
 from helpers.waiting import wait_until
@@ -85,10 +91,10 @@ from i18n.strings import S
 
 pytestmark = [
     pytest.mark.tier_3, pytest.mark.tui, pytest.mark.linux, pytest.mark.web,
-    pytest.mark.macos, pytest.mark.ios, pytest.mark.destructive,
+    pytest.mark.macos, pytest.mark.ios, pytest.mark.android, pytest.mark.destructive,
 ]
 
-_CLIENTS = ("tui", "linux", "web", "macos", "ios")
+_CLIENTS = ("tui", "linux", "web", "macos", "ios", "android")
 
 # tests/e2e-unified/ui.yaml — the claim page, the launch surfaces, the shell.
 CLAIM_CODE_INPUT = "claim-code-input"
@@ -143,8 +149,12 @@ def _seat(request, client, tmp_path, nest, *, second_seat=False):
     (``conftest._serve_spa_proxy``). Native launches are file-backed, so the
     pending-factory-reset slot is readable at rest (module docstring).
     ``second_seat`` puts an iOS seat on a simulator of its own: a launch on the
-    first seat's device would tear that seat's app down."""
+    first seat's device would tear that seat's app down. android has one
+    emulator, which runs one instance of the app, so its second seat is the
+    lead app, tui (module docstring)."""
     server = None
+    if second_seat and client == "android":
+        client = "tui"
     if client == "web":
         node_url, server = _serve_spa_proxy(request.getfixturevalue("static_dir"), nest["url"])
         harness = make_launch_harness("web", spa_url=node_url)
@@ -571,11 +581,13 @@ class _NativeAccountSeats:
     Settings copies for "open as new instance" — or as the primary instance.
     Each account dials its own nest directly.
 
-    iOS has no bound launch and one process at a time (``account-scoping.md``
-    § Concurrent instances), and the claim page A's reset ends on offers no
-    switcher, so the harness moves the store's active pointer between launches
-    instead: the journey under test is each account's reset, not the way the
-    app came to serve B."""
+    iOS and android have no bound launch and run one process at a time
+    (``account-scoping.md`` § Concurrent instances), and the claim page A's
+    reset ends on offers no switcher, so the harness moves the store's active
+    pointer between launches instead: the journey under test is each account's
+    reset, not the way the app came to serve B. On android that pointer lives
+    in the on-device credential file: it is read over the bridge while the app
+    still runs, and written back as the next launch's whole seed."""
 
     def __init__(self, request, client, nest_a, nest_b):
         from drivers import create_driver
@@ -587,9 +599,12 @@ class _NativeAccountSeats:
             "url": nest_a["url"],
             "environment": self._environment,
         }
+        if client == "android":
+            # B's nest needs its own adb reverse; the launch's `url` names A's.
+            self._config["nest_ports"] = [nest_a["port"], nest_b["port"]]
         self.driver = create_driver(client)
         self._client = client
-        self._has_bound_launch = client != "ios"
+        self._has_bound_launch = client not in ("ios", "android")
         self._primary_actor = None
 
     # Not `start`: `helpers/kind_reach.py` merges public names across the tree,
@@ -605,6 +620,8 @@ class _NativeAccountSeats:
         return self.driver
 
     def _reopen(self, actor: str | None):
+        if self._client == "android":
+            return self._reopen_android(actor or self._primary_actor)
         self.driver.teardown()
         if not self._has_bound_launch:
             self._set_active_at_rest(actor or self._primary_actor)
@@ -615,21 +632,35 @@ class _NativeAccountSeats:
         self.driver.launch(self._config)
         return self.driver
 
+    def _reopen_android(self, actor: str):
+        """android's arm of ``_set_active_at_rest``: only the live bridge reads
+        the on-device file and only a launch's seed writes it, so the store is
+        read before the teardown and handed back, its pointer moved, as that
+        launch's whole seed — the pin lifted for the one launch that writes,
+        then taken again so every later reopen reads back what the app wrote."""
+        store = _with_active(read_store_map(self.driver), actor)
+        self.driver.teardown()
+        pin = type(self.driver)._PRESERVE_STORE_KEY
+        config = {k: v for k, v in self._config.items() if k != pin}
+        self.driver.launch({**config, "seed_credentials": store})
+        assert self.driver.preserve_state_across_relaunch()
+        return self.driver
+
     def approve_reauth(self) -> None:
-        """apple's activation re-auth is the OS sheet, behind the ``reauth-result``
-        verdict file the app reads per prompt (``AccountReauth``); the other
+        """apple's and android's activation re-auth is the OS sheet, behind the
+        ``reauth-result`` verdict the app reads per prompt (``AccountReauth``) —
+        a host file on apple, written over the bridge on android; the other
         native apps draw a prompt the journey answers."""
-        if self._client in ("macos", "ios"):
+        if self._client == "android":
+            self.driver.write_reauth_verdict("approve")
+        elif self._client in ("macos", "ios"):
             with open(os.path.join(self.driver._cred_dir, "reauth-result"), "w") as f:
                 f.write("approve")
 
     def _set_active_at_rest(self, actor: str) -> None:
         path = credential_store_path(self.driver)
         with open(path) as f:
-            store = json.load(f)
-        index = json.loads(store["fauna/index"])
-        index["active"] = actor
-        store["fauna/index"] = json.dumps(index)
+            store = _with_active(json.load(f), actor)
         with open(path, "w") as f:
             json.dump(store, f)
 
@@ -645,6 +676,14 @@ class _NativeAccountSeats:
     def teardown(self) -> None:
         with contextlib.suppress(Exception):
             self.driver.teardown()
+
+
+def _with_active(store: dict, actor: str) -> dict:
+    """``store`` (the flat logical-key map) with its index's active pointer on
+    ``actor``; every other key verbatim."""
+    index = json.loads(store["fauna/index"])
+    index["active"] = actor
+    return {**store, "fauna/index": json.dumps(index)}
 
 
 class _WebAccountSeats:

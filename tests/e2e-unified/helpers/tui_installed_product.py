@@ -9,7 +9,7 @@ a suite driving a stale install.
 
 **The channel.** The terminal app ships as a per-OS archive — ``fauna-tui`` +
 ``fauna-sync-agent`` + ``fauna-cli`` + ``install.sh`` in one directory, built by
-``apps/fauna-tui/packaging/assemble-archive.sh`` for the release workflow
+``installer/assemble-archive.sh --payload tui`` for the release workflow
 (``installers/tui.md`` § The ratified channel; ``fauna-cli`` is the cli app's
 device shell, the archive's third member since decision 4). The user unpacks it
 and runs its ``install.sh``, which copies the three binaries into
@@ -175,7 +175,8 @@ def stage_archive(repo_root: Path | str, debug_dir: Path | str) -> Path:
     proc = subprocess.run(
         [
             "bash",
-            str(repo_root / "apps" / "fauna-tui" / "packaging" / "assemble-archive.sh"),
+            str(repo_root / "installer" / "assemble-archive.sh"),
+            "--payload", "tui",
             "--bin-dir", str(debug_dir),
             "--out", str(out),
             "--suffix", _SUFFIX,

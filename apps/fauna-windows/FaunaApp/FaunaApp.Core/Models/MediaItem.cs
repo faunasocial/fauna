@@ -78,4 +78,15 @@ public record MediaItem(
         Strings.Resolve(
             uniffi.fauna_ffi.FaunaFfiMethods.SyncDisplayStateLabel(
                 uniffi.fauna_core.SyncDisplayState.Synced));
+
+    /// <summary>
+    /// <c>share-link-button</c>'s answer on this item's detail — the shared
+    /// <c>share_link_possibility</c> over <see cref="ShareLinkEligible"/>
+    /// (<c>docs/goal/ui/README.md</c> § Offer only what is possible): <i>possible</i>
+    /// where the nest will serve the link, <i>absent</i> (not rendered, never inert)
+    /// elsewhere. Computed get-only, so the record's equality is unaffected.
+    /// </summary>
+    internal FaunaApp.Core.Helpers.PossibilityPaint ShareLinkAnswer =>
+        FaunaApp.Core.Helpers.PossibilityPaint.Of(
+            uniffi.fauna_media_machine.FaunaMediaMachineMethods.ShareLinkPossibility(ShareLinkEligible));
 }

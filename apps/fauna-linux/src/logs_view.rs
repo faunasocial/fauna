@@ -104,3 +104,167 @@ pub fn populate(
     }
     placeholder.set_visible(entries.is_empty());
 }
+
+/// The `logs.empty` key — the Settings → Logs page's own empty line, the
+/// reason its copy and clear are blocked on an empty ring.
+pub const DEVICE_EMPTY_KEY: &str = "logs.empty";
+/// The `admin.logs_page.empty` key — the admin Logs page's own empty line.
+pub const ADMIN_EMPTY_KEY: &str = "admin.logs_page.empty";
+
+/// Paint a Logs surface's ring actions (`log-copy-button`, and on the device
+/// page `log-clear-button`) from the shared
+/// [`fauna_log::format::ring_action_possibility`] over the `shown` entries the
+/// active filter paints. The reason is the page's own empty line, already on
+/// the page as the list placeholder, so no second reason line is painted — it
+/// rides the buttons' tooltips (the tui twin: `settings::logs::logs_elements`).
+pub fn paint_ring_actions(buttons: &[&gtk::Button], shown: usize, empty_key: &str) {
+    let answer = fauna_log::format::ring_action_possibility(shown, empty_key);
+    for button in buttons {
+        crate::possible::paint(*button, None, answer.clone());
+    }
+}
+
+/// The press half of a ring action: asks the same answer the buttons were
+/// painted from and, when it is not possible, puts its reason on the page's
+/// `error_line` and refuses (`true`).
+pub fn ring_action_refused(shown: usize, empty_key: &str, error_line: &gtk::Label) -> bool {
+    crate::possible::refused_at_press(
+        &fauna_log::format::ring_action_possibility(shown, empty_key),
+        error_line,
+    )
+}
+
+/// `log-copy-button`'s press over the `entries` the filter shows: refused with
+/// the empty line when there are none (never an empty string on the
+/// clipboard), else the newest-first payload written through `write` and its
+/// outcome recorded — "Copied to clipboard" + the `copied` attr, or
+/// `common.copy_failed` on `error_line` (`clipboard::record_copy_outcome`).
+/// `write` is [`crate::clipboard::try_copy_text`] in production.
+pub fn copy_shown(
+    btn: &gtk::Button,
+    error_line: &gtk::Label,
+    entries: &[LogEntry],
+    empty_key: &str,
+    write: impl FnOnce(&str) -> Result<(), String>,
+) {
+    if ring_action_refused(entries.len(), empty_key, error_line) {
+        return;
+    }
+    // An earlier refusal's empty line no longer holds: the ring has entries.
+    if crate::possible::reason_text(&fauna_log::format::ring_action_possibility(0, empty_key))
+        .is_some_and(|empty| error_line.text().as_str() == empty)
+    {
+        error_line.set_text("");
+        error_line.set_visible(false);
+    }
+    let text = fauna_log::format::rendered_text(entries, local_offset_secs());
+    let outcome = write(&text);
+    crate::clipboard::record_copy_outcome(btn, error_line, S::COPY_BUTTON, &text, outcome);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fauna_log::LogLevel;
+
+    fn entry(message: &str) -> LogEntry {
+        LogEntry {
+            timestamp_ms: 1_000,
+            level: LogLevel::Error,
+            target: "fauna_test".to_string(),
+            message: message.to_string(),
+        }
+    }
+
+    #[test]
+    fn an_empty_ring_blocks_copy_and_clear_with_the_empty_line() {
+        crate::testid::run_on_gtk_thread(|| {
+            let copy = gtk::Button::with_label(S::COPY_BUTTON);
+            let clear = gtk::Button::with_label(S::CLEAR_BUTTON);
+            paint_ring_actions(&[&copy, &clear], 0, DEVICE_EMPTY_KEY);
+            for b in [&copy, &clear] {
+                assert!(b.is_visible() && !b.is_sensitive());
+                assert_eq!(b.tooltip_text().as_deref(), Some(S::EMPTY));
+            }
+            paint_ring_actions(&[&copy, &clear], 2, DEVICE_EMPTY_KEY);
+            assert!(copy.is_sensitive() && clear.is_sensitive());
+
+            // The admin page's own empty line.
+            paint_ring_actions(&[&copy], 0, ADMIN_EMPTY_KEY);
+            assert_eq!(
+                copy.tooltip_text().as_deref(),
+                Some(crate::i18n::strings::admin::logs_page::EMPTY)
+            );
+
+            // A press on an empty ring is refused with the reason, and writes nothing.
+            let error = gtk::Label::new(None);
+            error.set_visible(false);
+            let mut wrote = false;
+            copy_shown(&copy, &error, &[], DEVICE_EMPTY_KEY, |_| {
+                wrote = true;
+                Ok(())
+            });
+            assert!(!wrote, "nothing shown, nothing copied");
+            assert!(error.is_visible());
+            assert_eq!(error.text().as_str(), S::EMPTY);
+            assert!(ring_action_refused(0, DEVICE_EMPTY_KEY, &error));
+            assert!(!ring_action_refused(1, DEVICE_EMPTY_KEY, &error));
+        });
+    }
+
+    #[test]
+    fn a_copy_that_succeeds_is_confirmed_on_the_button() {
+        crate::testid::run_on_gtk_thread(|| {
+            let copy = gtk::Button::with_label(S::COPY_BUTTON);
+            let error = gtk::Label::new(None);
+            error.set_visible(false);
+            let mut written = String::new();
+            copy_shown(
+                &copy,
+                &error,
+                &[entry("handler failed")],
+                DEVICE_EMPTY_KEY,
+                |t| {
+                    written = t.to_string();
+                    Ok(())
+                },
+            );
+            assert!(written.contains("handler failed"));
+            assert_eq!(
+                crate::testid::test_attr_text(&copy, "copied").as_deref(),
+                Some(written.as_str())
+            );
+            assert_eq!(
+                copy.label().as_deref(),
+                Some(crate::i18n::strings::settings::account_page::COPIED_CLIPBOARD)
+            );
+            assert!(!error.is_visible());
+        });
+    }
+
+    #[test]
+    fn a_copy_that_fails_says_so_on_the_error_line() {
+        crate::testid::run_on_gtk_thread(|| {
+            let copy = gtk::Button::with_label(S::COPY_BUTTON);
+            let error = gtk::Label::new(None);
+            error.set_visible(false);
+            copy_shown(&copy, &error, &[entry("x")], DEVICE_EMPTY_KEY, |_| {
+                Err("closed".to_string())
+            });
+            assert!(error.is_visible());
+            assert_eq!(
+                error.text().as_str(),
+                crate::clipboard::copy_failed_text("closed")
+            );
+            assert_eq!(
+                crate::testid::test_attr_text(&copy, "copied").as_deref(),
+                Some("")
+            );
+            assert_eq!(copy.label().as_deref(), Some(S::COPY_BUTTON));
+
+            // A later copy that succeeds clears its own failure.
+            copy_shown(&copy, &error, &[entry("x")], DEVICE_EMPTY_KEY, |_| Ok(()));
+            assert!(!error.is_visible());
+        });
+    }
+}

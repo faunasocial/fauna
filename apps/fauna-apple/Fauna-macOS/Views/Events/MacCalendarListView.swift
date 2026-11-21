@@ -9,6 +9,7 @@ private let calendarColors: [(String, Color)] = [
 
 struct MacCalendarListView: View {
     let vm: EventsVM
+    @Environment(MacAppState.self) private var appState
 
     @State private var newCalName = ""
     @State private var selectedDate = Date()
@@ -16,8 +17,9 @@ struct MacCalendarListView: View {
     // Rendered as an eager `ScrollView { VStack }` rather than a lazy
     // `List { Section }`: in-process automation only registers an element on its
     // `.onAppear`, and a lazy `List` never `.onAppear`s rows below the fold. This
-    // pane shares the left split ~50/50 with `MacEventListView` (`EventSplitView`),
-    // so under the 280pt graphical DatePicker the whole calendar-management cluster
+    // pane once shared the left split ~50/50 with `MacEventListView`; it is the
+    // narrow calendar pane of its own since 2026-11-16 (`EventSplitView`), and
+    // under the 280pt graphical DatePicker the whole calendar-management cluster
     // (`new-calendar-btn`, `calendar-name`, `calendar-visibility`, `create-calendar`,
     // `calendar-item`) fell below the fold → `count=0`, blocking the events e2e
     // cluster (harness-confirmed 2026-06-23). A plain (non-lazy) ScrollView renders
@@ -32,8 +34,10 @@ struct MacCalendarListView: View {
                 DatePicker("", selection: $selectedDate, displayedComponents: .date)
                     .datePickerStyle(.graphical)
                     .frame(maxHeight: 280)
-                    .onChange(of: selectedDate) { _, _ in
-                        // Could filter events by date here
+                    // Outlook's mini-calendar: a click moves the grid to that
+                    // date, in whatever view mode is current.
+                    .onChange(of: selectedDate) { _, date in
+                        vm.selectDay(date)
                     }
 
                 Divider()
@@ -44,12 +48,16 @@ struct MacCalendarListView: View {
                         Text(L.events.calendars)
                             .font(.headline)
                         Spacer()
+                        // Painted from the shared write predicate (events.md
+                        // § The other calendar writes); an open form can
+                        // always be cancelled.
                         Button(vm.showNewCalendar ? L.common.cancel : L.events.newCalendar) {
-                            vm.showNewCalendar.toggle()
+                            vm.toggleNewCalendar()
                         }
                         .controlSize(.small)
                         .accessibilityIdentifier(Ids.newCalendarBtn)
-                        .automationActivate(Ids.newCalendarBtn) { vm.showNewCalendar.toggle() }
+                        .automationActivate(Ids.newCalendarBtn) { vm.toggleNewCalendar() }
+                        .faunaPossible(vm.showNewCalendar ? .possible : vm.calendarWriteGate)
                     }
 
                     if vm.showNewCalendar {
@@ -72,9 +80,12 @@ struct MacCalendarListView: View {
                             // `new-calendar-btn` above only reveals this form
                             // (arming is local); the Create is the commit.
                             .faunaGate("fauna.bridges.provision_calendar")
+                            .faunaPossible(vm.calendarWriteGate)
                         }
                         .padding(.vertical, 4)
                     }
+
+                    CalendarListEmptyState(vm: vm)
 
                     ForEach(vm.calendars) { cal in
                         HStack {

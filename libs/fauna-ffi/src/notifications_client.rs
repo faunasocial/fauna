@@ -110,6 +110,34 @@ impl From<NotificationText> for FfiNotificationText {
 /// whose key this build's catalog lacks (a newer nest's) must lose to
 /// `summary` — resolving it would paint `notifications.some_future_key` at the
 /// user — and "is the key known" is exactly the part an app cannot see.
+/// *Mark all read* (`notifications-mark-all-read`):
+/// [`fauna_client_notifications::mark_all_read_possibility`] — blocked until
+/// the page's first list read has resolved, then blocked
+/// `notifications.nothing_unread` while `unread` (the app's unread count) is
+/// zero (`docs/goal/ui/README.md` § Offer only what is possible, rules 2 and
+/// 5; `notifications.md` § Errors & edge cases).
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn notifications_mark_all_read_possibility(
+    read: fauna_core::possibility::ReadState,
+    unread: u32,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_notifications::mark_all_read_possibility(read, unread as usize)
+}
+
+/// *Clear all* (`notifications-clear-all`):
+/// [`fauna_client_notifications::clear_all_possibility`] — blocked until the
+/// first list read has resolved, then blocked
+/// `notifications.nothing_to_clear` while the page shows no row.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn notifications_clear_all_possibility(
+    read: fauna_core::possibility::ReadState,
+    rows: u32,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_notifications::clear_all_possibility(read, rows as usize)
+}
+
 #[uniffi::export]
 pub fn notification_text_for(item: FfiNotifItem) -> FfiNotificationText {
     fauna_client_notifications::notification_text(&NotifItem::from(item)).into()
@@ -324,6 +352,43 @@ impl FfiNotificationsClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The page-wide action faces forward the shared predicates: neither is
+    /// possible before the first read, and clear needs a row once read.
+    #[cfg(feature = "value-format")]
+    #[test]
+    fn the_page_wide_action_faces_answer_the_shared_predicates() {
+        use fauna_core::possibility::{Possibility, ReadState};
+        let loading = Possibility::blocked(LocalizedText::key("common.still_loading"));
+        assert_eq!(
+            notifications_mark_all_read_possibility(ReadState::Pending, 2),
+            loading
+        );
+        assert_eq!(
+            notifications_clear_all_possibility(ReadState::Pending, 2),
+            loading
+        );
+        assert_eq!(
+            notifications_mark_all_read_possibility(ReadState::Failed, 2),
+            Possibility::blocked(LocalizedText::key("common.load_failed"))
+        );
+        assert_eq!(
+            notifications_mark_all_read_possibility(ReadState::Resolved, 1),
+            Possibility::Possible
+        );
+        assert_eq!(
+            notifications_mark_all_read_possibility(ReadState::Resolved, 0),
+            Possibility::blocked(LocalizedText::key("notifications.nothing_unread"))
+        );
+        assert_eq!(
+            notifications_clear_all_possibility(ReadState::Resolved, 0),
+            Possibility::blocked(LocalizedText::key("notifications.nothing_to_clear"))
+        );
+        assert_eq!(
+            notifications_clear_all_possibility(ReadState::Resolved, 1),
+            Possibility::Possible
+        );
+    }
 
     #[test]
     fn notif_item_maps_all_fields() {

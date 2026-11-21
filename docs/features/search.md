@@ -32,6 +32,7 @@ Stamped 2026-09-26 at 61f9d7ceb0.
    - `tests/e2e-unified/tests/test_search.py::test_a_phone_result_for_a_card_deleted_since_a_desktop_seat_indexed_it_surfaces_error`
 5. [app] Narrowing a search to one kind of thing shows only results of that kind — `docs/goal/ui/search.md` § Goal
    - `tests/e2e-unified/tests/test_search_outcomes.py::test_narrowing_a_search_to_one_kind_shows_only_that_kind`
+   - `tests/e2e-unified/tests/test_search_outcomes.py::test_a_kind_chosen_before_typing_is_the_kind_the_search_runs_under`
 6. [app] A search that fails says so and still shows what it did find, instead of going blank — `docs/goal/ui/search.md` § Errors & edge cases
    - `tests/e2e-unified/tests/test_search_outcomes.py::test_a_failed_search_says_so_and_keeps_what_it_found`
    - `tests/e2e-unified/tests/test_search_outcomes.py::test_a_failed_search_on_a_phone_keeps_the_draft_a_desktop_seat_indexed`
@@ -51,6 +52,8 @@ Stamped 2026-09-26 at 61f9d7ceb0.
    - `tests/e2e-unified/tests/api/test_search_materialized_calendar.py::test_your_calendar_kept_searchable_on_your_nest_is_found_by_you_alone_and_turning_it_off_deletes_that_view`
 11. [nest] With your address book kept searchable on your nest, your search finds a phrase from a card your contacts app saved, nobody else's search does, and turning it off deletes the nest's card copy and only that one — `docs/goal/architecture/encryption-at-rest.md` § Capability tiering
    - `tests/e2e-unified/tests/api/test_search_materialized_card.py::test_your_address_book_kept_searchable_on_your_nest_is_found_by_you_alone_and_turning_it_off_deletes_that_view`
+12. [app] Search is disabled and says to type a query while the field is blank; pressing it says the same instead of doing nothing — `docs/goal/ui/search.md` § Errors & edge cases
+    - `tests/e2e-unified/tests/test_forms_offer_only_possible.py::test_search_is_blocked_with_its_reason_while_the_field_is_blank`
 
 ## Status
 
@@ -78,6 +81,7 @@ Stamped 2026-09-26 at 61f9d7ceb0.
 | 4 | app | `tests/e2e-unified/tests/test_search.py::test_a_phone_result_for_a_card_deleted_since_a_desktop_seat_indexed_it_surfaces_error` | macos (macos): passed, ios (macos): passed |
 | 4 | app | absent by design on web | — |
 | 5 | app | `tests/e2e-unified/tests/test_search_outcomes.py::test_narrowing_a_search_to_one_kind_shows_only_that_kind` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 5 | app | `tests/e2e-unified/tests/test_search_outcomes.py::test_a_kind_chosen_before_typing_is_the_kind_the_search_runs_under` | — |
 | 6 | app | `tests/e2e-unified/tests/test_search_outcomes.py::test_a_failed_search_says_so_and_keeps_what_it_found` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): skipped, tui (linux): passed, tui (windows): passed |
 | 6 | app | `tests/e2e-unified/tests/test_search_outcomes.py::test_a_failed_search_on_a_phone_keeps_the_draft_a_desktop_seat_indexed` | macos (macos): passed, ios (macos): passed |
 | 6 | app | `tests/e2e-unified/tests/test_search_outcomes.py::test_a_failed_search_on_web_says_so_instead_of_going_blank` | web (linux): passed |
@@ -89,7 +93,8 @@ Stamped 2026-09-26 at 61f9d7ceb0.
 | 8 | app | `tests/e2e-unified/tests/test_search.py::test_a_phone_opens_a_contact_result_a_desktop_seat_indexed` | macos (macos): passed, ios (macos): passed |
 | 8 | app | `tests/e2e-unified/tests/test_search.py::test_a_phone_opens_a_file_result_a_desktop_seat_indexed` | macos (macos): passed, ios (macos): passed |
 | 8 | app | absent by design on web | — |
-| 9 | nest | `tests/e2e-unified/tests/api/test_search_materialized_mail.py::test_your_mail_kept_searchable_on_your_nest_is_found_by_you_alone_and_turning_it_off_deletes_it` | nest (linux): passed, nest (windows): failed |
-| 10 | nest | `tests/e2e-unified/tests/api/test_search_materialized_calendar.py::test_your_calendar_kept_searchable_on_your_nest_is_found_by_you_alone_and_turning_it_off_deletes_that_view` | — |
-| 11 | nest | `tests/e2e-unified/tests/api/test_search_materialized_card.py::test_your_address_book_kept_searchable_on_your_nest_is_found_by_you_alone_and_turning_it_off_deletes_that_view` | — |
+| 9 | nest | `tests/e2e-unified/tests/api/test_search_materialized_mail.py::test_your_mail_kept_searchable_on_your_nest_is_found_by_you_alone_and_turning_it_off_deletes_it` | nest (linux): passed, nest (windows): passed |
+| 10 | nest | `tests/e2e-unified/tests/api/test_search_materialized_calendar.py::test_your_calendar_kept_searchable_on_your_nest_is_found_by_you_alone_and_turning_it_off_deletes_that_view` | nest (linux): passed |
+| 11 | nest | `tests/e2e-unified/tests/api/test_search_materialized_card.py::test_your_address_book_kept_searchable_on_your_nest_is_found_by_you_alone_and_turning_it_off_deletes_that_view` | nest (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_forms_offer_only_possible.py::test_search_is_blocked_with_its_reason_while_the_field_is_blank` — requires `blocked-reason-read` (test harness) (not built: windows) | macos (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

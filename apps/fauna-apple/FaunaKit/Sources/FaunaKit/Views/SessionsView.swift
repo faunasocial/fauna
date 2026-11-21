@@ -37,8 +37,8 @@ public struct SessionsView: View {
                 automationText(Ids.pageHeading, L.sessions.title)
                     .font(.title2)
 
-                if let error = vm.snapshot?.error {
-                    ErrorBanner(message: renderLocalizedText(error))
+                if let error = vm.errorMessage {
+                    ErrorBanner(message: error)
                 }
 
                 // 1. The list. `sessions-empty` is the fail-safe for a reply that
@@ -121,11 +121,11 @@ public struct SessionsView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.red)
-                .disabled(vm.busy)
                 .accessibilityIdentifier(Ids.sessionsRevokeOthersConfirmButton)
-                .automationActivate(Ids.sessionsRevokeOthersConfirmButton, isEnabled: { !vm.busy }) {
+                .automationActivate(Ids.sessionsRevokeOthersConfirmButton) {
                     act { await vm.confirmRevokeOthers($0) }
                 }
+                .faunaPossible(vm.revokeOthersAnswer)
 
                 Button(L.sessions.revokeOthersCancel) { vm.cancelRevokeOthers() }
                     .buttonStyle(.bordered)
@@ -135,12 +135,13 @@ public struct SessionsView: View {
         } else {
             Button(L.sessions.revokeOthers) { vm.armRevokeOthers() }
                 .buttonStyle(.bordered)
-                .disabled(vm.busy)
                 .accessibilityIdentifier(Ids.sessionsRevokeOthersButton)
-                .automationActivate(Ids.sessionsRevokeOthersButton, isEnabled: { !vm.busy }) {
+                .automationActivate(Ids.sessionsRevokeOthersButton) {
                     vm.armRevokeOthers()
                 }
+                .faunaPossible(vm.revokeOthersAnswer)
         }
+        FaunaPossibilityReason(vm.revokeOthersAnswer)
         automationText(Ids.sessionsRevokeNote, L.sessions.revokeNote)
             .font(.caption)
             .foregroundStyle(.secondary)

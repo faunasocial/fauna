@@ -107,6 +107,26 @@ pub fn rendered_text(entries: &[LogEntry], tz_offset_secs: i32) -> String {
         .join("\n")
 }
 
+/// Whether a Logs surface's copy or clear can do anything now
+/// (`docs/goal/ui/README.md` § Offer only what is possible, rule 2): with no
+/// entry shown there is nothing to copy (the copy would put an empty string on
+/// the clipboard) and nothing to clear, so both are *blocked* with the page's
+/// own empty-state line as the reason — `empty_reason_key` is the i18n key the
+/// surface already paints for an empty list (`logs.empty` on the device page,
+/// `admin.logs_page.empty` on the nest one), so the reason is on the surface
+/// without a second line. `shown` counts the entries the active filter paints.
+pub fn ring_action_possibility(
+    shown: usize,
+    empty_reason_key: &str,
+) -> fauna_core::possibility::Possibility {
+    use fauna_core::possibility::Possibility;
+    if shown == 0 {
+        Possibility::blocked(fauna_core::localized::LocalizedText::key(empty_reason_key))
+    } else {
+        Possibility::Possible
+    }
+}
+
 /// One rendered `log-entry` row. [`line`](LogRow::line) is the one-line copy /
 /// marker form; [`message`](LogRow::message) is the row title;
 /// [`subtitle`](LogRow::subtitle) (`LEVEL · time · target`) is the secondary
@@ -141,6 +161,19 @@ pub fn rows(entries: &[LogEntry], tz_offset_secs: i32) -> Vec<LogRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ring_actions_are_blocked_by_the_empty_line_on_an_empty_ring() {
+        use fauna_core::possibility::Possibility;
+        assert_eq!(
+            ring_action_possibility(0, "logs.empty"),
+            Possibility::blocked(fauna_core::localized::LocalizedText::key("logs.empty"))
+        );
+        assert_eq!(
+            ring_action_possibility(3, "logs.empty"),
+            Possibility::Possible
+        );
+    }
 
     fn entry(ts: u64, level: LogLevel, target: &str, message: &str) -> LogEntry {
         LogEntry {

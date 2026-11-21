@@ -18,15 +18,26 @@ import androidx.navigation.NavController
 import com.fauna.app.R
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.navigation.LocalAppMessages
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.blockedReason
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.localized
+import com.fauna.app.ui.util.pressAsked
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.MailListMembersVM
 import uniffi.fauna_client_mail_settings.ImportResult
 import uniffi.fauna_client_mail_settings.MemberStatus
 import uniffi.fauna_client_mail_settings.MemberView
+import uniffi.fauna_client_mail_settings.memberAddPossibility
+import uniffi.fauna_client_mail_settings.memberImportPossibility
 import uniffi.fauna_client_mail_settings.memberStatusLabel
+import uniffi.fauna_core.Possibility
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
 
 /**
  * The `mail-list-members` page (`mail-mass-mailing.md`): one list's members —
@@ -70,6 +81,11 @@ fun MailListMembersScreen(
         onBack = { navController.popBackStack() },
         onAddMember = vm::addMember,
         onBatchImport = vm::batchImport,
+        // The sheets' shared draft answers (`member_add_possibility`,
+        // `member_import_possibility`), FFI kept here off the Content.
+        addAnswer = { askForm { memberAddPossibility(it) } },
+        importAnswer = { askForm { memberImportPossibility(it) } },
+        onRefuse = { appMessages.showError(it) },
         onUnsubscribe = vm::unsubscribe,
         onResubscribe = vm::resubscribe,
     )
@@ -95,7 +111,16 @@ fun MailListMembersContent(
     onBatchImport: (String) -> Unit,
     onUnsubscribe: (String) -> Unit,
     onResubscribe: (String) -> Unit,
+    // `mail-list-members-add-sheet-submit-button`'s and the import submit's
+    // answers over the draft (`mail-settings.md` § Errors & edge cases, *The
+    // in-page predicates*): each submit paints from its answer and asks it
+    // again at the press, refusing with its reason on [onRefuse]. The Screen
+    // passes the shared `member_add_possibility` / `member_import_possibility`.
+    addAnswer: (String) -> Possibility = { Possibility.Possible },
+    importAnswer: (String) -> Possibility = { Possibility.Possible },
+    onRefuse: (String) -> Unit = {},
 ) {
+    val context = LocalContext.current
     var showAdd by remember { mutableStateOf(false) }
     var showImport by remember { mutableStateOf(false) }
     var addAddress by remember { mutableStateOf("") }
@@ -166,16 +191,22 @@ fun MailListMembersContent(
                         // The sheet's SUBMIT declares; its address input, its
                         // cancel and the opener that revealed it all stay live
                         // (the commit gates, not the buffer; arming is local).
-                        // ⚠ It carries its own predicate too — an empty address
-                        // closes it with no nest in sight — so the gate composes
-                        // with `isNotBlank()` rather than replacing it.
+                        // ⚠ It carries its own answer too — an empty address
+                        // is refused with no nest in sight — so the gate
+                        // composes with it rather than replacing it.
+                        val addDraft = addAnswer(addAddress)
                         val addGate = faunaGate(
                             "fauna.bridges.add_list_member",
-                            enabled = addAddress.isNotBlank(),
+                            enabled = addDraft.isPossible,
                         )
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(
-                                onClick = { onAddMember(addAddress); showAdd = false },
+                                onClick = {
+                                    pressAsked(context, addAnswer(addAddress), onRefuse) {
+                                        onAddMember(addAddress)
+                                        showAdd = false
+                                    }
+                                },
                                 enabled = addGate.enabled,
                                 modifier = Modifier.testTag(Ids.MAIL_LIST_MEMBERS_ADD_SHEET_SUBMIT_BUTTON),
                             ) { Text(stringResource(R.string.mail_lists_add_member_submit)) }
@@ -184,7 +215,7 @@ fun MailListMembersContent(
                                 modifier = Modifier.testTag(Ids.MAIL_LIST_MEMBERS_ADD_SHEET_CANCEL_BUTTON),
                             ) { Text(stringResource(R.string.mail_lists_add_member_cancel)) }
                         }
-                        DisabledControlReasonText(addGate.reason)
+                        DisabledControlReasonText(addGate.reason ?: localized(addDraft.blockedReason))
                     }
                 }
             }
@@ -214,16 +245,19 @@ fun MailListMembersContent(
                         )
                         // Same split as the add sheet: the import textarea and
                         // cancel stay live, the submit declares.
+                        val importDraft = importAnswer(importText)
                         val importGate = faunaGate(
                             "fauna.bridges.batch_import_list_members",
-                            enabled = importText.isNotBlank(),
+                            enabled = importDraft.isPossible,
                         )
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(
                                 onClick = {
-                                    dismissedImport = null
-                                    onBatchImport(importText)
-                                    showImport = false
+                                    pressAsked(context, importAnswer(importText), onRefuse) {
+                                        dismissedImport = null
+                                        onBatchImport(importText)
+                                        showImport = false
+                                    }
                                 },
                                 enabled = importGate.enabled,
                                 modifier = Modifier.testTag(Ids.MAIL_LIST_MEMBERS_IMPORT_SHEET_SUBMIT_BUTTON),
@@ -233,7 +267,7 @@ fun MailListMembersContent(
                                 modifier = Modifier.testTag(Ids.MAIL_LIST_MEMBERS_IMPORT_SHEET_CANCEL_BUTTON),
                             ) { Text(stringResource(R.string.mail_lists_import_cancel)) }
                         }
-                        DisabledControlReasonText(importGate.reason)
+                        DisabledControlReasonText(importGate.reason ?: localized(importDraft.blockedReason))
                     }
                 }
             }

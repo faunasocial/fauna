@@ -5,11 +5,12 @@ struct ContentView: View {
     @Environment(AppState.self) private var appState
     let onboardingVM: OnboardingVM
 
-    /// The Fauna Kids refusal of an account that is not supervised; always
-    /// `false` outside the kids target, so the other builds never reach the gate.
+    /// Whether the Fauna Kids gate replaces the shell: anything but eligible
+    /// (ineligible shows the refusal, unknown the bare frame); always `false`
+    /// outside the kids target, so the other builds never reach the gate.
     private var kidsIneligible: Bool {
         #if FAUNA_KIDS
-        appState.familyStatus.kidsEligible == false
+        appState.familyStatus.kidsEligibility != .eligible
         #else
         false
         #endif
@@ -138,14 +139,16 @@ struct ContentView: View {
                 onUseDifferentNest: { appState.onUseDifferentNest?() },
                 loadRecoverableBoxes: { await RecoverableBoxes.loadForServedAccount() },
                 onRecover: { appState.onRecoverFromLaunch?($0) },
-                onRetire: retireFromLaunch)
+                onRetire: retireFromLaunch,
+                onSwitchAccount: { try await appState.onSwitchAccount?($0, $1) })
         } else if appState.isOnboarding {
             WelcomeView(vm: onboardingVM)
         } else if kidsIneligible {
             // The Fauna Kids build refuses an account that is not supervised
             // (`account-age-band.md` § The account age band, kids-app bullet,
             // item (3)): one explanatory surface with a sign-out replaces the
-            // whole shell. The verdict is the shared `kidsAppEligible`, re-read
+            // whole shell unless the shared three-way `kidsAppEligibility` says
+            // eligible (unknown shows the frame without the message), re-read
             // with every family status read (`MainTabView`'s refreshes), so a
             // graduated account lands here at its next read. Android twin:
             // `KidsIneligibleScreen`.
@@ -165,15 +168,49 @@ struct ContentView: View {
     }
 }
 
+extension ContentView {
+    /// The launch surface `body` shows for `appState`, by the name
+    /// `fauna_e2e_agent::ROOT_SURFACE_KEY`'s journal carries: the
+    /// `fauna_e2e_contract::ROOT_SURFACE_*` names, or the surface's ui.yaml page
+    /// (macOS's `ContentView.rootSurfaceName`, android's `rootSurfaceName`, tui's
+    /// `LaunchSurface::root_surface_name`). The append wizard's sheet covers the
+    /// shell, so it reads as the wizard. Kept beside `body` and in its order: a
+    /// new branch there is named here.
+    @MainActor
+    static func rootSurfaceName(_ appState: AppState) -> String {
+        if appState.isAddingAccount { return "wizard" }
+        if appState.identityChanged != nil { return "launch_identity_changed" }
+        if appState.accountIndexRefusal != nil { return "launch_account_index_unreadable" }
+        if appState.accountLocked != nil { return "launch_account_locked" }
+        if appState.signInRefusedMessage != nil { return "launch_sign_in_refused" }
+        if appState.needsUpdateMessage != nil { return "launch_needs_update" }
+        if appState.launchPending { return "launch_progress" }
+        #if !FAUNA_KIDS
+        if appState.retiring != nil { return "nest_retire" }
+        #endif
+        if appState.launchRetryError != nil { return "launch_retry" }
+        if appState.isOnboarding { return "wizard" }
+        #if FAUNA_KIDS
+        if appState.familyStatus.kidsEligibility != .eligible { return "kids_ineligible" }
+        #endif
+        return "app"
+    }
+}
+
 #if FAUNA_KIDS
 /// Mounts FaunaKit's `KidsIneligibleView` with the iOS sign-out re-root, the
 /// same one Settings → Account runs (`SettingsView`'s `onAccountReset`).
 private struct KidsIneligibleGate: View {
     @Environment(AppState.self) private var appState
+    @Environment(FaunaClient.self) private var client: FaunaClient?
     @State private var watchManager = IOSWatchConnectivityManager()
 
     var body: some View {
-        KidsIneligibleView(session: appState.session) {
+        KidsIneligibleView(
+            session: appState.session,
+            showMessage: appState.familyStatus.kidsEligibility == .ineligible,
+            readFailed: appState.familyStatus.kidsReadFailedWhileUnknown
+        ) {
             appState.onSignOut?()
             watchManager.sendSignOut()
             appState.isOnboarding = true
@@ -183,6 +220,17 @@ private struct KidsIneligibleGate: View {
             Task { @MainActor in await appState.familyStatus.refresh(api: nil) }
         }
         .task { watchManager.activate() }
+        // `MainTabView`'s own seed and family read are NOT mounted while this gate
+        // stands, so the gate drives the answer it is waiting on: seed from the
+        // account's persisted snapshot, then read — an unknown answer would
+        // otherwise never resolve. Once eligible, `MainTabView` takes over.
+        .task(id: SessionKey(client)) {
+            seedSupervisionSnapshot(
+                api: client?.api, familyStatus: appState.familyStatus,
+                contentPolicy: appState.contentPolicy, screenTime: appState.screenTime)
+            await appState.familyStatus.refresh(api: client?.api)
+        }
+        .onReconnect { await appState.familyStatus.refresh(api: client?.api) }
     }
 }
 #endif
@@ -214,12 +262,20 @@ private struct GlobalChrome: ViewModifier {
     #endif
 
     func body(content: Content) -> some View {
-        content
+        // The chrome is laid out FOR REAL above the content — a
+        // `VStack { strip; content }` — never a `.safeAreaInset(edge: .top)`:
+        // an inset on the shell never reaches the tab stacks' navigation
+        // bars, whose inline titles then drew under `connection-status`
+        // (`test_apple_chrome_occlusion.py` measured the strip over
+        // `page-heading`). Laid out this way, a banner appearing later
+        // resizes the content's frame, so every stack re-lays out against it.
+        VStack(spacing: 0) {
+            chromeStrip
+            content
             // The ward's full-screen screen-time lock (family-safety.md §
-            // Screen time) — covers the content only, applied BEFORE the
-            // safeAreaInset top chrome below so the supervised-indicator
-            // there stays tappable. Never mounted on the Family page itself
-            // (the only route apple's More-stack Family page has): a locked
+            // Screen time) — covers the content only, never the strip above,
+            // so the supervised-indicator there stays tappable. Never mounted
+            // on the Family page itself (the only route apple's More-stack Family page has): a locked
             // ward must always be able to read who supervises them and what
             // the policy is. Lives at this GlobalChrome level (not
             // `MainTabView` alone) for the same reason the banners above do —
@@ -231,48 +287,55 @@ private struct GlobalChrome: ViewModifier {
                     ScreenTimeLockOverlay(message: message)
                 }
             }
-            .safeAreaInset(edge: .top) {
-            VStack(spacing: 0) {
-                // Highest-severity global chrome — deliberately above every
-                // other banner (critical-alerts.md § Severity bar).
-                #if !FAUNA_KIDS
-                CriticalAlertsBanner(host: criticalAlertsHost)
-                #endif
-                // The off-box-recovery custody warning rides just above the connection bar —
-                // shown only when the launch glue couldn't confirm custody;
-                // tap-to-dismiss.
-                RecoveryCustodyBanner(session: appState.session)
-                ConnectionStatusBar(client: client)
-                // The one-line changed-rules notice (nest-rules.md § Acceptance
-                // at joining, and a change of rules): names the nest; a tap opens
-                // Settings → Status, whose rules surface clears it.
-                NestRulesChangedNotice(nestRules: appState.region.nestRules) {
-                    appState.inAdmin = false
-                    appState.selectedTab = "more"
-                    appState.moreSelectedView = "settings"
-                    appState.selectedSettingsPage = .status
-                }
-                // The global `supervised-indicator` (family-safety.md § App
-                // surface — permanent, non-dismissable chrome on every page for
-                // a supervised account). Tapping it opens the Family page in the
-                // More stack, the same destination the gated in-Settings
-                // `family-tab` entry reaches. Mirrors the macOS placement.
-                SupervisedIndicatorBar(store: appState.familyStatus) {
-                    // Leaving admin is part of the navigation: the Family page
-                    // lives in the More stack, which the admin shell replaces,
-                    // so without this the tap would appear to do nothing.
-                    // A no-op when the tab shell is already showing.
-                    appState.inAdmin = false
-                    appState.selectedTab = "more"
-                    appState.moreSelectedView = "family"
-                }
-                // The shared report sheet + its acknowledgement
-                // (moderation.md § User-initiated reporting): ONE host over
-                // every page — and over the admin shell too, since this chrome
-                // survives it — so a report filed from a card the
-                // reporter-side hide then replaces still paints `report-status`.
-                ReportHost()
+        }
+    }
+
+    @ViewBuilder
+    private var chromeStrip: some View {
+        VStack(spacing: 0) {
+            // Highest-severity global chrome — deliberately above every
+            // other banner (critical-alerts.md § Severity bar).
+            #if !FAUNA_KIDS
+            CriticalAlertsBanner(host: criticalAlertsHost)
+            #endif
+            // The off-box-recovery custody warning rides just above the connection bar —
+            // shown only when the launch glue couldn't confirm custody;
+            // tap-to-dismiss.
+            RecoveryCustodyBanner(session: appState.session)
+            // A post-claim serving-enablement step the nest refused for good,
+            // said on the page the person is on (onboarding.md § 3b); tap-to-
+            // dismiss.
+            ServingEnablementRefusalBanner(session: appState.session)
+            ConnectionStatusBar(client: client)
+            // The one-line changed-rules notice (nest-rules.md § Acceptance
+            // at joining, and a change of rules): names the nest; a tap opens
+            // Settings → Status, whose rules surface clears it.
+            NestRulesChangedNotice(nestRules: appState.region.nestRules) {
+                appState.inAdmin = false
+                appState.selectedTab = "more"
+                appState.moreSelectedView = "settings"
+                appState.selectedSettingsPage = .status
             }
+            // The global `supervised-indicator` (family-safety.md § App
+            // surface — permanent, non-dismissable chrome on every page for
+            // a supervised account). Tapping it opens the Family page in the
+            // More stack, the same destination the gated in-Settings
+            // `family-tab` entry reaches. Mirrors the macOS placement.
+            SupervisedIndicatorBar(store: appState.familyStatus) {
+                // Leaving admin is part of the navigation: the Family page
+                // lives in the More stack, which the admin shell replaces,
+                // so without this the tap would appear to do nothing.
+                // A no-op when the tab shell is already showing.
+                appState.inAdmin = false
+                appState.selectedTab = "more"
+                appState.moreSelectedView = "family"
+            }
+            // The shared report sheet + its acknowledgement
+            // (moderation.md § User-initiated reporting): ONE host over
+            // every page — and over the admin shell too, since this chrome
+            // survives it — so a report filed from a card the
+            // reporter-side hide then replaces still paints `report-status`.
+            ReportHost()
         }
     }
 }
@@ -323,23 +386,39 @@ struct MainTabView: View {
         // macOS sidebar rows included): registered here on the tab view, which is
         // on screen whenever the bar is, so a registry walk sees all four whichever
         // tab is showing. Each performs the selection a tap on the bar performs.
+        // Each publishes `state` on for the tab in force (off for the rest), the
+        // one-of-N current-choice signal every app's page nav carries: re-choosing
+        // the tab in force changes nothing by design and reads as such.
         // Tests may still jump straight to a page via the state protocol
         // (applyNavPatch); these serve a journey that walks the page nav.
-        .automationActivate(Ids.conversationsTab) { appState.selectedTab = "conversations" }
+        .automationActivate(
+            Ids.conversationsTab,
+            attributes: { ["state": appState.selectedTab == "conversations" ? "on" : "off"] }
+        ) { appState.selectedTab = "conversations" }
         #if !FAUNA_KIDS
-        .automationActivate(Ids.feedTab) { appState.selectedTab = "feed" }
+        .automationActivate(
+            Ids.feedTab,
+            attributes: { ["state": appState.selectedTab == "feed" ? "on" : "off"] }
+        ) { appState.selectedTab = "feed" }
         #endif
-        .automationActivate(Ids.contactsTab) { appState.selectedTab = "contacts" }
-        .automationActivate(Ids.moreTab) { appState.selectedTab = "more" }
+        .automationActivate(
+            Ids.contactsTab,
+            attributes: { ["state": appState.selectedTab == "contacts" ? "on" : "off"] }
+        ) { appState.selectedTab = "contacts" }
+        .automationActivate(
+            Ids.moreTab,
+            attributes: { ["state": appState.selectedTab == "more" ? "on" : "off"] }
+        ) { appState.selectedTab = "more" }
         // Each tab's NavigationStack lays out its large title against the safe
         // area present when it FIRST appears; MainTabView appears before the
         // authed-launch task can set `recoveryCustodyWarning`, so the banner
-        // below grows the top safeAreaInset asynchronously and the already-laid-
-        // out large titles never re-measure against it — the title renders
-        // overlapped by the banner instead of below it (found + screenshot-
-        // verified 2026-07-20). Re-keying on the banner's presence forces every
-        // tab's NavigationStack to redo that initial layout pass on the (rare,
-        // typically once-per-session) transition.
+        // appears in `GlobalChrome`'s strip asynchronously (found + screenshot-
+        // verified 2026-07-20, when the strip was still a top safeAreaInset and
+        // the already-laid-out large titles never re-measured against it). The
+        // strip is real layout now, so the shell's frame shrinks with it; the
+        // re-key on the banner's presence is kept so every tab's NavigationStack
+        // also redoes its initial layout pass on that (rare, typically
+        // once-per-session) transition.
         .id(appState.session.recoveryCustodyWarning != nil)
         #if !FAUNA_KIDS
         .safeAreaInset(edge: .top) {
@@ -379,6 +458,10 @@ struct MainTabView: View {
                     }
                     .accessibilityIdentifier(Ids.searchSubmitButton)
                     .automationActivate(Ids.searchSubmitButton) { Task { await searchVM.search() } }
+                    // The shared `query_possibility` (`search.md` § Errors &
+                    // edge cases): a blank query is disabled with its reason as
+                    // the hint; `search()` asks it again on the keyboard submit.
+                    .faunaPossible(searchVM.queryPossibility)
 
                     Button(L.common.cancel) { cancelSearch() }
                     .accessibilityIdentifier(Ids.searchCancelButton)
@@ -406,7 +489,7 @@ struct MainTabView: View {
             }
         }
         .overlay {
-            if searchVM.hasSearched {
+            if searchVM.showsResults {
                 SearchResultsView(vm: searchVM)
                     .background(.background)
             }

@@ -11,14 +11,23 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
 from drivers.port_util import popen_group_kwargs, reap_descendants_of
 
 _REPO = Path(__file__).resolve().parents[3]
-#: What a wedged run gets, a queue for the real focus slot included.
+#: What a wedged run gets, counted from the latest sign that the real focus
+#: slot is still queueing or was just granted: that queue is the box's load,
+#: bounded by build-slot's own give-up, never a state this deadline judges
+#: (convention 14 — a loaded Linux held the focus grant 708 s once, past a
+#: deadline that counted it).
 DEADLINE_S = 600.0
+
+#: The real focus slot's own words about its queue: each waiting reprint, and
+#: the grant line closing them (build-slot.py's GRANTED_PREFIX).
+_FOCUS_QUEUE = re.compile(r"^\[build-slot\] (?:waiting \d+s for a 'focus' grant|granted a 'focus' slot)")
 
 #: Windows' stand-in for `env -u FAUNA_SLOT_HELD_FOCUS K=V … <cmd>`: argv[1] is
 #: the JSON of the variables to set, the rest the command, whose exit code is relayed.
@@ -68,6 +77,9 @@ class ProbeBuild:
         self.k, self.crates = k, crates
         self.out = ""
         self.proc: subprocess.Popen | None = None
+        self._lines: list[str] = []
+        self._queue_seen = 0.0
+        self._reader: threading.Thread | None = None
 
     def __enter__(self) -> "ProbeBuild":
         workspace = self.tmp / "ws"
@@ -108,19 +120,31 @@ class ProbeBuild:
             cwd=workspace, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             **popen_group_kwargs())
         reap_descendants_of(self.proc.pid)
+        self._reader = threading.Thread(target=self._read, daemon=True)
+        self._reader.start()
         return self
+
+    def _read(self) -> None:
+        """Drain the build's output (convention 13), noting the focus queue's lines."""
+        for line in self.proc.stdout:
+            self._lines.append(line)
+            if _FOCUS_QUEUE.match(line):
+                self._queue_seen = time.monotonic()
 
     def __exit__(self, *exc) -> None:
         (self.probe / "release").write_text("")
-        self.out, _ = self.proc.communicate(timeout=300)
+        self.proc.wait(timeout=300)
+        self._reader.join(timeout=60)
+        self.out = "".join(self._lines)
         print(self.out[-4000:])  # a failure in the body reads the build's own words
 
     def until(self, what: str, ok) -> None:
-        """Wait on a state, never a time."""
-        deadline = time.monotonic() + DEADLINE_S
+        """Wait on a state, never a time: the deadline runs from the later of
+        the wait's start and the focus slot's latest queue line."""
+        start = time.monotonic()
         while not ok():
             assert self.proc.poll() is None, f"the build ended before {what}"
-            assert time.monotonic() < deadline, f"never reached: {what}"
+            assert time.monotonic() < max(start, self._queue_seen) + DEADLINE_S, f"never reached: {what}"
             time.sleep(0.05)
 
     def live(self) -> int:

@@ -11,7 +11,7 @@
 //!
 //! **The app-password rows are not here.** On tui they are rows of the
 //! Connected apps roster (`connected_apps.rs`; `connected-apps.md`
-//! § Layout & flow): this page keeps Add password and Rotate keys.
+//! § Layout & flow): this page keeps Add credential and Rotate mail keys.
 //!
 //! **The error bridge is load-bearing.** `machine.dispatch(..)`'s `Result` is
 //! deliberately ignored at the call site (linux does the same) because a
@@ -27,6 +27,7 @@ use fauna_client_mail_settings::{
     CredentialKind, MailSettingsMachine, MailSettingsSnapshot, SettingsStatus,
     settings_status_label,
 };
+use fauna_core::possibility::{Possibility, ReadState};
 use fauna_core::secret::SecretString;
 use fauna_i18n::strings::mail_settings as ms;
 use fauna_i18n::strings::settings::mail as t;
@@ -189,6 +190,80 @@ pub struct MailState {
     /// was just shown. Cleared when the field is edited, when a commit's draft
     /// passes, and on every visit (`reset_form`).
     pub draft_refusal: Option<String>,
+    /// Where the forward-all read stands: the input and its commit wait on it
+    /// (rule 5), so a pre-read empty draft is never written as "forward
+    /// nowhere".
+    pub forward_all_read: ReadState,
+    /// Where the automatic-reply read stands: the message input and its
+    /// commit — which also turns the reply on — wait on it.
+    pub autorespond_read: ReadState,
+    /// Where the forward-rate read stands: the limit and its commit wait on
+    /// it, since the ceiling that bounds the value comes with it.
+    pub forward_per_hour_read: ReadState,
+}
+
+impl MailState {
+    /// `mail-settings-enabled-toggle`'s answer, the shared
+    /// `MailSettingsSnapshot::enable_toggle_possibility`; not possible before
+    /// the machine's first snapshot.
+    pub(crate) fn enable_answer(&self) -> Possibility {
+        self.snapshot.as_ref().map_or_else(
+            || Possibility::once_read(false),
+            |s| s.enable_toggle_possibility(),
+        )
+    }
+
+    /// `mail-settings-forward-all-to-input` and its commit.
+    pub(crate) fn forward_all_answer(&self) -> Possibility {
+        Possibility::from_read(self.forward_all_read)
+    }
+
+    /// `mail-settings-forward-per-hour-input` and its commit.
+    pub(crate) fn forward_per_hour_answer(&self) -> Possibility {
+        // The ceiling is only ever set from a read.
+        if self.forward_per_hour_ceiling.is_some() {
+            return Possibility::Possible;
+        }
+        Possibility::from_read(self.forward_per_hour_read)
+    }
+
+    /// `mail-settings-autorespond-message-input` and its commit.
+    pub(crate) fn autorespond_answer(&self) -> Possibility {
+        // A held reply is only ever set from a read.
+        if self.autorespond.is_some() {
+            return Possibility::Possible;
+        }
+        Possibility::from_read(self.autorespond_read)
+    }
+}
+
+/// A read's new state: a success resolves it; a failure keeps an earlier
+/// success (the page then still holds a value the nest confirmed).
+fn after_read<T, E>(was: ReadState, read: &Result<T, E>) -> ReadState {
+    was.after(read.is_ok())
+}
+
+/// A button painted from its answer: enabled from it (raw element readers see
+/// the state the seam would paint) and, while blocked, carrying its reason as
+/// its own label, so the reason is within eyeshot (walk invariant I8).
+pub(super) fn gated_button(button: Element, answer: Possibility) -> Element {
+    let mut button = button.enabled(answer.is_possible());
+    if let Some(reason) = answer.reason() {
+        button = button.labelled(crate::wizard::localized(reason));
+    }
+    button.possible(answer)
+}
+
+/// An input that waits on a read: enabled from its answer and, while it is
+/// blocked, followed by its reason as a line of its own — the input keeps its
+/// prompt as its label, so the seam could not paint the reason beside it
+/// (walk invariant I8).
+fn push_gated_input(els: &mut Vec<Element>, input: Element, answer: Possibility) {
+    let reason = answer.reason().map(crate::wizard::localized);
+    els.push(input.enabled(answer.is_possible()).possible(answer));
+    if let Some(reason) = reason {
+        els.push(Element::chrome(reason));
+    }
 }
 
 /// One nest-confirmed read of the page's per-account mail settings — the
@@ -376,6 +451,15 @@ impl MailState {
     /// and it succeeded; a failed part keeps what it had (its error already
     /// rides `error-message`).
     pub(super) fn apply_account_read(&mut self, read: MailAccountRead) {
+        if let Some(part) = &read.forward_all_to {
+            self.forward_all_read = after_read(self.forward_all_read, part);
+        }
+        if let Some(part) = &read.forward_per_hour {
+            self.forward_per_hour_read = after_read(self.forward_per_hour_read, part);
+        }
+        if let Some(part) = &read.autorespond {
+            self.autorespond_read = after_read(self.autorespond_read, part);
+        }
         if let Some(Ok(address)) = read.forward_all_to {
             self.forward_all_to_input = address.unwrap_or_default();
         }
@@ -516,7 +600,10 @@ pub(super) fn mail_elements(state: &SettingsState) -> Vec<Element> {
             Gesture::Settings(Action::ToggleMailEnabled),
         )
         .attr("state", state)
-        .enabled(!unavailable),
+        .enabled(!unavailable)
+        // The shared answer: still loading before the first read (the seam
+        // disables it with that reason), the notice below when unavailable.
+        .possible(m.enable_answer()),
     );
     if unavailable {
         els.push(Element::label(
@@ -585,23 +672,34 @@ pub(super) fn mail_elements(state: &SettingsState) -> Vec<Element> {
         els.extend(rotate_keys_form(m, snap));
     }
 
-    // The credential-management section. Gated on the shared
-    // `credential_management_reachable` field — read, never re-derived
-    // (§ Credential-management reachability: "every app reads the field
-    // rather than re-deriving the disjunction, so a future DAV sibling widens it
-    // in one place"). A CalDAV-only actor (email off) still manages credentials.
-    if let Some(s) = snap.filter(|s| s.credential_management_reachable) {
+    // The credential-management section, painted from the shared
+    // `MailSettingsSnapshot::credential_management_possibility()` — the answer
+    // over the shared `credential_management_reachable` field, read, never
+    // re-derived (§ Credential-management reachability: "every app reads the
+    // field rather than re-deriving the disjunction"; `ui/README.md` § Offer
+    // only what is possible, rule 6). A CalDAV-only actor (email off) still
+    // manages credentials. Absent → the section is not painted; blocked (mail
+    // off, nothing else reaching the credential) → Add credential stays visible,
+    // disabled with the reason naming the enable toggle above (rule 2); the
+    // rest of the section exists only once a credential can.
+    let credentials = snap.map(|s| s.credential_management_possibility());
+    if let Some(answer) = credentials.as_ref().filter(|a| a.is_shown()) {
         els.push(Element::chrome(t::CREDENTIALS_TITLE));
         // `mail-settings-add-credential-button` — the ONLY way to reach the
         // submit's `AddCredential` branch: the enabled toggle's job is the
         // disable decision, so without this button a second credential would be
         // unreachable and that branch would be dead code.
-        els.push(Element::gesture_button(
-            ids::MAIL_SETTINGS_ADD_CREDENTIAL_BUTTON,
-            t::ADD_CREDENTIAL,
-            true,
-            Gesture::Settings(Action::MailOpenAddCredential),
-        ));
+        els.push(
+            Element::gesture_button(
+                ids::MAIL_SETTINGS_ADD_CREDENTIAL_BUTTON,
+                t::ADD_CREDENTIAL,
+                true,
+                Gesture::Settings(Action::MailOpenAddCredential),
+            )
+            .possible(answer.clone()),
+        );
+    }
+    if let Some(s) = snap.filter(|_| credentials.as_ref().is_some_and(|a| a.is_possible())) {
         // `mail-settings-keys-info` — the (i) explainer (§ Keys explainer).
         els.push(Element::label(ids::MAIL_SETTINGS_KEYS_INFO, ms::KEYS_INFO));
         // `mail-settings-rotate-keys-button` — opens the rotate-keys confirm form.
@@ -611,16 +709,19 @@ pub(super) fn mail_elements(state: &SettingsState) -> Vec<Element> {
         // rules 5: no second rotation racing the first) — the banner's Resume
         // is the way on; the shared machine refuses a second StartRotation too.
         if !s.credentials.is_empty() {
-            els.push(Element::gesture_button(
-                ids::MAIL_SETTINGS_ROTATE_KEYS_BUTTON,
-                t::ROTATE_KEYS,
-                s.pending_rotation.is_none() && m.rotation_in_flight.is_none(),
-                Gesture::Settings(Action::MailOpenRotateForm),
+            els.push(gated_button(
+                Element::gesture_button(
+                    ids::MAIL_SETTINGS_ROTATE_KEYS_BUTTON,
+                    t::ROTATE_KEYS,
+                    true,
+                    Gesture::Settings(Action::MailOpenRotateForm),
+                ),
+                s.rotate_keys_possibility(m.rotation_in_flight.is_some()),
             ));
         }
 
         // The app passwords themselves are rows of the Connected apps roster
-        // (`mail-settings.md` § Credentials list): this page keeps Add password
+        // (`mail-settings.md` § Credentials list): this page keeps Add credential
         // and Rotate keys, and points at where each password is listed, copied,
         // revealed and disconnected.
         els.push(Element::chrome(if s.credentials.is_empty() {
@@ -728,7 +829,8 @@ fn autorespond_elements(m: &MailState) -> Vec<Element> {
         );
         els.push(Element::chrome(ms::AUTORESPOND_SUBTITLE));
     }
-    els.push(
+    push_gated_input(
+        &mut els,
         Element::input_commit(
             ids::MAIL_SETTINGS_AUTORESPOND_MESSAGE_INPUT,
             m.autorespond_message_input.clone(),
@@ -736,6 +838,7 @@ fn autorespond_elements(m: &MailState) -> Vec<Element> {
             Gesture::Settings(Action::MailCommitAutorespondMessage),
         )
         .labelled(ms::AUTORESPOND_MESSAGE_LABEL),
+        m.autorespond_answer(),
     );
     els
 }
@@ -767,8 +870,9 @@ fn quota_elements(m: &MailState) -> Vec<Element> {
 /// limit, each an `input_commit` with its explainer. The limit's explainer
 /// names the ceiling once the first read has returned it.
 fn forwarding_elements(m: &MailState) -> Vec<Element> {
-    let mut els = vec![
-        Element::chrome(ms::FORWARDING_TITLE),
+    let mut els = vec![Element::chrome(ms::FORWARDING_TITLE)];
+    push_gated_input(
+        &mut els,
         Element::input_commit(
             ids::MAIL_SETTINGS_FORWARD_ALL_TO_INPUT,
             m.forward_all_to_input.clone(),
@@ -776,7 +880,11 @@ fn forwarding_elements(m: &MailState) -> Vec<Element> {
             Gesture::Settings(Action::MailCommitForwardAllTo),
         )
         .labelled(ms::FORWARD_ALL_TO_LABEL),
-        Element::chrome(ms::FORWARD_ALL_TO_SUBTITLE),
+        m.forward_all_answer(),
+    );
+    els.push(Element::chrome(ms::FORWARD_ALL_TO_SUBTITLE));
+    push_gated_input(
+        &mut els,
         Element::input_commit(
             ids::MAIL_SETTINGS_FORWARD_PER_HOUR_INPUT,
             m.forward_per_hour_input.clone(),
@@ -784,7 +892,8 @@ fn forwarding_elements(m: &MailState) -> Vec<Element> {
             Gesture::Settings(Action::MailCommitForwardPerHour),
         )
         .labelled(ms::FORWARD_PER_HOUR_LABEL),
-    ];
+        m.forward_per_hour_answer(),
+    );
     if let Some(ceiling) = m.forward_per_hour_ceiling {
         els.push(Element::chrome(crate::wizard::localized(
             &fauna_client_mail_settings::forward_per_hour_hint(ceiling),
@@ -1006,11 +1115,19 @@ fn rotate_keys_form(m: &MailState, snap: Option<&MailSettingsSnapshot>) -> Vec<E
         ids::MAIL_ROTATE_KEYS_PROGRESS_INDICATOR,
         progress,
     ));
-    els.push(Element::gesture_button(
-        ids::MAIL_ROTATE_KEYS_CONFIRM_BUTTON,
-        t::ROTATE_CONFIRM,
-        m.rotation_in_flight.is_none(),
-        Gesture::Settings(Action::MailRotateConfirm),
+    // The confirm asks the same answer as the button that opened it; a
+    // pending rotation is resumed from its banner, not confirmed again.
+    let rotate = snap.map_or(Possibility::Possible, |s| {
+        s.rotate_keys_possibility(m.rotation_in_flight.is_some())
+    });
+    els.push(gated_button(
+        Element::gesture_button(
+            ids::MAIL_ROTATE_KEYS_CONFIRM_BUTTON,
+            t::ROTATE_CONFIRM,
+            true,
+            Gesture::Settings(Action::MailRotateConfirm),
+        ),
+        rotate,
     ));
     els.push(Element::gesture_button(
         ids::MAIL_ROTATE_KEYS_CANCEL_BUTTON,

@@ -1,5 +1,7 @@
 package com.fauna.app.ui.screen.events
 
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -29,6 +31,15 @@ import androidx.navigation.NavController
 import com.fauna.app.BuildConfig
 import com.fauna.app.R
 import com.fauna.ffi.FfiCalendarViewMode
+import com.fauna.ffi.FfiCalendarsRead
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.isShown
+import com.fauna.app.ui.util.pressAsked
+import com.fauna.app.ui.util.resolveLocalizedNested
+import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.semantics
+import uniffi.fauna_core.Possibility
 import com.fauna.ffi.FfiEventDrafts
 import com.fauna.ffi.FfiRefusedChange
 import com.fauna.ffi.calendarViewModes
@@ -53,6 +64,11 @@ import java.io.File
 import com.fauna.app.ui.viewmodel.EventsVM
 import kotlinx.coroutines.launch
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.AlertDialog
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.FilterChip
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.TextButton
 
 /**
  * The datetime shape the create-event form's own fields take (their placeholder
@@ -93,6 +109,9 @@ fun EventsScreen(navController: NavController, vm: EventsVM = hiltViewModel()) {
     val visibleEvents by vm.visibleEvents.collectAsState()
     val draft = vm.draft.collectAsState()
     val refusedChanges by vm.refusedChanges.collectAsState()
+    val calendarsRead by vm.calendarsRead.collectAsState()
+    val createGate by vm.createGate.collectAsState()
+    val eventFormError by vm.eventFormError.collectAsState()
     val appMessages = LocalAppMessages.current
 
     val context = LocalContext.current
@@ -190,6 +209,16 @@ fun EventsScreen(navController: NavController, vm: EventsVM = hiltViewModel()) {
         onRsvp = vm::rsvp,
         onCreateCalendar = vm::createCalendar,
         onCreateEvent = vm::createEvent,
+        calendarsUnresolved = calendarsRead is FfiCalendarsRead.Unresolved,
+        createGate = createGate,
+        onCreateRefused = { appMessages.showError(it) },
+        eventFormError = when (val e = eventFormError) {
+            null -> null
+            is EventsVM.EventFormError.Refused -> resolveLocalizedNested(context, e.reason)
+            is EventsVM.EventFormError.SaveFailed ->
+                context.getString(R.string.events_save_failed).replace("{error}", e.detail)
+        },
+        onEventFormClosed = vm::clearEventFormError,
         draft = draft,
         onDraftEdited = vm::onDraftEdited,
         onStartFreshDraft = vm::clearDraft,
@@ -269,7 +298,22 @@ fun EventsContent(
     onIcsPicked: (android.net.Uri?) -> Unit = {},
     onRsvp: (eventId: String, response: RsvpResponse) -> Unit,
     onCreateCalendar: (name: String) -> Unit,
-    onCreateEvent: (CreateEventRequest) -> Unit,
+    // `create-event`: the request and the close it runs on success only — a
+    // refused or failed save keeps the form open with what was typed
+    // (`ui/events.md` § *No calendar to hold an event*, ruling 4).
+    onCreateEvent: (CreateEventRequest, onSaved: () -> Unit) -> Unit,
+    // The calendar read has not landed (ruling 2): the loading line, never the
+    // empty state.
+    calendarsUnresolved: Boolean = false,
+    // The one predicate every door to the compose asks (ruling 3) — the shared
+    // `event_create_possibility`; a blocked door refuses with its reason on the
+    // page's `error-message` ([onCreateRefused]).
+    createGate: Possibility = Possibility.Possible,
+    onCreateRefused: (String) -> Unit = {},
+    // The open form's own `error-message` (ruling 4); [onEventFormClosed] drops
+    // it with the form.
+    eventFormError: String? = null,
+    onEventFormClosed: () -> Unit = {},
     // Draft-persistence v2, events rail (reserved-folders.md § Drafts Sync;
     // events.md § Persistence). `draft` is reactive (not a one-shot read) so a
     // restore landing while the New Event sheet is already open still reaches
@@ -293,6 +337,17 @@ fun EventsContent(
     // form. Single-sourced here so the two entry points cannot drift (windows'
     // `NewEventAtSlot` plays the same role).
     var newEventSlot by remember { mutableStateOf<LocalDateTime?>(null) }
+    val context = LocalContext.current
+    // Every door to the compose asks the same answer it was painted from and
+    // opens nothing unless it is possible (ruling 3).
+    val openCompose: (LocalDateTime?, Boolean) -> Unit = { slot, fresh ->
+        pressAsked(context, createGate, onCreateRefused) {
+            newEventSlot = slot
+            if (fresh) onStartFreshDraft()
+            showEventForm = true
+        }
+    }
+    val emptyReason = resolveLocalizedNested(context, createGate.blockedReason)
 
     val pullToRefreshState = rememberPullToRefreshState()
     if (pullToRefreshState.isRefreshing) {
@@ -311,10 +366,11 @@ fun EventsContent(
             // (events.md § Layout and flow). Needs at least one calendar to exist.
             // A compose OPENER writes nothing, so it stays live with no nest —
             // the form's own submit is where the gate lands.
-            if (calendars.isNotEmpty()) {
+            if (createGate.isShown) {
                 FloatingActionButton(
-                    onClick = { newEventSlot = null; showEventForm = true },
+                    onClick = { openCompose(null, false) },
                     modifier = Modifier.testTag(Ids.NEW_EVENT_BTN)
+                        .semantics { if (!createGate.isPossible) disabled() },
                 ) {
                     Icon(Icons.Default.Add, stringResource(R.string.events_new_event))
                 }
@@ -411,7 +467,7 @@ fun EventsContent(
                                     index = index, count = modes.size
                                 ),
                                 modifier = Modifier.testTag(viewTag)
-                            ) { Text(view.name.lowercase().replaceFirstChar { it.uppercase() }) }
+                            ) { DisableSelection { Text(view.name.lowercase().replaceFirstChar { it.uppercase() }) } }
                         }
                     }
                 }
@@ -521,7 +577,7 @@ fun EventsContent(
                 if (calendars.isNotEmpty()) {
                     when (calendarView) {
                         FfiCalendarViewMode.AGENDA -> {
-                            item { AgendaPanHeader(date = selectedDate, onDateChange = onSelectDate) }
+                            item { AgendaPanHeader(date = selectedDate, onDateChange = onSelectDate, onPanRefused = onCreateRefused) }
                             if (isLoading && events.isEmpty()) {
                                 item {
                                     Box(modifier = Modifier.fillMaxWidth().padding(32.dp),
@@ -571,7 +627,7 @@ fun EventsContent(
                                     events = visibleEvents,
                                     onDateChange = onSelectDate,
                                     onEventClick = { onOpenEvent(it.id) },
-                                    onSlotClick = { newEventSlot = it; onStartFreshDraft(); showEventForm = true })
+                                    onSlotClick = { openCompose(it, true) })
                             }
                         }
                         FfiCalendarViewMode.WEEK -> {
@@ -581,7 +637,7 @@ fun EventsContent(
                                     events = visibleEvents,
                                     onDateChange = onSelectDate,
                                     onEventClick = { onOpenEvent(it.id) },
-                                    onSlotClick = { newEventSlot = it; onStartFreshDraft(); showEventForm = true })
+                                    onSlotClick = { openCompose(it, true) })
                             }
                         }
                         FfiCalendarViewMode.MONTH -> {
@@ -599,10 +655,21 @@ fun EventsContent(
                                     // midnight (events.md § User actions).
                                     onDayDoubleClick = { day ->
                                         val start = workingDayStart()
-                                        newEventSlot = day.atTime(start.hour.toInt(), start.minute.toInt())
-                                        onStartFreshDraft()
-                                        showEventForm = true
+                                        openCompose(day.atTime(start.hour.toInt(), start.minute.toInt()), true)
                                     })
+                            }
+                        }
+                    }
+                } else if (calendarsUnresolved) {
+                    // The read has not landed (or the key's mint is in flight):
+                    // the loading line, never the empty state (ruling 2).
+                    item {
+                        Box(modifier = Modifier.fillMaxWidth().padding(32.dp),
+                            contentAlignment = Alignment.Center) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                CircularProgressIndicator()
+                                Spacer(Modifier.height(8.dp))
+                                Text(emptyReason.orEmpty(), color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
                     }
@@ -615,7 +682,14 @@ fun EventsContent(
                                     modifier = Modifier.size(48.dp),
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant)
                                 Spacer(Modifier.height(8.dp))
-                                Text(stringResource(R.string.events_no_calendars), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                // The predicate's reason (provision failed) where
+                                // the list would be; "No calendars yet." only for
+                                // a real, loaded empty list (ruling 3).
+                                Text(
+                                    emptyReason ?: stringResource(R.string.events_no_calendars),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.testTag(Ids.CALENDAR_LIST_EMPTY_STATE),
+                                )
                                 Spacer(Modifier.height(8.dp))
                                 Button(onClick = { showCreateCalendar = true }) { Text(stringResource(R.string.events_new_calendar)) }
                             }
@@ -655,14 +729,14 @@ fun EventsContent(
             // cleared the rail above), only the FAB's blank-slate open does.
             resumableDraft = if (newEventSlot == null) draft else null,
             onFieldsChanged = onDraftEdited,
-            onDismiss = { showEventForm = false },
+            onDismiss = { showEventForm = false; onEventFormClosed() },
             // The one close that forgets (`event-form-discard`): the rail is emptied
             // the way a day-cell start empties it, then the sheet closes.
-            onDiscard = { onStartFreshDraft(); showEventForm = false },
+            onDiscard = { onStartFreshDraft(); showEventForm = false; onEventFormClosed() },
             onCreate = { request ->
-                onCreateEvent(request)
-                showEventForm = false
-            }
+                onCreateEvent(request) { showEventForm = false }
+            },
+            errorMessage = eventFormError,
         )
     }
 }
@@ -741,6 +815,9 @@ fun EventFormSheet(
     onFieldsChanged: (
         summary: String, dtstart: String, dtend: String, description: String, location: String,
     ) -> Unit = { _, _, _, _, _ -> },
+    // The form's own `error-message`: a refused or failed save, in a whole
+    // sentence, with the form kept open (`ui/events.md` ruling 4).
+    errorMessage: String? = null,
 ) {
     var summary by remember { mutableStateOf("") }
     var dtstart by remember { mutableStateOf(initialDtstart) }
@@ -769,7 +846,7 @@ fun EventFormSheet(
         }
     }
 
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    ModalBottomSheet(onDismissRequest = onDismiss) { SelectionContainer {
         Column(
             modifier = Modifier
                 .padding(horizontal = 24.dp, vertical = 16.dp)
@@ -869,6 +946,13 @@ fun EventFormSheet(
                 Text(stringResource(R.string.events_create_event))
             }
             DisabledControlReasonText(gate.reason)
+            if (errorMessage != null) {
+                Text(
+                    errorMessage,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.fillMaxWidth().testTag(Ids.ERROR_MESSAGE),
+                )
+            }
             TextButton(
                 onClick = onDiscard,
                 modifier = Modifier.fillMaxWidth().testTag(Ids.EVENT_FORM_DISCARD)
@@ -877,7 +961,7 @@ fun EventFormSheet(
             }
             Spacer(Modifier.height(24.dp))
         }
-    }
+    }}
 }
 
 /**

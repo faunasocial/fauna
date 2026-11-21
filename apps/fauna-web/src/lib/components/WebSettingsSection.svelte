@@ -29,6 +29,8 @@
     ensureWasm,
     webDisabledReasonText,
     webPostPageUrl,
+    webSiteLinkCopyPossibility,
+    webSubdomainTogglePossibility,
     webSubdomainView,
     webTokenedUrl,
     type SiteLinkDisabledReason,
@@ -46,6 +48,7 @@
   import { afterNavigate } from '$app/navigation';
   import { t } from '#lib/i18n/strings';
   import { resolveLocalized } from '#lib/i18n/localized';
+  import { paintPossibility } from '#lib/possibility';
   import { IDS } from '#lib/generated/uiIds';
 
   // The parent settings page owns the single error surface; web dispatch errors
@@ -66,6 +69,19 @@
   // is not consulted: `servingDomain` comes from nest.info (web-content-hosting.md
   // § Published-post management).
   let servingDomain = $state('');
+  // Where the hydrate stands, for the toggle's rule-5 answer: a failed read
+  // says so rather than "still loading".
+  let readState = $state<'pending' | 'failed' | 'resolved'>('pending');
+  // The shared answers come over wasm; before it loads the toggle is shown
+  // disabled (rule 5), never enabled on a guess.
+  let wasmReady = $state(false);
+  // Which read may still land. `hydrate` runs from both `onMount` and
+  // `afterNavigate`, so two reads can be in flight, and a read begun BEFORE a
+  // toggle can resolve AFTER it: applied, it would put the pre-toggle `enabled`
+  // back on this page and on the shared `webPage` store the feed's copy verbs
+  // read. Each read takes the next number, a toggle takes one too, and only
+  // the newest read applies — a superseded answer is dropped, never painted.
+  let readGeneration = 0;
 
   // ── Published-posts management section (web-content-hosting.md
   //    § Published-post management). `posts` + the origin resolution
@@ -107,8 +123,10 @@
     // handed to `setWebPage` so a read begun as A cannot repopulate the shared
     // store after an in-heap actor change.
     const stillThisActor = sameActorSince();
+    const generation = ++readGeneration;
     try {
       await ensureWasm();
+      wasmReady = true;
       const secretHex = $identity?.secretHex ?? '';
       // `call()` waits for the socket, so no manual connect-retry is needed.
       servingDomain = await webServingDomain(secretHex);
@@ -117,7 +135,9 @@
         webDomainGet(secretHex),
         webPublishedSite(secretHex),
       ]);
+      if (generation !== readGeneration) return;
       applyView(subEnabled);
+      readState = 'resolved';
       posts = site.posts;
       renderedPagesDown = site.rendered_pages_down;
       hydrated = true;
@@ -132,6 +152,8 @@
         stillThisActor,
       );
     } catch (e) {
+      if (generation !== readGeneration) return;
+      if (view === null) readState = 'failed';
       error = e instanceof Error ? e.message : String(e);
     }
   }
@@ -145,8 +167,18 @@
 
   // Flip the opt-in, then re-render from the nest's echoed state (non-optimistic).
   async function onToggle(): Promise<void> {
+    // The action asks the same shared answer the toggle paints from, and a
+    // refusal says why — never a silent drop (`docs/goal/ui/README.md`
+    // § Offer only what is possible, rules 6 and 7).
+    const answer = webSubdomainTogglePossibility(readState, view);
+    if (answer.state !== 'possible') {
+      if (answer.state === 'blocked' && readState !== 'failed') error = resolveLocalized(answer.reason);
+      return;
+    }
     error = '';
     const stillThisActor = sameActorSince();
+    // Supersede any read still in flight: it began before this flip.
+    readGeneration++;
     try {
       applyView(await webSetSubdomainEnabled($identity?.secretHex ?? '', !enabled));
       patchWebPage((p) => ({ ...p, enabled }), stillThisActor);
@@ -154,6 +186,21 @@
       error = e instanceof Error ? e.message : String(e);
     }
   }
+
+  // The toggle's shared answer: absent on a nest with no serving domain,
+  // blocked with the step on no or a reserved handle, not enabled before the
+  // read resolves; switching off is always possible.
+  let toggleAnswer = $derived(
+    wasmReady
+      ? paintPossibility(webSubdomainTogglePossibility(readState, view))
+      : { shown: true, disabled: true, reason: null },
+  );
+  // Both copy buttons' shared answer over the resolved origin.
+  let copyAnswer = $derived(
+    paintPossibility(
+      webSiteLinkCopyPossibility($siteLink ?? { origin: null, disabled_reason: null }),
+    ),
+  );
 
   // The URL row text: the live URL (whether on or off — it's where the site would
   // serve), else the disabled reason.
@@ -183,6 +230,7 @@
   }
 
   async function copyWebLink(post: PublishedPost): Promise<void> {
+    if (copyAnswer.disabled) return;
     const origin = $siteLink?.origin;
     if (!origin) return;
     const url = webPostPageUrl(origin, post.slug);
@@ -236,14 +284,17 @@
   <!-- Subdomain opt-in toggle (default OFF). `data-state` (the e2e read idiom)
        tracks the nest, not an optimistic local guess. -->
   <div class="toggle-row">
-    <button
-      class="btn toggle"
-      class:on={enabled}
-      data-testid={IDS.WEB_SETTINGS_SUBDOMAIN_TOGGLE}
-      data-state={enabled ? 'on' : 'off'}
-      disabled={view === null}
-      onclick={onToggle}
-    >{t.web_settings.subdomain_toggle_label}</button>
+    {#if toggleAnswer.shown}
+      <button
+        class="btn toggle"
+        class:on={enabled}
+        data-testid={IDS.WEB_SETTINGS_SUBDOMAIN_TOGGLE}
+        data-state={enabled ? 'on' : 'off'}
+        disabled={toggleAnswer.disabled}
+        title={toggleAnswer.reason ? resolveLocalized(toggleAnswer.reason) : undefined}
+        onclick={onToggle}
+      >{t.web_settings.subdomain_toggle_label}</button>
+    {/if}
     <p class="muted small">{t.web_settings.subdomain_toggle_subtitle}</p>
   </div>
 
@@ -295,7 +346,7 @@
             <button
               class="btn-secondary small"
               data-testid={IDS.WEB_PUBLISHED_POST_COPY_LINK_BUTTON}
-              disabled={!$siteLink?.origin}
+              disabled={copyAnswer.disabled}
               data-copied={copied && samePost(copied.postId, post.post_id) && copied.kind === 'web'
                 ? copied.url
                 : undefined}
@@ -305,7 +356,7 @@
               <button
                 class="btn-secondary small"
                 data-testid={IDS.WEB_PUBLISHED_POST_COPY_PAYWALL_LINK_BUTTON}
-                disabled={!$siteLink?.origin}
+                disabled={copyAnswer.disabled}
                 data-copied={copied && samePost(copied.postId, post.post_id) && copied.kind === 'paywall'
                   ? copied.url
                   : undefined}

@@ -37,7 +37,38 @@ public final class ProfileOffersVM {
     /// `ProfileState::unfollow_armed`.
     public private(set) var unfollowArmed = false
 
+    /// Where the open-time `fauna.subscriptions.status.get` read stands (tui's
+    /// `follow_read`, android's `ProfileVM.followRead`) — `failed` when it
+    /// threw, which ``statusTier`` alone cannot tell from "not answered yet".
+    public private(set) var followRead: ReadState = .pending
+
+    /// Whether `profile-follow-button` can be pressed now (`profile.md`
+    /// § Errors & edge cases, *Unread state is not possible*; tui's
+    /// `follow_answer`): only once the page knows which way the press goes —
+    /// the viewer's own press this open, or a status read that answered.
+    /// Before it, blocked still loading; after a failed read, blocked
+    /// load-failed — so a press never subscribes again to an author the
+    /// viewer already follows. ``toggleFollow(home:)`` asks it again.
+    public var followAnswer: Possibility {
+        readPossibility(read: followFlip != nil ? .resolved : followRead)
+    }
+
     #if !FAUNA_EXCISE_PAYMENTS
+    /// The features courtesy read the profile open issues itself (`profile.md`
+    /// § Errors & edge cases): `nil` until it answered.
+    public private(set) var featureRows: [FfiFeatureRow]?
+    /// The features read threw (and none has answered since).
+    public private(set) var featuresReadFailed = false
+
+    /// `subscription-claim-redeem-button`'s answer — the shared features gate
+    /// over the `payments` row (``featureGateAnswer(rows:failed:feature:)``):
+    /// still loading before the read, blocked with a `disabled` row's
+    /// restriction, and absent — the whole redeem block left out — on a nest
+    /// with no `payments` plane. ``redeemClaim(home:)`` asks it again.
+    public var redeemAnswer: Possibility {
+        featureGateAnswer(rows: featureRows, failed: featuresReadFailed, feature: "payments")
+    }
+
     /// `subscription-claim-redeem-input` on the OTHER Tiers tab — a claim code
     /// of THIS creator, redeemed at the page's actor home. Cleared only when the
     /// nest takes the code (a refused paste stays to correct) and on every fresh
@@ -96,9 +127,12 @@ public final class ProfileOffersVM {
         followPending = false
         followFlip = nil
         unfollowArmed = false
+        followRead = .pending
         errorMessage = nil
         #if !FAUNA_EXCISE_PAYMENTS
         claimCodeInput = ""
+        featureRows = nil
+        featuresReadFailed = false
         #endif
     }
 
@@ -112,10 +146,57 @@ public final class ProfileOffersVM {
         // A fresh open reads the follow state from the status, disarmed.
         followFlip = nil
         unfollowArmed = false
+        followRead = .pending
         #if !FAUNA_EXCISE_PAYMENTS
         claimCodeInput = ""
+        featureRows = nil
+        featuresReadFailed = false
         #endif
         await refresh()
+        #if !FAUNA_EXCISE_PAYMENTS
+        await refreshFeatures()
+        #endif
+    }
+
+    #if !FAUNA_EXCISE_PAYMENTS
+    /// The features courtesy read the redeem answer waits on — issued by the
+    /// profile open itself (tui does the same), so the Tiers tab never paints
+    /// a redeem the nest's `payments` plane would refuse or does not have.
+    public func refreshFeatures() async {
+        guard let api else { return }
+        do {
+            let rows = try await api.featureRows()
+            guard self.api === api else { return }
+            applyFeaturesRead(rows)
+        } catch {
+            guard self.api === api else { return }
+            applyFeaturesRead(nil)
+        }
+    }
+
+    /// The features read landed (`rows`) or threw (`nil`). Internal so the
+    /// unit tests drive it without a nest.
+    func applyFeaturesRead(_ rows: [FfiFeatureRow]?) {
+        if let rows {
+            featureRows = rows
+            featuresReadFailed = false
+        } else if featureRows == nil {
+            featuresReadFailed = true
+        }
+    }
+    #endif
+
+    /// The status read landed (`tier`, `followPending`) — or threw (`nil`).
+    /// Internal so the unit tests drive it without a nest; a failure after a
+    /// resolved read keeps the follow answer resolved.
+    func applyStatusRead(_ status: (tier: String?, followPending: Bool)?) {
+        if let status {
+            statusTier = status.tier
+            followPending = status.followPending
+            followRead = .resolved
+        } else if followRead != .resolved {
+            followRead = .failed
+        }
     }
 
     /// The header read replaced the page's actor-home slot: a moved slot re-reads
@@ -141,11 +222,11 @@ public final class ProfileOffersVM {
             offers = loaded.filter { $0.name != Self.followersTier }
             let status = try await api.subscriptionStatusGet(authorIdHex: authorIdHex)
             guard self.api === api, self.authorIdHex == authorIdHex else { return }
-            statusTier = status.tier
-            followPending = status.followPending
+            applyStatusRead((status.tier, status.followPending))
             errorMessage = nil
         } catch {
             guard self.api === api, self.authorIdHex == authorIdHex, self.home == readHome else { return }
+            applyStatusRead(nil)
             errorMessage = DisplayError.message(error)
         }
     }
@@ -239,15 +320,23 @@ public final class ProfileOffersVM {
     /// typed code of THIS creator through the shared across-nests redeem
     /// (`monetization.md` § Pillar 3 → *Which nest an in-app redeem binds on*),
     /// carrying `home`: the page's actor-home slot, exactly the value the follow
-    /// passes (`nil` = the local redeem). A blank code is a no-op, never a nest
+    /// passes (`nil` = the local redeem). A blank code is refused, never a nest
     /// round-trip. On success the spent code leaves the input, a queued grant
     /// reads "Pending approval" as a queued subscribe does, and the offers +
     /// status re-read; a refusal keeps the code and surfaces on `error-message`.
-    /// Mirrors tui `profile::Action::RedeemClaim`.
+    /// Mirrors tui `profile::Action::RedeemClaim`. A blank code is refused
+    /// first with the shared `redeem_code_possibility`'s reason.
     public func redeemClaim(home: String? = nil) async {
+        // Rule 6: the press asks what the button was painted from — the
+        // payments gate first (the plane's reason outranks the draft's, as
+        // `Possibility.and` orders them), then the shared
+        // `redeem_code_possibility`.
+        if let refusal = redeemAnswer.and(subscriptionRedeemCodePossibility(code: claimCodeInput)).refusal {
+            errorMessage = refusal
+            return
+        }
         guard let api, let authorIdHex else { return }
         let code = claimCodeInput.trimmingCharacters(in: .whitespaces)
-        guard !code.isEmpty else { return }
         unfollowArmed = false
         do {
             let reply = try await api.redeemPaymentClaimAcrossNests(
@@ -276,6 +365,11 @@ public final class ProfileOffersVM {
     /// carry it so an author homed on another nest is followed and left across nests
     /// (`federated-follow.md` § Decision 2); `nil` = the local arm.
     public func toggleFollow(home: String? = nil) async {
+        // Rule 6: the press asks the answer the button was painted from.
+        if let refusal = followAnswer.refusal {
+            errorMessage = refusal
+            return
+        }
         guard isFollowing else {
             await follow(home: home)
             return

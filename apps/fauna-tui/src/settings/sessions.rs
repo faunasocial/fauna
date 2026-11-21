@@ -110,6 +110,16 @@ async fn roster(
     )
 }
 
+/// `sessions-revoke-others-button`'s answer, the shared predicate over this
+/// page's fold and its in-flight act — what the button paints from and what
+/// the arm and the confirm ask again.
+pub(super) fn revoke_others_answer(state: &SessionsState) -> fauna_core::possibility::Possibility {
+    fauna_client_account::sessions_view::revoke_others_possibility(
+        state.snapshot.as_ref(),
+        state.busy,
+    )
+}
+
 /// Fold a pass onto the page. A failed re-read keeps the painted rows.
 pub(super) fn apply(state: &mut SessionsState, pass: SessionsPass) {
     state.busy = false;
@@ -191,13 +201,25 @@ pub(super) fn sessions_elements(state: &SettingsState) -> Vec<Element> {
         }
     }
 
-    // Region 2 — sign out everywhere else, the two-press inline confirm.
-    els.push(Element::gesture_button(
+    // Region 2 — sign out everywhere else, the two-press inline confirm. Not
+    // live before the roster folds, nor with no other sign-in to end (the
+    // shared answer); armed, the confirm pair below takes over. A blocked
+    // answer's reason rides the button's own line, so it is painted whether
+    // the seam or the armed state disabled it (walk invariant I8).
+    let revoke_others = revoke_others_answer(s);
+    let mut revoke_others_button = Element::gesture_button(
         ids::SESSIONS_REVOKE_OTHERS_BUTTON,
         t::REVOKE_OTHERS,
-        !s.busy && !s.revoke_others_armed,
+        !s.revoke_others_armed,
         Gesture::Settings(Action::SessionsRevokeOthersArm),
-    ));
+    );
+    if let Some(reason) = revoke_others.reason() {
+        let text = crate::wizard::localized(reason);
+        revoke_others_button = revoke_others_button
+            .labelled(text.clone())
+            .attr("reason", text);
+    }
+    els.push(revoke_others_button.possible(revoke_others));
     if s.revoke_others_armed {
         els.push(Element::gesture_button(
             ids::SESSIONS_REVOKE_OTHERS_CONFIRM_BUTTON,

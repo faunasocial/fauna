@@ -74,10 +74,14 @@ def _error_text(driver):
     return None if driver.is_absent("error-message") else driver.get_text("error-message")
 
 
-def _rename(driver, card: int, name: str) -> None:
+def _open_rename(driver, card: int, name: str) -> None:
     driver.click("device-rename-button", scope=f"device-card[{card}]")
     driver.wait_for("device-rename-input", timeout=15.0)
     driver.fill("device-rename-input", name)
+
+
+def _rename(driver, card: int, name: str) -> None:
+    _open_rename(driver, card, name)
     driver.click("device-rename-confirm-button")
 
 
@@ -350,10 +354,37 @@ def test_a_rename_to_another_apps_default_name_is_refused_in_words_and_sends_not
             labels_before = {label for _id, label, _s in rows_before}
             reserved = next(n for n in _RESERVED_CANDIDATES if n not in labels_before)
 
-            _rename(da, last["card"], reserved)
+            # An app that gates the save on the shared draft answer
+            # (`DevicesMachine::rename_possibility`; `ui/devices.md` § Errors &
+            # edge cases) paints the refusal beside the disabled Save before
+            # any press; one that refuses at the press says it on
+            # `error-message`. Either is the same sentence, and nothing is sent.
+            # A gating app paints the disabled Save a beat before its reason
+            # (the draft answer is read after the keystroke lands), so the
+            # disabled-without-reason state is waited out, never pressed: the
+            # press is taken only once the Save reads enabled with no reason.
+            _open_rename(da, last["card"], reserved)
+
+            def gate_settled():
+                reason = da.blocked_reason("device-rename-confirm-button")
+                if reason:
+                    return ("gated", reason)
+                if not da.is_disabled("device-rename-confirm-button"):
+                    return ("offered", None)
+                return None
+
+            settled = wait_until(
+                gate_settled, 30.0, interval=0.5,
+                diagnose=lambda: (
+                    f"Save stayed disabled with no painted reason after typing {reserved!r}"
+                ),
+            )
+            gated = settled[1]
+            if not gated:
+                da.click("device-rename-confirm-button")
 
             def refused() -> bool:
-                last["error"] = _error_text(da)
+                last["error"] = gated or _error_text(da)
                 return bool(last["error"])
 
             wait_until(

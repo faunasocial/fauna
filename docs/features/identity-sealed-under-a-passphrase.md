@@ -34,7 +34,7 @@ Stamped 2026-10-17 at 2ad53d795c.
 4. [app] A passphrase you type is never shown: each character appears only as a dot — `docs/goal/architecture/apps/tui.md` § Credential storage
    - `tests/e2e-unified/tests/test_tui_credential_store_rekey.py::test_change_passphrase_relaunch_old_refused_new_unlocks`
    - `tests/e2e-unified/tests/test_web_sealed_identity_store.py::test_web_sealed_identity_store_journey`
-5. [app] You can change the passphrase that seals your identity, and the old one stops working — `docs/goal/architecture/apps/tui.md` § Credential storage
+5. [app] You can change the passphrase your identity is encrypted with, and the old one stops working — `docs/goal/architecture/apps/tui.md` § Credential storage
    - `tests/e2e-unified/tests/test_tui_credential_store_rekey.py::test_change_passphrase_relaunch_old_refused_new_unlocks`
    - `tests/e2e-unified/tests/test_web_sealed_identity_store.py::test_web_sealed_identity_store_journey`
 6. [app] Changing the passphrase asks for the current one first, and a wrong current passphrase is refused with nothing changed — `docs/goal/architecture/apps/tui.md` § Credential storage
@@ -58,16 +58,16 @@ Stamped 2026-10-17 at 2ad53d795c.
 12. [app] A forgotten passphrase cannot be reset: your identity comes back only from your recovery kit or a copy of your key kept elsewhere — `docs/goal/ui/settings.md` § Credential store
     - `tests/e2e-unified/tests/test_tui_headless_credential_store.py::test_a_forgotten_passphrase_cannot_be_reset`
     - `tests/e2e-unified/tests/test_web_sealed_identity_store.py::test_a_forgotten_passphrase_cannot_be_reset`
-13. [app] If the app stops while saving your sealed identity, what it saved is never left cut short or unreadable — `docs/goal/architecture/apps/tui.md` § Credential storage
+13. [app] If the app stops while saving your encrypted identity, what it saved is never left cut short or unreadable — `docs/goal/architecture/apps/tui.md` § Credential storage
     - `tests/e2e-unified/tests/test_tui_headless_credential_store.py::test_a_crash_while_saving_never_cuts_the_sealed_file_short`
     - `tests/e2e-unified/tests/test_web_sealed_identity_store.py::test_a_crash_while_saving_never_cuts_the_sealed_file_short`
-14. [app] A sealed identity the app cannot read — damaged, or written by a newer version of the app — is left as it is, never replaced with an empty one, so it never silently costs you your identity — `docs/goal/architecture/apps/tui.md` § Credential storage
+14. [app] An encrypted identity the app cannot read — damaged, or written by a newer version of the app — is left as it is, never replaced with an empty one, so it never silently costs you your identity — `docs/goal/architecture/apps/tui.md` § Credential storage
     - `tests/e2e-unified/tests/test_tui_headless_credential_store.py::test_an_unreadable_sealed_identity_is_left_as_it_is`
     - `tests/e2e-unified/tests/test_web_sealed_identity_store.py::test_an_unreadable_sealed_identity_is_left_as_it_is`
-15. [app] Two copies of the app open at once on the same sealed identity never lose it between them — `docs/goal/architecture/apps/tui.md` § Credential storage
+15. [app] Two copies of the app open at once on the same encrypted identity never lose it between them — `docs/goal/architecture/apps/tui.md` § Credential storage
     - `tests/e2e-unified/tests/test_tui_headless_credential_store.py::test_two_copies_on_one_sealed_identity_never_lose_it`
     - `tests/e2e-unified/tests/test_web_sealed_identity_store.py::test_two_copies_on_one_sealed_identity_never_lose_it`
-16. [app] Once your identity is sealed under a passphrase, the app keeps finding it there: it never switches by itself to another store and leaves your sealed identity behind — `docs/goal/architecture/apps/tui.md` § Credential storage
+16. [app] Once your identity is encrypted with a passphrase, the app keeps finding it in that store: it never switches by itself to another store and leaves your encrypted identity behind — `docs/goal/architecture/apps/tui.md` § Credential storage
     - `tests/e2e-unified/tests/test_tui_headless_credential_store.py::test_a_sealed_identity_is_never_left_behind_for_another_store`
     - `tests/e2e-unified/tests/test_web_sealed_identity_store.py::test_a_sealed_identity_is_never_left_behind_for_another_store`
 17. [app] After you reset the app, the next setup asks you to choose a passphrase again — `docs/goal/architecture/apps/tui.md` § Credential storage

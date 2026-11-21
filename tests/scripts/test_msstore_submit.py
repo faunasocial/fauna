@@ -8,6 +8,7 @@ the packages, keep the visibility, upload, commit, record `in-review`; a re-run
 finds the submission and records where it is without uploading again.
 """
 
+import base64
 import hashlib
 import importlib.util
 import io
@@ -31,6 +32,19 @@ VERSION = "0.1.7"
 CRED = {"FAUNA_MSSTORE_TENANT_ID": "tenant-1", "FAUNA_MSSTORE_CLIENT_ID": "client-1",
         "FAUNA_MSSTORE_CLIENT_SECRET": "s3cret-value"}
 SAS = "https://ingest.example.test/blob/abc?sv=2014-02-14&sig=zzz"
+GH_URL = "https://token.actions.example.test/idtoken?api-version=2.0"
+GH_REQUEST_TOKEN = "request-token-xyz"
+SUBJECT = "repo:faunasocial/fauna:environment:release"
+
+
+def _b64(obj: dict) -> str:
+    return base64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip("=")
+
+
+GH_TOKEN = f"{_b64({'alg': 'RS256'})}.{_b64({'sub': SUBJECT, 'aud': 'api://AzureADTokenExchange'})}.sigsig"
+FED = {"FAUNA_MSSTORE_TENANT_ID": "tenant-1", "FAUNA_MSSTORE_CLIENT_ID": "client-1",
+       "FAUNA_MSSTORE_CLIENT_SECRET": "", "ACTIONS_ID_TOKEN_REQUEST_URL": GH_URL,
+       "ACTIONS_ID_TOKEN_REQUEST_TOKEN": GH_REQUEST_TOKEN}
 
 _MANIFEST = ('<?xml version="1.0"?><Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10">'
              '<Identity Name="FaunaSocial.FaunaSocial" Publisher="CN=X" Version="{v}" '
@@ -83,6 +97,8 @@ class FakePartnerCenter:
         self.statuses = list(statuses)
         self.put_body = None
         self.token_status = token_status
+        self.github_requests: list[tuple[str, dict]] = []
+        self.token_forms: list[tuple[str, dict]] = []
         self.published = {
             "id": "100", "status": "Published", "visibility": visibility,
             "listings": {"en-us": {"baseListing": {"releaseNotes": "0.1.6 notes", "title": "Fauna"}},
@@ -95,9 +111,21 @@ class FakePartnerCenter:
     def __call__(self, method, url, headers, body):
         path = url.split("?")[0]
         self.calls.append((method, path))
+        if path.startswith(GH_URL.split("?")[0]):
+            self.github_requests.append((url, dict(headers)))
+            assert headers.get("Authorization") == f"Bearer {GH_REQUEST_TOKEN}"
+            return 200, json.dumps({"value": GH_TOKEN}).encode()
         if path.startswith("https://login.microsoftonline.com/"):
             form = urllib.parse.parse_qs(body.decode())
-            assert form["resource"] == [ms.RESOURCE] and form["grant_type"] == ["client_credentials"]
+            self.token_forms.append((path, form))
+            assert form["grant_type"] == ["client_credentials"]
+            if path.endswith("/oauth2/v2.0/token"):
+                assert form["scope"] == ["https://manage.devcenter.microsoft.com/.default"]
+                assert form["client_assertion"] == [GH_TOKEN] and "client_secret" not in form
+                assert form["client_assertion_type"] == [
+                    "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"]
+            else:
+                assert form["resource"] == [ms.RESOURCE]
             if self.token_status != 200:
                 return self.token_status, b'{"error":"invalid_client"}'
             return 200, b'{"access_token":"tok"}'
@@ -241,7 +269,57 @@ def test_no_credential_reds_after_the_inputs_and_before_any_call(tmp_path, capsy
     fake = FakePartnerCenter()
     rc, _ = _run(tmp_path, fake, env={"FAUNA_MSSTORE_TENANT_ID": "t"})
     assert rc == 1 and fake.calls == []
-    assert "FAUNA_MSSTORE_CLIENT_ID, FAUNA_MSSTORE_CLIENT_SECRET" in capsys.readouterr().out
+    assert "FAUNA_MSSTORE_CLIENT_ID" in capsys.readouterr().out
+
+
+def test_with_no_secret_the_github_identity_token_is_exchanged_and_the_release_goes_on(tmp_path, capsys):
+    fake = FakePartnerCenter()
+    rc, record = _run(tmp_path, fake, env=FED)
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    [(url, _)] = fake.github_requests
+    assert "audience=api%3A%2F%2FAzureADTokenExchange" in url or "audience=api://AzureADTokenExchange" in url
+    [(path, form)] = fake.token_forms
+    assert path == "https://login.microsoftonline.com/tenant-1/oauth2/v2.0/token"
+    assert form["client_id"] == ["client-1"] and "client_secret" not in form
+    assert ("POST", ms.API + "/submissions/200/commit") in fake.calls
+    assert _store_legs.load_artifact(record)["legs"][-1]["state"] == "in-review"
+    assert GH_TOKEN not in out and GH_REQUEST_TOKEN not in out
+
+
+def test_with_a_secret_the_key_path_is_unchanged_and_no_github_token_is_asked(tmp_path):
+    fake = FakePartnerCenter()
+    env = dict(CRED, ACTIONS_ID_TOKEN_REQUEST_URL=GH_URL, ACTIONS_ID_TOKEN_REQUEST_TOKEN=GH_REQUEST_TOKEN)
+    rc, _ = _run(tmp_path, fake, env=env)
+    assert rc == 0 and fake.github_requests == []
+    [(path, form)] = fake.token_forms
+    assert path.endswith("/oauth2/token") and form["client_secret"] == ["s3cret-value"]
+
+
+def test_a_refused_federated_exchange_names_the_three_fields_and_prints_the_subject(tmp_path, capsys):
+    rc, _ = _run(tmp_path, FakePartnerCenter(token_status=401), env=FED)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "issuer" in out and "audience" in out and "subject" in out
+    assert SUBJECT in out
+    assert GH_TOKEN not in out and GH_REQUEST_TOKEN not in out and "sigsig" not in out
+
+
+def test_an_undecodable_github_token_still_fails_and_says_the_subject_could_not_be_read(tmp_path, capsys, monkeypatch):
+    fake = FakePartnerCenter(token_status=401)
+    monkeypatch.setattr(sys.modules[__name__], "GH_TOKEN", "not-a-jwt")
+    rc, _ = _run(tmp_path, fake, env=FED)
+    out = capsys.readouterr().out
+    assert rc == 1 and "subject could not be read" in out and "not-a-jwt" not in out
+
+
+def test_no_secret_and_no_github_token_endpoint_is_refused_before_any_call(tmp_path, capsys):
+    fake = FakePartnerCenter()
+    env = {k: v for k, v in FED.items() if not k.startswith("ACTIONS_ID_TOKEN")}
+    rc, _ = _run(tmp_path, fake, env=env)
+    out = capsys.readouterr().out
+    assert rc == 1 and fake.calls == []
+    assert "FAUNA_MSSTORE_CLIENT_SECRET" in out and "id-token: write" in out
 
 
 def test_a_refused_credential_says_so(tmp_path, capsys):

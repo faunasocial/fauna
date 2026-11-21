@@ -527,6 +527,19 @@ jobs:
           ./scripts/image-upgrade-smoke.sh "$IMAGE:$ARCH_TAG" \
             --expect-commit ${{ inputs.commit || github.sha }} "${previous[@]}"
 
+      # The private repository's pin advances at every merged candidate, so the
+      # step above reads a second candidate of a version upgrading only from the
+      # first; the hop from the released build is read here, from the public
+      # :latest (resolved to its digest by the script; absent or refused to an
+      # anonymous caller is a printed skip). False on the public repository,
+      # whose first step already reads :latest (image-pipeline.md § Image tags &
+      # channels, *What moves :dev without a session's initiative*, part 6).
+      - name: Upgrade smoke — the candidate boots healthy on the released :latest's /data
+        if: matrix.arch == 'amd64' && github.event.repository.private
+        run: |
+          ./scripts/image-upgrade-smoke.sh "$IMAGE:$ARCH_TAG" \
+            --expect-commit ${{ inputs.commit || github.sha }} --previous-image "$IMAGE:latest"
+
       # A version may be staged on :test several times before its public tag,
       # and a Test box applies each candidate, so the same hop runs from every
       # earlier candidate of THIS version that reached :test — read off this

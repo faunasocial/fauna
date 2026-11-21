@@ -627,8 +627,12 @@ class SettingsActions:
         self.driver.click("status-node-url-copy-btn")
 
     def navigate_to_account(self) -> None:
-        """Click the account settings link."""
-        self.driver.click("account-settings-link")
+        """Open the Account sub-page through the uniform sub-page door, as every
+        other Account-page action here does. ``account-settings-link`` is the
+        Settings landmark, a link onto Account on some apps but a plain section
+        of the default sub-page on web, where clicking it leaves the page where
+        it was (the unsent-changes journey's web red, found 2026-11-15)."""
+        self._navigate_subpage("account")
 
     def leave_account(self) -> None:
         """Leave the Account sub-page through the page's own way out — the

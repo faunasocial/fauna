@@ -17,6 +17,7 @@ import com.fauna.app.ui.viewmodel.FeatureAuthoringState
 import com.fauna.app.ui.viewmodel.FeatureEditorActions
 import social.fauna.generated.Ids
 import uniffi.fauna_core.LocalizedText
+import com.fauna.app.ui.controls.OutlinedButton
 
 /**
  * The Status sub-page's two "what bounds me" sections — Quota
@@ -271,6 +272,7 @@ private fun OwnLimitControl(
             onRemove = editor.onRemove,
             onCancel = editor.onCancel,
             modifier = Modifier.padding(start = 12.dp, top = 4.dp),
+            saveAnswer = authoring.saveAnswer,
         )
     }
 }

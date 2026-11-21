@@ -8,6 +8,8 @@ import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import com.fauna.app.R
@@ -23,7 +25,9 @@ import social.fauna.generated.Ids
 /**
  * The locked launch surface (`ui/sessions.md` § Layout & flow, leg 2): the
  * standing notice carries all three sentences and only the stolen-identity
- * action; the `identity_stolen_entry` step's press starts unarmed.
+ * action; the `identity_stolen_entry` step's press starts unarmed and is
+ * painted from the shared `recovery_stolen_entry_possibility` (FFI-touching →
+ * `just android-host-test`).
  */
 @RunWith(FaunaRobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -50,6 +54,31 @@ class LaunchAccountLockedScreenTest {
         assertEquals(1, stolen)
     }
 
+    /** The press is painted from the shared draft answer: the kit first —
+     *  with its line beside the disabled press — then the literal word. */
+    @Test
+    fun theStolenEntryPressWaitsForTheKitThenTheLiteralWord() {
+        composeTestRule.setContent {
+            var phrase by remember { mutableStateOf("") }
+            var confirm by remember { mutableStateOf("SUCCEED") }
+            IdentityStolenEntryScreen(
+                phrase = phrase,
+                confirm = confirm,
+                busy = false,
+                error = null,
+                onPhraseChange = { phrase = it },
+                onConfirmChange = { confirm = it },
+                onSucceed = {},
+                onBack = {},
+            )
+        }
+        composeTestRule.onNodeWithTag(Ids.IDENTITY_STOLEN_BUTTON).assertIsNotEnabled()
+        composeTestRule.onNodeWithText(getString(R.string.settings_recovery_kit_kit_phrase_required)).assertExists()
+        composeTestRule.onNodeWithTag(Ids.RECOVERY_ENTRY_PHRASE_FIELD).performTextInput("held-kit")
+        composeTestRule.onNodeWithTag(Ids.IDENTITY_STOLEN_BUTTON).assertIsEnabled()
+        composeTestRule.onNodeWithText(getString(R.string.settings_recovery_kit_kit_phrase_required)).assertDoesNotExist()
+    }
+
     @Test
     fun theStolenEntryPressArmsOnlyOnTheLiteralWord() {
         var pressed = 0
@@ -58,7 +87,6 @@ class LaunchAccountLockedScreenTest {
             IdentityStolenEntryScreen(
                 phrase = "held-kit",
                 confirm = confirm,
-                confirmWord = "SUCCEED",
                 busy = false,
                 error = null,
                 onPhraseChange = {},
@@ -70,6 +98,10 @@ class LaunchAccountLockedScreenTest {
         composeTestRule.onNodeWithTag(Ids.RECOVERY_ENTRY_PHRASE_FIELD).assertExists()
         composeTestRule.onNodeWithTag(Ids.RECOVERY_ENTRY_BACK_BUTTON).assertExists()
         composeTestRule.onNodeWithTag(Ids.IDENTITY_STOLEN_BUTTON).assertIsNotEnabled()
+        // Case matters: the word is the literal, never localized.
+        composeTestRule.onNodeWithTag(Ids.IDENTITY_STOLEN_CONFIRM_FIELD).performTextInput("succeed")
+        composeTestRule.onNodeWithTag(Ids.IDENTITY_STOLEN_BUTTON).assertIsNotEnabled()
+        composeTestRule.onNodeWithTag(Ids.IDENTITY_STOLEN_CONFIRM_FIELD).performTextClearance()
         composeTestRule.onNodeWithTag(Ids.IDENTITY_STOLEN_CONFIRM_FIELD).performTextInput("SUCCEED")
         composeTestRule.onNodeWithTag(Ids.IDENTITY_STOLEN_BUTTON).assertIsEnabled().performClick()
         assertEquals(1, pressed)

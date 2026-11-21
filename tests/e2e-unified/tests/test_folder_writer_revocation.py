@@ -604,6 +604,31 @@ def test_a_former_writers_files_stay_listed_and_open_for_an_ios_owner(
     )
 
 
+# The same reader half with the android app as the owner. android binds no
+# local folder (its member presence is the documents-provider arm below, which
+# is outcome 12's), but its owner shares and demotes through the Folders page's
+# member row and reads the folder through the same shared Media listing, judge
+# and download. Its own function for the reason the web arm is: the android
+# claim is the param's own mark, never the module's `tui`.
+@pytest.mark.parametrize("how", ["demote", "remove"])
+@pytest.mark.parametrize(
+    "folder_share_owner_app,folder_share_recipient_app",
+    [pytest.param("android", "tui", marks=pytest.mark.android)],
+    indirect=True,
+)
+@pytest.mark.real_conversations
+# An android owner + a tui member with a real agent, an MLS share/accept and one
+# engine upload. A ceiling, not an expectation.
+@pytest.mark.timeout(1500)
+@pytest.mark.feature("share-a-folder")
+def test_a_former_writers_files_stay_listed_and_open_for_an_android_owner(
+    request, how, folder_share_owner_app, folder_share_recipient_app, tmp_path
+):
+    _former_writers_files_stay_for_the_owner(
+        request, how, folder_share_owner_app, folder_share_recipient_app, tmp_path
+    )
+
+
 @pytest.mark.parametrize(
     "folder_share_owner_app,folder_share_recipient_app",
     [pytest.param("tui", "android", marks=pytest.mark.android)],

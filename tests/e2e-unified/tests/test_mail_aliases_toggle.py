@@ -31,10 +31,18 @@ import time
 import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
+from helpers.mail_client_ui import turn_mail_on
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.linux, pytest.mark.web, pytest.mark.windows, pytest.mark.tui, pytest.mark.android]
 
 DOMAIN = "aliases-toggle-e2e.test"
+
+
+@pytest.fixture(autouse=True)
+def _mail_on(logged_in_app):
+    """Every test here opens a mail sub-page on the session-shared account, and
+    each opens behind the mail-usable gate — see `helpers.mail_client_ui.turn_mail_on`."""
+    turn_mail_on(logged_in_app)
 
 
 def _user_client(nest_instance, user):

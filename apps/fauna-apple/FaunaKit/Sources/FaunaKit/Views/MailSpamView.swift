@@ -119,7 +119,7 @@ public struct MailSpamView: View {
 
             Toggle(L.mailSpam.contributeBaselineLabel, isOn: Binding(
                 get: { vm.snapshot?.contributeBaseline ?? false },
-                set: { on in Task { await vm.dispatch(.setContributeBaseline(contribute: on)) } }
+                set: { on in Task { await vm.setContributeBaseline(on) } }
             ))
             .accessibilityIdentifier(Ids.mailSpamContributeBaselineToggle)
             .automationActivate(
@@ -127,11 +127,16 @@ public struct MailSpamView: View {
                 value: { (vm.snapshot?.contributeBaseline ?? false) ? "on" : "off" }
             ) {
                 let next = !(vm.snapshot?.contributeBaseline ?? false)
-                Task { await vm.dispatch(.setContributeBaseline(contribute: next)) }
+                Task { await vm.setContributeBaseline(next) }
             }
             // Dispatch-on-change: the setter IS the commit, so it declares
             // (rule 1's third arm — there is no Save to carry it).
             .faunaGate("fauna.bridges.set_baseline_contribution")
+            // Waits for the classifier read (mail-settings.md § Errors & edge
+            // cases, *Controls wait for their reads*): the pre-read `false` is
+            // never painted as the nest's answer.
+            .faunaPossible(vm.contributeAnswer)
+            FaunaPossibilityReason(vm.contributeAnswer)
             Text(L.mailSpam.contributeBaselineSubtitle)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -154,6 +159,9 @@ public struct MailSpamView: View {
             ) {
                 Task { await vm.setReportShare(!vm.reportShare) }
             }
+            // Waits for the report-share read (same ruling as above).
+            .faunaPossible(vm.shareAnswer)
+            FaunaPossibilityReason(vm.shareAnswer)
             // NO gate, deliberately: this is `fauna.moderation.report_share.set`
             // — OfflineSafe by the shared table, unlike the baseline toggle two
             // rows up. The pairing is this page's own live-beside-dead witness.
@@ -197,9 +205,14 @@ public struct MailSpamView: View {
                 // key door: refusing it would 409 a call every other app accepts.
                 key == "Enter" ? nil : "\(Ids.mailSpamThresholdOverrideInput) takes no other named key"
             })
+            // Waits for the override's read: an empty pre-read draft is never
+            // committed as "clear the override". The input keeps its prompt as
+            // its label, so the reason paints as a line of its own.
+            .faunaPossible(vm.thresholdAnswer)
             .task(id: vm.thresholdOverrideText) {
                 thresholdOverrideDraft = vm.thresholdOverrideText
             }
+            FaunaPossibilityReason(vm.thresholdAnswer)
             Text(L.mailSpam.thresholdOverrideSubtitle)
                 .font(.caption)
                 .foregroundStyle(.secondary)

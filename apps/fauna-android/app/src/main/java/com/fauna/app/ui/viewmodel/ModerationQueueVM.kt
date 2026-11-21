@@ -182,21 +182,25 @@ class ModerationQueueVM @Inject constructor(
      * A **server** row (carries an enforcement `action`) trains via the 1d sealed-write
      * switch ([trainServerRow]); the row stays (enforcement history). A **local** row
      * (a client-side post-decrypt detection, blank action) has no nest obligation to
-     * train against — the content is MLS-sealed at rest — so the correction removes the
-     * false-positive flag from the session store and repaints, additionally feeding the
-     * ham correction to the client-side sealed model when the write path is available.
+     * train against — the content is MLS-sealed at rest — so the correction feeds the
+     * ham correction to the client-side sealed model first (when the body is retained),
+     * then removes the false-positive flag and repaints; a failed train keeps the flag.
      */
     fun correct(contentId: String, isLocal: Boolean) {
         viewModelScope.launch {
             try {
                 if (isLocal) {
-                    // Read the retained plaintext BEFORE dropping the flag, then remove
-                    // + repaint (the removal is the correction), then best-effort feed
-                    // the ham correction to the sealed model.
+                    // Read the retained plaintext BEFORE dropping the flag, train
+                    // FIRST, then remove + repaint. A degraded train (mail not
+                    // enabled, no sealed-at-rest, no token) is an Ok no-op and stays
+                    // silent; a train dispatch that FAILED throws to the catch below
+                    // — said on `error-message` with the flag KEPT, so the person can
+                    // try the correction again rather than lose it (`moderation.md`
+                    // § Errors & edge cases; tui `moderation.rs` `Op::Correct`).
                     val body = api.moderationMessageBody(contentId)
+                    if (body != null && body.isNotBlank()) trainSpamModelClientSide(body)
                     api.moderationRemoveLocalDetection(contentId)
                     load()
-                    if (body != null) trainSpamModelClientSide(body)
                 } else {
                     trainServerRow(contentId)
                 }
@@ -209,8 +213,7 @@ class ModerationQueueVM @Inject constructor(
     /** Feed one ham correction to the **client-side** sealed tier-1 model for text the
      *  client already holds (a local detection's retained body). Silent unless it fails
      *  — for client-only content there is no server row to fall back to (the nest can't
-     *  read it), exactly as the flag-removal alone was the correction before the 1d
-     *  write path (mirrors linux `train_spam_model_client_side`). */
+     *  read it). A failure rethrows to [correct], which keeps the flag. */
     private suspend fun trainSpamModelClientSide(text: String) {
         api.trainSpamModelClient(text, false) // is_spam = false (ham); ServerPath no-ops here
     }

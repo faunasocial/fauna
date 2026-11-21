@@ -72,6 +72,10 @@ pub enum DataMessage {
     /// tick carries no payload (the observer contract: "the observer reads
     /// fresh snapshots via the machine's getters").
     WizardChanged,
+    /// The post-claim serving enablement ended with a step the nest refused
+    /// for good — the nest's own sentence(s), said on the page the person is on
+    /// (`onboarding.md` § 3b *The step completes; it is not fired once*).
+    ServingEnablementRefused(String),
     /// The post-auth `fauna.spam.get_preferences` read landed — the viewer's OWN
     /// spam/phishing thresholds, which the content-policy engine composes into
     /// every feed and conversation render (`family-safety.md` § Content policy:
@@ -274,6 +278,11 @@ pub enum DataMessage {
     /// its `UiMessage::RecoveryCustodyWarning`. Carried as a message because the leg is a
     /// fire-and-forget bg task (`crate::recovery::spawn_custody_leg`).
     RecoveryCustodyWarning(String),
+    /// A later custody-leg run (a reconnect's retry, or a later post-auth
+    /// edge) owes no warning: the custody warning on `warning-message` is
+    /// withdrawn — only while it is still the one shown
+    /// (`fauna_client_config::is_custody_leg_warning`).
+    RecoveryCustodyCleared,
     /// The `FeedManager` mutated — re-read its snapshot and redraw. Like
     /// `WizardChanged` the tick carries no payload: the observer contract is
     /// "read a fresh snapshot off the manager", so coalescing duplicate ticks
@@ -357,7 +366,12 @@ pub enum DataMessage {
     /// (`session::spawn_unsent_refresh`): the rows, or why the outbox could
     /// not be read (kept off `error-message` — a background read, the last
     /// rows stay).
-    UnsentChangesRead(Result<Vec<fauna_core::offline_intent::UnsentChange>, String>),
+    UnsentChangesRead {
+        read: Result<Vec<fauna_core::offline_intent::UnsentChange>, String>,
+        /// `SettingsState::unsent_gen` as the tick spawned the read: a retry or
+        /// a discard folded since outlives it (`settings::fold_unsent_tick`).
+        resync_of: crate::settings::GestureGen,
+    },
     /// The sync-agent folder model's rendered binding set changed (a reconcile
     /// adopted or pushed a binding) — re-read + redraw, the payload-free observer
     /// tick shape (`FeedChanged` / `MediaChanged`).
@@ -688,7 +702,14 @@ pub fn apply_page_outcome(app: &mut App, outcome: PageOutcome) {
             }
         }
         PageOutcome::Events(o) => crate::events::apply_outcome(app, o),
-        PageOutcome::Settings(o) => crate::settings::apply_outcome(app, o),
+        PageOutcome::Settings(o) => {
+            crate::settings::apply_outcome(app, o);
+            // A folders hydrate painted its rows and left the custody read
+            // owed: run it now, as its own op.
+            if let Some(op) = crate::settings::take_folders_custody_op(&mut app.settings) {
+                app.spawn_page_op(PageOp::Settings(op));
+            }
+        }
         PageOutcome::Search(o) => crate::search::apply_outcome(app, o),
         PageOutcome::Media(o) => {
             crate::media::apply_outcome(app, o);
@@ -848,6 +869,9 @@ pub fn gesture_work(app: &mut App, gesture: crate::element::Gesture) -> GestureW
             crate::events::open_event_detail(app, event_id);
             GestureWork::None
         }
+        // A folder row's jump to its gate's step: another page's op, like
+        // `OpenSearchResult`.
+        Gesture::FoldersStep(step) => crate::settings::folders::go_to_step(app, step).into(),
 
         // --- the pages: one line each, the whole point of the door (the gated
         // admin shell among them) ---
@@ -1151,6 +1175,22 @@ impl PageErrors {
         Self::default()
     }
 
+    /// A form submit asking its shared predicate before it runs
+    /// (`ui/README.md` § Offer only what is possible, rules 6 and 7): when the
+    /// answer is not possible its reason becomes `page`'s error — the same
+    /// reason the seam painted beside the disabled submit, never a silent
+    /// drop — and `true` tells the caller to issue nothing. A possible answer
+    /// writes nothing; the caller clears the error once it issues the op.
+    pub fn refuse(&mut self, page: Page, answer: &fauna_core::possibility::Possibility) -> bool {
+        if answer.is_possible() {
+            return false;
+        }
+        if let Some(reason) = answer.reason() {
+            self.insert(page, crate::wizard::localized(reason));
+        }
+        true
+    }
+
     /// Ordinary write — what every non-guarded caller already does. A no-op
     /// for `Page::Settings` while a persist-failure message is pending.
     ///
@@ -1299,6 +1339,11 @@ pub struct App {
     /// fed beside [`Self::painted_errors`] from the frame's own page geometry
     /// ([`crate::ui::PaintedPage::laid_out_text`]), so only with an e2e agent.
     pub painted_text_area: fauna_e2e_agent::PaintedTextArea,
+    /// What each drawn frame showed at the root — the wizard, a launch
+    /// surface, the app, or nothing — behind `fauna_e2e_agent::ROOT_SURFACE_KEY`
+    /// (the in-place witness of `onboarding.md` § Wizard exit handling). Fed
+    /// beside [`Self::painted_errors`], so only with an e2e agent.
+    pub root_surface: fauna_e2e_agent::RootSurfaceJournal,
     /// Per-page `error-message` text (ui.yaml: every page has one).
     pub errors: PageErrors,
     /// Whether the last nav-edge check ([`Self::sync_recovery_message_nav_edge`])
@@ -1688,6 +1733,13 @@ pub struct App {
     /// The shared launch machine, alive for the process: `Retry` re-runs its
     /// silent challenge, and once `Online` it is the session's bearer source.
     pub launch_machine: Option<std::sync::Arc<fauna_launch_machine::LaunchMachine>>,
+    /// The work a finished first-run wizard deferred to the authenticated
+    /// session, held on the launch its `LoggedIn` started until that launch's
+    /// `Online` (`crate::wizard::DeferredFirstSetup`).
+    pub held_first_setup: Option<crate::wizard::DeferredFirstSetup>,
+    /// The account switcher's state on `launch_retry` — its pending Stage-2
+    /// prompt and a refused switch (`crate::launch::LaunchSwitchState`).
+    pub launch_switch: crate::launch::LaunchSwitchState,
     /// Delivered launch verdicts rendered / dropped as superseded — the two
     /// counters `fauna_e2e_agent::LAUNCH_VERDICTS_KEY` publishes, bumped only by
     /// [`crate::launch::deliver`].
@@ -1823,6 +1875,7 @@ impl App {
             knock_notices: fauna_e2e_agent::KnockNotices::default(),
             painted_errors: fauna_e2e_agent::PaintedErrorTally::default(),
             painted_text_area: fauna_e2e_agent::PaintedTextArea::default(),
+            root_surface: fauna_e2e_agent::RootSurfaceJournal::default(),
             errors: PageErrors::new(),
             was_on_settings_account: false,
             stolen_ceremony_in_flight: false,
@@ -1875,6 +1928,8 @@ impl App {
             unlock: crate::unlock::UnlockState::default(),
             locked: crate::locked::LockedState::default(),
             launch_machine: None,
+            held_first_setup: None,
+            launch_switch: crate::launch::LaunchSwitchState::default(),
             launch_verdicts_routed: 0,
             launch_verdicts_superseded: 0,
             credentials,
@@ -1996,6 +2051,41 @@ impl App {
         self.adding_account = true;
         self.wizard.reset();
         self.launch = crate::launch::LaunchSurface::Wizard;
+        self.seed_held_provider_credentials();
+    }
+
+    /// An add-account run shows as already connected every provider whose
+    /// credential the signed-in account holds in its DNS record
+    /// (`onboarding-provisioning.md` § 3d *Held credentials*): the record is
+    /// read through the live account runtime and the credentials passed INTO
+    /// the machine, which re-runs each provider's checks before it shows the
+    /// row connected (a revoked token reads as not connected). Best-effort and
+    /// off the render loop: a failed read leaves every row unconnected, the
+    /// state a first-nest run starts in anyway.
+    fn seed_held_provider_credentials(&self) {
+        let Some(store) = self.settings.account_store.clone() else {
+            return;
+        };
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let machine = std::sync::Arc::clone(&self.wizard.machine);
+        let tx = self.tx.clone();
+        rt.spawn(async move {
+            match store.dns().await {
+                Ok(dns) => {
+                    let held = fauna_onboarding_machine::HeldDnsCredential::all_from(&dns)
+                        .into_iter()
+                        .map(Into::into)
+                        .collect();
+                    machine.seed_held_provider_credentials(held).await;
+                    let _ = tx.send(crate::app::UiMessage::Data(
+                        crate::app::DataMessage::WizardChanged,
+                    ));
+                }
+                Err(e) => tracing::info!("provider_choice: DNS record read failed: {e:#}"),
+            }
+        });
     }
 
     /// Abandon an in-flight append-mode "Add account" and return to the live
@@ -2024,7 +2114,9 @@ impl App {
     /// cleanly, and the highlight can never point past the end of a shrunk list.
     pub fn sidebar_pages(&self) -> Vec<Page> {
         let mut pages: Vec<Page> = Page::ALL.to_vec();
-        if self.am_i_admin {
+        // The shared admin-entry answer: absent for a non-admin (`ui/README.md`
+        // § Offer only what is possible, rule 2).
+        if fauna_client_account::admin_entry_possibility(self.am_i_admin).is_shown() {
             pages.push(Page::Admin);
         }
         if self.has_family {
@@ -2079,7 +2171,17 @@ impl App {
         }
         self.sidebar_pages()
             .into_iter()
-            .map(crate::element::Element::tab)
+            .map(|page| {
+                let tab = crate::element::Element::tab(page);
+                // The gated `admin-tab` declares the answer that admitted it.
+                if page == Page::Admin {
+                    tab.possible(fauna_client_account::admin_entry_possibility(
+                        self.am_i_admin,
+                    ))
+                } else {
+                    tab
+                }
+            })
             .collect()
     }
 
@@ -2115,12 +2217,72 @@ impl App {
     ///
     /// This is the focus ring's list while the ring is in [`Zone::Page`], and
     /// the half of [`Self::screen_elements`] a page owns.
+    ///
+    /// **It is also the possibility seam** (`ui/README.md` § Offer only what is
+    /// possible, rule 6): every element's answer, its page's declared
+    /// predicate folded with the offline gate ([`Self::element_possibility`]),
+    /// is applied here and only here. `Absent` drops the element, `Blocked`
+    /// disables it with the reason. walk.rs's I8 holds every page to it.
     pub fn page_elements(&self) -> Vec<crate::element::Element> {
         let mut elements = self.page_elements_ungated();
-        for element in &mut elements {
-            self.apply_offline_gate(element);
-        }
+        self.apply_possibility_seam(&mut elements);
         elements
+    }
+
+    /// The whole answer for one element: the page's own predicate
+    /// ([`crate::element::Element::possibility`], `Possible` when it declared
+    /// none) folded with the offline gate over the wire kind its gesture
+    /// issues. The page's reason comes first, being the more specific one
+    /// (`Possibility::and`). The one computation the seam applies and I8
+    /// checks against.
+    pub fn element_possibility(
+        &self,
+        element: &crate::element::Element,
+    ) -> fauna_core::possibility::Possibility {
+        use fauna_core::possibility::Possibility;
+        let declared = element.possibility.clone().unwrap_or(Possibility::Possible);
+        let offline =
+            element
+                .gesture()
+                .and_then(|g| g.wire_kind())
+                .map_or(Possibility::Possible, |kind| {
+                    fauna_protocol::offline_class::affordance(kind, self.connection_state_word())
+                        .possibility()
+                });
+        declared.and(offline)
+    }
+
+    /// Apply every element's answer (see [`Self::page_elements`]): drop what
+    /// is absent, then run [`Self::apply_possibility`] over the rest. The
+    /// texts already on the page are collected first, so a reason the page
+    /// paints itself (the vps page's explainer line) is not painted twice.
+    fn apply_possibility_seam(&self, elements: &mut Vec<crate::element::Element>) {
+        elements.retain(|e| e.possibility.as_ref().is_none_or(|p| p.is_shown()));
+        let painted: std::collections::HashSet<String> =
+            elements.iter().map(|e| e.text.clone()).collect();
+        for element in elements.iter_mut() {
+            self.apply_possibility(element, &painted);
+        }
+        // Publish what is PAINTED as the `reason` attr a driver reads
+        // (`PlatformDriver.blocked_reason`): a disabled element whose answer
+        // gave a reason carries it only once that reason is on the surface —
+        // its own label, or a line of the page — so a reason computed but
+        // never shown answers nothing, the same test walk.rs's I8 applies.
+        let painted: std::collections::HashSet<String> = elements
+            .iter()
+            .flat_map(|e| std::iter::once(e.text.clone()).chain(e.label.clone()))
+            .collect();
+        for element in elements.iter_mut() {
+            if element.enabled || element.possibility.is_none() {
+                continue;
+            }
+            if let Some(reason) = self.element_possibility(element).reason() {
+                let text = reason.resolve(fauna_i18n::strings::lookup);
+                if painted.contains(&text) {
+                    element.attrs.push(("reason".to_string(), text));
+                }
+            }
+        }
     }
 
     /// The transport state as the lowercase wire word every app family carries
@@ -2136,44 +2298,66 @@ impl App {
         self.connection.as_wire_word()
     }
 
-    /// Desensitize `element` when the mutation behind it cannot happen without
-    /// a live nest — W4 phase 4's UI desensitizing
+    /// Desensitize `element` when its answer is not possible. Two sources
+    /// feed one answer ([`Self::element_possibility`]): the page's own
+    /// shared-Rust predicate, and the offline gate, W4 phase 4's UI
+    /// desensitizing for a mutation that cannot happen without a live nest
     /// (`account-data-plane.md` § The offline-mutation contract, class 3).
     ///
     /// **Why here and not at each call site.** This is the same reason the
     /// screen-time lock is applied in [`Self::page_elements`]: gating in the
     /// one place the three consumers read (paint, the automation registry, the
     /// focus ring) makes them agree by construction. It also keeps the rule
-    /// where the charter demands it — the decision is the SHARED classification
-    /// plus this app's connection state, never a per-app list of
+    /// where the charter demands it — the decision is the SHARED predicate and
+    /// classification plus this app's connection state, never a per-app list of
     /// widgets-to-grey. A page author adds no gate code at all; declaring what
-    /// their gesture calls (`Action::wire_kind`) is the whole contribution.
+    /// their gesture calls (`Action::wire_kind`) and what its predicate
+    /// answers (`Element::possible`) is the whole contribution.
     ///
     /// The reason rides [`Element::labelled`] — per affordance, never a global
     /// "you are offline" banner (`account-data-plane.md` § R11) — and only when
-    /// the page gave no label of its own, so a page's own hint (the
-    /// `folder-webdav-toggle` "set up mail first") is never overwritten by a
+    /// the page gave no label of its own and does not already paint that
+    /// reason as a line of its own, so a page's own hint (the
+    /// `folder-webdav-toggle`'s reason) is never overwritten by a
     /// weaker one. Disabled elements paint DIM (`crate::ui`), so a human sees
     /// the state and a driver reads it through `is_enabled` / the derived
     /// `disabled` attribute.
-    fn apply_offline_gate(&self, element: &mut crate::element::Element) {
+    fn apply_possibility(
+        &self,
+        element: &mut crate::element::Element,
+        painted: &std::collections::HashSet<String>,
+    ) {
         // An already-disabled element keeps the page's own reason: it is
         // unavailable for a stronger, more specific cause than the connection.
         if !element.enabled {
             return;
         }
-        let Some(kind) = element.gesture().and_then(|g| g.wire_kind()) else {
-            return;
-        };
-        let verdict = fauna_protocol::offline_class::affordance(kind, self.connection_state_word());
-        if verdict.is_available() {
+        let answer = self.element_possibility(element);
+        if answer.is_possible() {
             return;
         }
         element.enabled = false;
-        if element.label.is_none()
-            && let Some(reason) = verdict.reason()
-        {
-            element.label = Some(reason.resolve(fauna_i18n::strings::lookup));
+        if let Some(reason) = answer.reason() {
+            let text = reason.resolve(fauna_i18n::strings::lookup);
+            let on_screen = if painted.contains(&text) {
+                true
+            } else if element.label.is_none() {
+                element.label = Some(text.clone());
+                true
+            } else {
+                // The element's own label (an input's prompt) holds the line:
+                // the reason is not painted beside it, so it is not reported.
+                false
+            };
+            // The reason the person reads, as the automation surface's `reason`
+            // attr (`drivers/base.py::disabled_reason`) — only when it is
+            // painted, on this element's line or as a line the page already
+            // paints — so a journey asserts the words within eyeshot without
+            // reading the frame (`feature-catalog.md` § The coverage contract,
+            // the possibility-outcome bullet). An inline `reason` wins.
+            if on_screen && !element.attrs.iter().any(|(k, _)| k == "reason") {
+                element.attrs.push(("reason".to_string(), text));
+            }
         }
     }
 
@@ -2223,7 +2407,9 @@ impl App {
                 }
                 _ => {
                     let identity = crate::session::launch_identity_line(self);
-                    self.launch.elements_with_identity(identity.as_deref())
+                    let mut elements = self.launch.elements_with_identity(identity.as_deref());
+                    elements.extend(crate::launch::switcher_elements(self));
+                    elements
                 }
             };
         }
@@ -2327,6 +2513,9 @@ impl App {
             crate::launch::LaunchSurface::AccountLocked { .. }
             | crate::launch::LaunchSurface::IdentityStolenEntry { .. } => {
                 self.locked.error.clone().filter(|e| !e.is_empty())
+            }
+            crate::launch::LaunchSurface::TransientRetry { .. } => {
+                self.launch_switch.error.clone().filter(|e| !e.is_empty())
             }
             _ => self.launch.error_text(),
         }
@@ -3665,6 +3854,15 @@ impl App {
                 // landing re-read below asks for its identity afresh, since
                 // the transport's `fauna.nest.info` memo is per connection.
                 self.apply_resync(StaleSurfaces::on_reconnect());
+                // The admin page shown asks again a read that has not answered
+                // (`admin.md` § Errors & edge cases, *Controls wait for their
+                // read*) — reconnect-only, never on a push, and never over an
+                // answered page (`admin::reconnect_reread_op`).
+                if self.page == Page::Admin
+                    && let Some(op) = crate::admin::reconnect_reread_op(&self.admin)
+                {
+                    self.spawn_page_op(PageOp::Admin(op));
+                }
             }
             // A server push arrived on the one authenticated socket: refetch only
             // the surfaces its kind implies (the conversations rail owns its own
@@ -3715,6 +3913,9 @@ impl App {
                 self.clamp_focus();
                 self.on_wizard_changed();
             }
+            UiMessage::Data(DataMessage::ServingEnablementRefused(message)) => {
+                self.errors.insert(self.page, message);
+            }
             UiMessage::Data(DataMessage::RecoverySelfhostedCommand(command)) => {
                 self.wizard.selfhosted_command = Some(command);
             }
@@ -3737,6 +3938,15 @@ impl App {
             // injected line (the tui idiom of linux's transient recovery toast).
             UiMessage::Data(DataMessage::RecoveryCustodyWarning(message)) => {
                 self.injected_warning = Some(message);
+            }
+            // A later run confirmed custody: take the warning down, and only
+            // that warning — anything painted since stands.
+            UiMessage::Data(DataMessage::RecoveryCustodyCleared) => {
+                if self.injected_warning.as_deref().is_some_and(|shown| {
+                    fauna_client_config::is_custody_leg_warning(shown, crate::wizard::localized)
+                }) {
+                    self.injected_warning = None;
+                }
             }
             // The redraw at the top of the loop is most of the response: the
             // page re-reads the manager's snapshot each frame. The one extra
@@ -3990,21 +4200,9 @@ impl App {
             }
             // The rows' link prompts are a read of the archive folders: re-read
             // them only while the Contacts page is the one painted.
-            UiMessage::Data(DataMessage::UnsentChangesRead(read)) => match read {
-                Ok(rows) => {
-                    if self.settings.unsent_changes.as_ref() != Some(&rows) {
-                        // A discard armed on a row that has left the list
-                        // has nothing left to confirm.
-                        if let Some(armed) = self.settings.unsent_discard_armed.as_deref()
-                            && !rows.iter().any(|r| r.intent_id == armed)
-                        {
-                            self.settings.unsent_discard_armed = None;
-                        }
-                        self.settings.unsent_changes = Some(rows);
-                    }
-                }
-                Err(why) => tracing::debug!("unsent changes not re-read: {why}"),
-            },
+            UiMessage::Data(DataMessage::UnsentChangesRead { read, resync_of }) => {
+                crate::settings::fold_unsent_tick(&mut self.settings, read, resync_of);
+            }
             UiMessage::Data(DataMessage::ArchiveLinksMoved) => {
                 if self.page == Page::Contacts
                     && let Some(op) = crate::contacts::archive_views_op(&self.contacts)
@@ -4053,10 +4251,20 @@ impl App {
                     // are the nest's): a refusal is the runtime's own
                     // background write, a source of the notice (part 2).
                     Page::Events => {
-                        if let Some(op) =
-                            crate::events::store_resync_op(self.settings.account_store.clone())
-                        {
+                        if let Some(op) = crate::events::store_resync_op(
+                            &self.events,
+                            self.settings.account_store.clone(),
+                        ) {
                             self.spawn_page_op(PageOp::Events(op));
+                        }
+                    }
+                    // An unresolved Address Book read (custody's first
+                    // listing, or the minted key, not landed yet) re-runs:
+                    // that landing is this notice (contacts.md § Errors &
+                    // edge cases).
+                    Page::Contacts => {
+                        if let Some(op) = crate::contacts::store_resync_op(&self.contacts) {
+                            self.spawn_page_op(PageOp::Contacts(op));
                         }
                     }
                     _ => {}
@@ -4824,7 +5032,8 @@ impl App {
             }
         }
         if r.atproto
-            && let Some(op) = crate::settings::atproto_resync_op(&self.settings)
+            && let Some(op) =
+                crate::settings::atproto_resync_op(&self.settings, self.bridges.gesture_gen)
         {
             self.spawn_page_op(PageOp::Settings(op));
         }
@@ -4886,7 +5095,7 @@ impl App {
         // file that lands while the user is looking at the page.
         if r.media
             && self.page == Page::Media
-            && let Some(op) = crate::media::nav_enter_op(&self.media)
+            && let Some(op) = crate::media::reread_op(&self.media)
         {
             self.spawn_page_op(PageOp::Media(op));
         }
@@ -5043,6 +5252,46 @@ pub(crate) mod tests {
         )
     }
 
+    /// A warned custody-leg run, then a later run that lands custody: the
+    /// warning the first painted on `warning-message` is taken down
+    /// (`box-recovery.md` § The plane-era recovery floor, *(c)*). A cleared
+    /// mark never wipes a warning that is not the custody leg's.
+    #[test]
+    fn a_later_landing_custody_run_withdraws_the_warning() {
+        let mut app = test_app();
+        let warning =
+            crate::wizard::localized(&fauna_client_config::custody_leg_unattempted_warning());
+        app.handle_message(UiMessage::Data(DataMessage::RecoveryCustodyWarning(
+            warning.clone(),
+        )));
+        assert_eq!(app.injected_warning.as_deref(), Some(warning.as_str()));
+        app.handle_message(UiMessage::Data(DataMessage::RecoveryCustodyCleared));
+        assert_eq!(app.injected_warning, None, "the custody warning stayed up");
+
+        app.injected_warning = Some("an unrelated warning".to_string());
+        app.handle_message(UiMessage::Data(DataMessage::RecoveryCustodyCleared));
+        assert_eq!(
+            app.injected_warning.as_deref(),
+            Some("an unrelated warning")
+        );
+    }
+
+    /// A post-claim serving-enablement step the nest refused for good is said
+    /// on the `error-message` of the page the person is on, not only logged
+    /// (`onboarding.md` § 3b *The step completes; it is not fired once*).
+    #[test]
+    fn a_serving_enablement_refusal_lands_on_the_current_page_error() {
+        let mut app = test_app();
+        let page = app.page;
+        app.handle_message(UiMessage::Data(DataMessage::ServingEnablementRefused(
+            "CalDAV is not available here.".to_string(),
+        )));
+        assert_eq!(
+            app.errors.get(&page).map(String::as_str),
+            Some("CalDAV is not available here.")
+        );
+    }
+
     /// A session whose client never connects (no IO until `connect()`), for
     /// exercising the authenticated shell in-process.
     pub(crate) fn test_session() -> crate::session::Session {
@@ -5124,9 +5373,9 @@ pub(crate) mod tests {
     /// The offline gate, applied to one element exactly as
     /// [`App::page_elements`] applies it.
     fn gated(app: &App, element: crate::element::Element) -> crate::element::Element {
-        let mut element = element;
-        app.apply_offline_gate(&mut element);
-        element
+        let mut elements = vec![element];
+        app.apply_possibility_seam(&mut elements);
+        elements.pop().expect("a shown element stays in the list")
     }
 
     /// A real `OnlineOnly` affordance — `profile-follow-button` issues
@@ -5165,6 +5414,45 @@ pub(crate) mod tests {
             Some(fauna_i18n::strings::common::NEEDS_NEST),
             "and it must say why, per affordance — never a global banner"
         );
+    }
+
+    /// The reason a gated element paints is also its `reason` automation attr
+    /// (`drivers/base.py::disabled_reason`), so a journey reads the words the
+    /// person sees; a reason the element's own label keeps off its line is not
+    /// reported, and a live element carries none.
+    #[test]
+    fn a_painted_reason_is_the_elements_reason_attr() {
+        let reason_of = |el: &crate::element::Element| {
+            el.attrs
+                .iter()
+                .find(|(k, _)| k == "reason")
+                .map(|(_, v)| v.clone())
+        };
+        let mut app = authed_app();
+        app.connection = ConnectionState::Disconnected;
+        assert_eq!(
+            reason_of(&gated(&app, follow_button())).as_deref(),
+            Some(fauna_i18n::strings::common::NEEDS_NEST)
+        );
+        let blocked = |label: Option<&str>| {
+            let mut el = submit_post_button();
+            el.label = label.map(str::to_string);
+            el.possibility = Some(fauna_core::possibility::Possibility::from_read(
+                fauna_core::possibility::ReadState::Failed,
+            ));
+            el
+        };
+        app.connection = ConnectionState::Connected;
+        assert_eq!(
+            reason_of(&gated(&app, blocked(None))).as_deref(),
+            Some(fauna_i18n::strings::common::LOAD_FAILED)
+        );
+        assert_eq!(
+            reason_of(&gated(&app, blocked(Some("A prompt")))),
+            None,
+            "a reason the element's own label keeps off its line is not painted"
+        );
+        assert_eq!(reason_of(&gated(&app, submit_post_button())), None);
     }
 
     /// Every non-connected transport state means "no nest", not just the
@@ -6078,6 +6366,28 @@ pub(crate) mod tests {
         );
     }
 
+    /// The root-surface journal's per-frame reading (`fauna_e2e_agent::ROOT_SURFACE_KEY`)
+    /// follows the same predicate: the app when the authenticated pages own the
+    /// screen, the wizard over a live session in append mode, the launch
+    /// progress view while launching — painted with its title alone, which is
+    /// still something on screen.
+    #[test]
+    fn root_surface_names_what_the_screen_shows() {
+        let none = || crate::ui::PaintedPage::unpainted(Vec::new());
+        assert_eq!(crate::ui::root_surface(&authed_app(), &none()), Some("app"));
+        let mut adding = authed_app();
+        adding.enter_add_account();
+        let page = crate::ui::PaintedPage::unpainted(adding.page_elements());
+        assert_eq!(crate::ui::root_surface(&adding, &page), Some("wizard"));
+        let mut launching = test_app();
+        launching.launch = crate::launch::LaunchSurface::Launching;
+        assert_eq!(
+            crate::ui::root_surface(&launching, &none()),
+            Some("launch_progress"),
+            "the launch progress view paints no element on a first launch, but its title"
+        );
+    }
+
     /// Entering "Add account" hands the screen to a FRESH wizard (create-or-import
     /// from scratch — a reset machine starts at `IdentityChoice`) over the live
     /// session, which is NOT torn down.
@@ -6429,7 +6739,7 @@ pub(crate) mod tests {
     /// **The subject is a real reachable instance, not a synthetic one.**
     /// `mail-spam-threshold-override-input` is an `input_commit` whose gesture
     /// is `fauna.bridges.set_spam_threshold_override`, classified `OnlineOnly`
-    /// (`fauna_protocol::offline_class`), so [`App::apply_offline_gate`]
+    /// (`fauna_protocol::offline_class`), so [`App::apply_possibility`]
     /// desensitizes it whenever the transport is not connected. A plain
     /// `Role::Input` carries no gesture and is therefore never offline-gated —
     /// an `InputCommit` under the offline gate is the ONLY way a tui input is
@@ -6440,6 +6750,10 @@ pub(crate) mod tests {
         app.connection = ConnectionState::Disconnected;
         app.page = Page::Settings;
         app.settings.sub = crate::settings::SubPage::MailSpam;
+        // The page's entry is gated on mail being usable (`ui/mail-settings.md`
+        // § Errors & edge cases, the mail-usable gate): mail is on here.
+        app.settings
+            .set_mail_machine_for_test(crate::settings::mail_machine_in_for_test("on"));
 
         let elements = app.page_elements();
         let index = elements
@@ -6490,6 +6804,12 @@ pub(crate) mod tests {
         app.connection = ConnectionState::Connected;
         app.page = Page::Settings;
         app.settings.sub = crate::settings::SubPage::MailSpam;
+        // The page's entry is gated on mail being usable (`ui/mail-settings.md`
+        // § Errors & edge cases, the mail-usable gate): mail is on here.
+        app.settings
+            .set_mail_machine_for_test(crate::settings::mail_machine_in_for_test("on"));
+        // The input waits for its read (`ui/mail-settings.md`): resolve it.
+        app.settings.resolve_spam_threshold_read_for_test(None);
 
         let elements = app.page_elements();
         let index = elements

@@ -91,7 +91,8 @@ pub fn build_linked_nests_machine_with_trust(
             crate::account_runtime::period_key_store(),
             crate::account_runtime::mail_store(),
         )
-        .with_folder_names(names),
+        .with_folder_names(names)
+        .pipe_pairing_marks(),
     ))
 }
 
@@ -127,7 +128,8 @@ pub fn build_linked_nests_machine_with_mail_relay_and_trust(
             crate::account_runtime::period_key_store(),
             crate::account_runtime::mail_store(),
         )
-        .with_folder_names(names),
+        .with_folder_names(names)
+        .pipe_pairing_marks(),
     ))
 }
 
@@ -159,6 +161,31 @@ fn blessing_door() -> Arc<dyn fauna_client_pair::BlessedNestsStore> {
             crate::account_runtime::handle,
         ),
     )
+}
+
+/// Wire the Nests page's pairing-mark door — the account plane's
+/// `fauna.state.pairing-mark` over this seat's runtime handle (the shared
+/// impl, `fauna_account_seams::pairing_marks`), beside the blessing door, so
+/// all four UniFFI apps write the mark identically. A build without the
+/// account runtime has no plane to hold one and wires none.
+trait PipePairingMarks {
+    fn pipe_pairing_marks(self) -> Self;
+}
+
+impl PipePairingMarks for LinkedNestsMachine {
+    #[cfg(feature = "account-runtime")]
+    fn pipe_pairing_marks(self) -> Self {
+        self.with_pairing_marks(Arc::new(
+            fauna_client_account_runtime::pairing_marks::PlanePairingMarks::new(
+                crate::account_runtime::handle,
+            ),
+        ))
+    }
+
+    #[cfg(not(feature = "account-runtime"))]
+    fn pipe_pairing_marks(self) -> Self {
+        self
+    }
 }
 
 /// A build without the account runtime has no plane to hold a blessing: every

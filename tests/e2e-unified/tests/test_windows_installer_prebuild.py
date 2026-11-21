@@ -161,6 +161,62 @@ def test_a_run_with_no_msi_reader_reads_neither_the_tree_nor_the_cache(monkeypat
     assert not reached & set(_RELEASE_INPUTS), reached
 
 
+# ── the nest MSI's door (installers/windows.md § Direct download, 1) ──────────
+
+_NEST = helper_bins.WINDOWS_NEST_MSI
+_NEST_STRUCTURE = _E2E / "tests" / "platform" / "windows" / "test_nest_installer_structure.py"
+#: The four binaries `build_nest_msi` stages: no agent, no shell extension.
+_NEST_INPUTS = ("fauna-nest-svc", "fauna-bridge-svc", "fauna-tui", "fauna-cli")
+
+
+def _nest_jobs(monkeypatch, *, owed: bool):
+    monkeypatch.setattr(conftest, "get_available_apps", lambda: [])
+    monkeypatch.setattr(windows_installer, "msi_build_owed", lambda repo, items: False)
+    monkeypatch.setattr(windows_installer, "nest_msi_build_owed", lambda repo, items: owed)
+    session = types.SimpleNamespace(items=[_Item(_NEST_STRUCTURE, ["nest_msi_db", _NEST])])
+    return conftest._prebuild_jobs(session)
+
+
+def test_a_run_that_will_build_the_nest_msi_prebuilds_its_four_inputs_and_no_app(monkeypatch):
+    """The nest MSI carries no app, agent or shell extension, so a run building
+    it owes the bridge and its four binaries — never the agent, the shell DLL
+    or the release ffi flavor the full-feature publish needs."""
+    jobs = _nest_jobs(monkeypatch, owed=True)
+    labels = {label for label, _builder, _args in jobs}
+    builders = {builder for _label, builder, _args in jobs}
+    assert labels >= {"mail_bridge_binary", *_NEST_INPUTS}
+    assert not labels & {"fauna-sync-agent", "fauna_shell"}, labels
+    assert _RELEASE_FFI_BUILDER not in builders
+
+
+def test_a_run_with_a_fresh_nest_stamp_prebuilds_none_of_its_inputs(monkeypatch):
+    labels = {label for label, _b, _a in _nest_jobs(monkeypatch, owed=False)}
+    assert not labels & {"mail_bridge_binary", *_NEST_INPUTS}, labels
+
+
+def test_the_nest_door_has_its_own_stamp_and_builder(tmp_path):
+    """Two doors, two stamps: a build through one never stales the other's cache."""
+    full_msi, full_stamp = windows_installer.msi_paths(str(tmp_path))
+    nest_msi, nest_stamp = windows_installer.nest_msi_paths(str(tmp_path))
+    assert full_stamp != nest_stamp and full_msi != nest_msi
+    assert Path(nest_msi).name == "Fauna-Nest-Setup-arm64.msi"
+    door = _conftest_fixture(_NEST)
+    assert _calls(door, "build_nest_msi"), "the nest door builds through its one builder"
+    assert [r.args[0].value for r in _calls(door, "getfixturevalue")] == ["mail_bridge_binary"]
+
+
+def test_the_nest_builder_links_exactly_its_wxs_list_and_no_client_fragment():
+    """`build_nest_msi` names `NEST_WXS` and no glob: the full-feature package's
+    client fragments sit in the same directory and must never be linked into it."""
+    assert "nest/Package.wxs" in windows_installer.NEST_WXS
+    assert not {"Package.wxs", "App.wxs", "ServiceSync.wxs", "ShellExt.wxs",
+                "Protocol.wxs"} & set(windows_installer.NEST_WXS)
+    for rel in windows_installer.NEST_WXS:
+        assert (_REPO / "apps" / "fauna-windows" / "installer" / rel).is_file(), rel
+    source = ast.unparse(_function(_helper_tree(), "build_nest_msi"))
+    assert "NEST_WXS" in source and '"*.wxs"' not in source
+
+
 # ── the registry shapes the inputs need ───────────────────────────────────────
 
 
@@ -169,7 +225,7 @@ def test_the_shell_extension_builds_as_a_lib_and_lands_as_its_dll():
     and the artifact is `fauna_shell.dll`, not the package-name default."""
     entry = helper_bins.REGISTRY["fauna_shell"]
     assert helper_bins.cargo_args(entry) == [
-        "build", "-p", "fauna-shell-ext", "--lib", "--release",
+        "build", "-p", "fauna-shell-ext", "--lib", "--release", "--locked",
     ]
     binary, stamp = helper_bins.binary_paths(entry, Path("target"))
     assert binary == Path("target/release/fauna_shell.dll")
@@ -177,10 +233,12 @@ def test_the_shell_extension_builds_as_a_lib_and_lands_as_its_dll():
 
 
 def test_each_input_is_one_invocation_of_one_package():
-    """The sync agent's solo invocation is what release.yml ships: naming a
-    second package in one cargo run unifies their features."""
+    """On windows the sync agent's solo invocation is what the MSI's own build
+    makes: naming a second package in one cargo run unifies their features.
+    (The linux installer's agent is built beside the app, as `just
+    linux-release` ships it — `test_helper_bins.py`'s shipped-recipe pin.)"""
     for name in _RELEASE_INPUTS:
-        args = helper_bins.cargo_args(helper_bins.REGISTRY[name])
+        args = helper_bins.cargo_args(helper_bins.REGISTRY[name], platform="win32")
         assert args.count("-p") == 1, args
         assert "--release" in args, args
 
@@ -199,7 +257,7 @@ def test_the_installed_agent_carries_the_surface_of_the_app_that_spawns_it():
     entry = helper_bins.REGISTRY["fauna-sync-agent"]
     assert helper_bins.cargo_args(entry, platform="win32") == [
         "build", "-p", "fauna-sync-agent", "--bin", "fauna-sync-agent", "--release",
-        "--features", "e2e-agent",
+        "--locked", "--features", "e2e-agent",
     ]
     assert "--features" not in helper_bins.cargo_args(entry, platform="linux")
     # The two halves of the claim: the app side really is the e2e flavour ...
@@ -652,3 +710,38 @@ def test_each_reader_declares_the_subject_budget(path):
     timeouts = _calls(assign, "timeout")
     assert timeouts, "pytestmark carries no timeout"
     assert timeouts[0].args[0].value >= 3600
+
+
+def _wix_build_lists(tree):
+    """Every list literal in the helper that opens with `"wix", "build"`."""
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.List) and len(node.elts) >= 2
+                and all(isinstance(e, ast.Constant) for e in node.elts[:2])
+                and [e.value for e in node.elts[:2]] == ["wix", "build"]):
+            yield node
+
+
+def test_every_wix_build_works_in_the_checkouts_build_dir_never_in_temp():
+    """Without `-intermediatefolder`, `wix build` works in a random 8.3-named folder in
+    `%TEMP%` and a killed build leaves it there, 100-250 MB no prefix or root can
+    attribute (fleet-disk.md § Attribution; read on Windows 2026-11-18 as the top two
+    unattributed names). Both MSI builders hand it a folder under the build dir."""
+    builds = list(_wix_build_lists(_tree(_HELPER)))
+    assert len(builds) == 2, "build_msi and build_nest_msi each link with one wix build"
+    for build in builds:
+        args = build.elts
+        flags = [i for i, e in enumerate(args) if isinstance(e, ast.Constant) and e.value == "-intermediatefolder"]
+        assert len(flags) == 1, f"a wix build at line {build.lineno} names no -intermediatefolder"
+        value = args[flags[0] + 1]
+        assert (isinstance(value, ast.Call) and getattr(value.func, "id", "") == "wix_intermediate"
+                and getattr(value.args[0], "id", "") == "build_dir"), (
+            f"line {build.lineno}: the working folder is not wix_intermediate(build_dir, …)")
+
+
+def test_the_wix_working_folder_is_fresh_and_under_the_build_dir(tmp_path):
+    stale = tmp_path / "wix-obj" / "app-arm64" / "#cab1.cab"
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"old")
+    d = windows_installer.wix_intermediate(str(tmp_path), "app-arm64")
+    assert Path(d) == tmp_path / "wix-obj" / "app-arm64"
+    assert Path(d).is_dir() and not any(Path(d).iterdir()), "a build starts from an empty folder"

@@ -131,6 +131,18 @@ impl WasmPolicyEditor {
         to_js(&self.editor.borrow().view())
     }
 
+    /// `feature-policy-editor-save-button`'s paint: the draft's own validity
+    /// (`ui/README.md` § Offer only what is possible, rule 4's form case) —
+    /// `blocked` with the unparseable cell's reason, the same reason
+    /// [`Self::save`] refuses with as `invalid`. Same serde form as the other
+    /// form predicates (`feedPostSubmitPossibility`).
+    #[wasm_bindgen(js_name = savePossibility)]
+    pub fn save_possibility(&self) -> Result<JsValue, JsValue> {
+        to_js(&fauna_core::possibility::Possibility::from_blocked_reason(
+            self.editor.borrow().draft().err(),
+        ))
+    }
+
     /// `feature-policy-editor-on-radio` (`true`) / `-off-radio` (`false`).
     #[wasm_bindgen(js_name = setOn)]
     pub fn set_on(&self, on: bool) {

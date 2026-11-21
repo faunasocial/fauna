@@ -120,6 +120,35 @@ struct HetznerZone {
     // Cloud-API zone ids are integers; paths accept id-or-name as a string.
     id: i64,
     name: String,
+    #[serde(default)]
+    authoritative_nameservers: Option<HetznerAuthoritativeNameservers>,
+}
+
+/// The zone's `authoritative_nameservers` object: `assigned` is the set the
+/// domain must be delegated to (`delegated` and `delegation_status` report
+/// what the registry holds, which the zone door does not read).
+#[derive(Deserialize)]
+struct HetznerAuthoritativeNameservers {
+    #[serde(default)]
+    assigned: Vec<String>,
+}
+
+impl From<HetznerZone> for DnsZone {
+    fn from(z: HetznerZone) -> Self {
+        DnsZone {
+            id: z.id.to_string(),
+            name: z.name,
+            nameservers: z
+                .authoritative_nameservers
+                .map(|a| a.assigned)
+                .unwrap_or_default(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateZoneResponse {
+    zone: HetznerZone,
 }
 
 #[derive(Deserialize)]
@@ -155,14 +184,25 @@ impl DnsProvider for HetznerDns {
 
         let data: ZonesResponse = resp.json().await?;
 
-        Ok(data
-            .zones
-            .into_iter()
-            .map(|z| DnsZone {
-                id: z.id.to_string(),
-                name: z.name,
-            })
-            .collect())
+        Ok(data.zones.into_iter().map(DnsZone::from).collect())
+    }
+
+    /// `POST /zones` on the Cloud API: a primary zone, answered with its
+    /// `authoritative_nameservers.assigned` (registry.md § Delegation doors).
+    async fn create_zone(
+        &self,
+        client: &reqwest::Client,
+        domain: &str,
+    ) -> Result<DnsZone, ProvisionError> {
+        let resp = client
+            .post(format!("{}/zones", self.api_base))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({ "name": domain, "mode": "primary" }))
+            .send()
+            .await?;
+        let resp = ensure_success(resp).await?;
+        let data: CreateZoneResponse = resp.json().await.map_err(ProvisionError::parse)?;
+        Ok(data.zone.into())
     }
 
     async fn create_record(

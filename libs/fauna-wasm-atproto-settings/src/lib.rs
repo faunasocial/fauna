@@ -310,6 +310,36 @@ impl AtprotoSettingsMachine {
         serde_json::to_string(&self.0.snapshot()).unwrap_or_default()
     }
 
+    /// Whether the depth rung for `target_level` can succeed now —
+    /// `fauna_core::possibility::Possibility`'s serde JSON. Blocked
+    /// `common.still_loading` until the status read resolves, then folded with
+    /// the hosted gate's reason; `selectLevel` refuses with the same reason.
+    #[wasm_bindgen(js_name = rungPossibilityJson)]
+    pub fn rung_possibility_json(&self, target_level: String) -> String {
+        serde_json::to_string(&self.0.rung_possibility(target_level)).unwrap_or_default()
+    }
+
+    /// Whether `atproto-delegation-authorize` can succeed (blocked with the
+    /// no-identity reason when this app holds no signing identity), as
+    /// `Possibility` serde JSON.
+    #[wasm_bindgen(js_name = authorizePossibilityJson)]
+    pub fn authorize_possibility_json(&self) -> String {
+        serde_json::to_string(&self.0.authorize_possibility()).unwrap_or_default()
+    }
+
+    /// Whether `atproto-contest` is offered, as `Possibility` serde JSON.
+    #[wasm_bindgen(js_name = contestPossibilityJson)]
+    pub fn contest_possibility_json(&self) -> String {
+        serde_json::to_string(&self.0.contest_possibility()).unwrap_or_default()
+    }
+
+    /// Whether the delete card's retire-identity tick can be set, as
+    /// `Possibility` serde JSON.
+    #[wasm_bindgen(js_name = retireIdentityPossibilityJson)]
+    pub fn retire_identity_possibility_json(&self) -> String {
+        serde_json::to_string(&self.0.retire_identity_possibility()).unwrap_or_default()
+    }
+
     /// Re-read credential rows + kill-switch state + live sessions. Resolves
     /// when done (read `snapshotJson` for the result / `error`).
     #[wasm_bindgen(js_name = refresh)]

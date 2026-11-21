@@ -25,6 +25,7 @@ public struct PostAuthorLine: View {
         Text(label)
             .accessibilityIdentifier(id)
             .contentShape(Rectangle())
+            .faunaActsOnClick()
             .onTapGesture(perform: onOpen)
             .automationActivate(id, text: { label }, perform: onOpen)
     }

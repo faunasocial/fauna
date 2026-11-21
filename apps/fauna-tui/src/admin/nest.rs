@@ -238,14 +238,27 @@ fn blocked_elements(state: &AdminState, els: &mut Vec<Element>) {
 /// The web-app origin section (`admin-nest-web-app-origin-*` — `admin.md` § N
 /// Nest → *Web-app origin*), directly after NAT mode and mirroring its radio
 /// shape. Paint only: every sentence is the shared `admin_web_app_origin_view`
-/// fold; the radios' select is local, the save commits.
+/// fold, and whether the section and its central radio exist are the fold's
+/// `section_possibility` / `central_possibility` (`web-content-hosting.md`
+/// § Same-origin security model → *While the central origin is not live, the
+/// choice is not offered*, rule 5) — nothing is re-derived here. The radios'
+/// select is local, the save commits.
 fn web_app_origin_elements(state: &AdminState, els: &mut Vec<Element>) {
     use fauna_client_admin::WebAppOrigin;
-    let view = state.nest_snapshot.as_ref().map(|s| &s.web_app_origin);
-    // Until the read lands, nothing is settable and neither radio is marked —
-    // pre-marking bundled would state a choice the nest may not hold (the NAT
-    // rule, `apps/tui.md` § Rendering → *Control vocabulary*, rule 1).
-    let can_set = view.is_some_and(|v| v.can_set);
+    // Until the read lands the section is not painted: whether it exists is
+    // the read's answer (`docs/goal/ui/README.md` § Offer only what is
+    // possible, rule 5 — unknown is not possible), and painting it to take it
+    // away again would offer a choice and withdraw it.
+    let Some(view) = state.nest_snapshot.as_ref().map(|s| &s.web_app_origin) else {
+        return;
+    };
+    if !view.section_possibility.is_shown() {
+        return;
+    }
+    // Whether the radios and save are settable is the shared
+    // `web_app_origin_set_possibility`, declared by `apply_read_gates`: the
+    // seam disables them with its reason (the status line, or a central draft
+    // the nest refuses).
     let draft = state.web_app_origin_draft;
     let bundled = draft == Some(WebAppOrigin::Bundled);
     let central = draft == Some(WebAppOrigin::Central);
@@ -262,35 +275,31 @@ fn web_app_origin_elements(state: &AdminState, els: &mut Vec<Element>) {
             Gesture::Admin(Action::SelectWebAppOrigin(WebAppOrigin::Bundled)),
         )
         .attr("state", if bundled { "on" } else { "off" })
-        .enabled(can_set),
+        .enabled(true),
     );
-    els.push(
-        Element::radio_gesture(
-            ids::ADMIN_NEST_WEB_APP_ORIGIN_CENTRAL_RADIO,
-            view.map(|v| localized(&v.central_label))
-                .unwrap_or_else(|| {
-                    localized(&fauna_client_admin::AdminWebAppOriginView::default().central_label)
-                }),
-            central,
-            Gesture::Admin(Action::SelectWebAppOrigin(WebAppOrigin::Central)),
-        )
-        .attr("state", if central { "on" } else { "off" })
-        .enabled(can_set),
-    );
+    if view.central_possibility.is_shown() {
+        els.push(
+            Element::radio_gesture(
+                ids::ADMIN_NEST_WEB_APP_ORIGIN_CENTRAL_RADIO,
+                localized(&view.central_label),
+                central,
+                Gesture::Admin(Action::SelectWebAppOrigin(WebAppOrigin::Central)),
+            )
+            .attr("state", if central { "on" } else { "off" })
+            .enabled(true),
+        );
+    }
     els.push(Element::gesture_button(
         ids::ADMIN_NEST_WEB_APP_ORIGIN_SAVE_BUTTON,
         t::nest_page::WEB_APP_ORIGIN_SAVE,
-        can_set && draft.is_some(),
+        draft.is_some(),
         Gesture::Admin(Action::SaveWebAppOrigin),
     ));
     els.push(Element::label(
         ids::ADMIN_NEST_WEB_APP_ORIGIN_STATUS,
-        view.map(|v| localized(&v.status))
-            .unwrap_or_else(|| t::nest_page::WEB_APP_ORIGIN_LOADING.to_string()),
+        localized(&view.status),
     ));
-    if let Some(v) = view {
-        els.push(Element::chrome(localized(&v.scope)));
-    }
+    els.push(Element::chrome(localized(&view.scope)));
 }
 
 /// The update-channel section (`admin-nest-update-channel-*` —
@@ -302,8 +311,9 @@ fn update_channel_elements(state: &AdminState, els: &mut Vec<Element>) {
     use fauna_client_admin::UpdateChannel;
     let view = state.nest_snapshot.as_ref().map(|s| &s.update_channel);
     // Until the read lands nothing is settable or marked (the NAT rule, as for
-    // the web-app origin); the options are the fold's either way.
-    let can_set = view.is_some_and(|v| v.can_set);
+    // the web-app origin); the options are the fold's either way. Settable is
+    // the shared `update_channel_set_possibility`, declared by
+    // `apply_read_gates`.
     let draft = state.update_channel_draft;
     let fallback = fauna_client_admin::AdminUpdateChannelView::default();
     let options = &view.unwrap_or(&fallback).options;
@@ -327,14 +337,14 @@ fn update_channel_elements(state: &AdminState, els: &mut Vec<Element>) {
                 Gesture::Admin(Action::SelectUpdateChannel(option.channel)),
             )
             .attr("state", if on { "on" } else { "off" })
-            .enabled(can_set),
+            .enabled(true),
         );
         els.push(Element::chrome(localized(&option.description)));
     }
     els.push(Element::gesture_button(
         ids::ADMIN_NEST_UPDATE_CHANNEL_SAVE_BUTTON,
         t::nest_page::UPDATE_CHANNEL_SAVE,
-        can_set && draft.is_some(),
+        draft.is_some(),
         Gesture::Admin(Action::SaveUpdateChannel),
     ));
     els.push(Element::label(
@@ -364,7 +374,6 @@ pub(super) fn nest_elements(state: &AdminState) -> Vec<Element> {
     let nat_mode = nat.map(|s| s.selected_mode);
     let public = nat_mode == Some(NodeMode::Public);
     let private = nat_mode == Some(NodeMode::Private);
-    let nat_submit_enabled = nat.map(|s| s.submit_enabled).unwrap_or(true);
     let nat_status = nat
         .map(|s| localized(&s.message))
         .unwrap_or_else(|| t::nest_page::NAT_MODE_LOADING.to_string());
@@ -423,7 +432,8 @@ pub(super) fn nest_elements(state: &AdminState) -> Vec<Element> {
             Gesture::Admin(Action::SaveServingPort),
         ),
         // NAT mode — a one-of-N `Radio` pair (vocabulary rule 1), a save
-        // (enabled per the machine's `submit_enabled`), and the machine-owned
+        // (live per the machine's `save_possibility`, which the shell's read
+        // gate declares — `super::action_possibility`), and the machine-owned
         // status line. The radios' `select` is local (no network); save signs
         // the commit. Both unmarked until the mode has actually loaded.
         Element::radio_gesture(
@@ -443,7 +453,7 @@ pub(super) fn nest_elements(state: &AdminState) -> Vec<Element> {
         Element::gesture_button(
             ids::ADMIN_NEST_NAT_MODE_SAVE_BUTTON,
             t::nest_page::NAT_MODE_SAVE,
-            nat_submit_enabled,
+            true,
             Gesture::Admin(Action::SaveNatMode),
         ),
         Element::label(ids::ADMIN_NEST_NAT_MODE_STATUS, nat_status),
@@ -1203,11 +1213,8 @@ mod tests {
                 "admin-nest-nat-mode-private-radio",
                 "admin-nest-nat-mode-save-button",
                 "admin-nest-nat-mode-status",
-                "admin-nest-web-app-origin-section",
-                "admin-nest-web-app-origin-bundled-radio",
-                "admin-nest-web-app-origin-central-radio",
-                "admin-nest-web-app-origin-save-button",
-                "admin-nest-web-app-origin-status",
+                // No admin-nest-web-app-origin-*: a bundled nest whose central
+                // origin is not live has no choice to offer (section_possibility).
                 "admin-nest-update-channel-section",
                 "admin-nest-update-channel-stable-radio",
                 "admin-nest-update-channel-test-radio",
@@ -1864,6 +1871,16 @@ mod tests {
             .map(|(_, v)| v.as_str())
     }
 
+    /// The admin page as painted — after the possibility seam, which disables
+    /// a control from its declared answer (`apply_read_gates`).
+    fn painted(app: &mut crate::app::App) -> Vec<Element> {
+        if app.session.is_none() {
+            app.session = Some(crate::app::tests::test_session());
+        }
+        app.page = crate::pages::Page::Admin;
+        app.page_elements()
+    }
+
     /// A web-app-origin-carrying snapshot; `None` is a nest predating the choice.
     fn with_origin(reply: Option<fauna_client_admin::WebAppOriginStatus>) -> NestPageSnapshot {
         NestPageSnapshot {
@@ -1872,33 +1889,131 @@ mod tests {
         }
     }
 
+    /// A reply from a nest whose central origin is live (`central_live` true).
     fn origin_reply(
         mode: fauna_client_admin::WebAppOrigin,
         domain: Option<&str>,
     ) -> fauna_client_admin::WebAppOriginStatus {
-        fauna_client_admin::WebAppOriginStatus::project(mode, domain)
+        fauna_client_admin::WebAppOriginStatus::project(mode, domain, true)
     }
 
-    /// Before the read lands nothing is marked or settable, and the status says
-    /// it is loading — never a bundled pre-mark the nest may not hold.
+    /// A reply from a nest of today's builds: the central origin is not live.
+    fn not_live_reply(
+        mode: fauna_client_admin::WebAppOrigin,
+        domain: Option<&str>,
+    ) -> fauna_client_admin::WebAppOriginStatus {
+        fauna_client_admin::WebAppOriginStatus::project(mode, domain, false)
+    }
+
+    /// Every `admin-nest-web-app-origin-*` element on the painted page.
+    fn origin_ids(els: &[Element]) -> Vec<String> {
+        els.iter()
+            .filter(|e| e.id.starts_with("admin-nest-web-app-origin-"))
+            .map(|e| e.id.clone())
+            .collect()
+    }
+
+    /// Before the read lands the section is not painted: whether it exists is
+    /// the read's answer (unknown is not possible), never a guess withdrawn.
     #[test]
-    fn an_unloaded_web_app_origin_marks_neither_radio_and_cannot_save() {
+    fn an_unloaded_web_app_origin_paints_no_section() {
         let mut app = crate::app::tests::test_app();
         app.admin.sub = AdminPage::Nest;
-        let els = nest_elements(&app.admin);
+        let els = painted(&mut app);
+        assert_eq!(origin_ids(&els), Vec::<String>::new());
+    }
+
+    /// Today's builds: bundled stored and the central origin not live — the
+    /// section would hold one radio and a save that changes nothing, so no
+    /// element of it is painted.
+    #[test]
+    fn bundled_while_central_is_not_live_paints_no_section() {
+        use fauna_client_admin::WebAppOrigin;
+        let mut app = crate::app::tests::test_app();
+        app.admin.sub = AdminPage::Nest;
+        app.admin.nest_snapshot = Some(with_origin(Some(not_live_reply(
+            WebAppOrigin::Bundled,
+            Some("example.org"),
+        ))));
+        app.admin.web_app_origin_draft = Some(WebAppOrigin::Bundled);
+        let els = painted(&mut app);
+        assert_eq!(origin_ids(&els), Vec::<String>::new());
+    }
+
+    /// A stored central (set before the ruling) while not live: the status, the
+    /// bundled radio and the save stay so the admin can leave it; the central
+    /// radio is absent, no radio is marked, and saving bundled is offered.
+    #[test]
+    fn stored_central_while_not_live_offers_only_the_way_back() {
+        use fauna_client_admin::WebAppOrigin;
+        let mut app = crate::app::tests::test_app();
+        app.admin.sub = AdminPage::Nest;
+        let snapshot = with_origin(Some(not_live_reply(
+            WebAppOrigin::Central,
+            Some("example.org"),
+        )));
+        app.admin.web_app_origin_draft = snapshot.web_app_origin.selected;
+        app.admin.nest_snapshot = Some(snapshot);
+        let els = painted(&mut app);
         let find = |id: &str| els.iter().find(|e| e.id == id).expect(id).clone();
-        for radio in [
-            "admin-nest-web-app-origin-bundled-radio",
-            "admin-nest-web-app-origin-central-radio",
-        ] {
-            assert!(!find(radio).enabled, "{radio} live before the read");
-            assert_eq!(state_attr(&find(radio)), Some("off"));
-        }
-        assert!(!find("admin-nest-web-app-origin-save-button").enabled);
+        assert!(
+            !els.iter()
+                .any(|e| e.id == "admin-nest-web-app-origin-central-radio"),
+            "central radio offered while not live"
+        );
+        assert_eq!(
+            state_attr(&find("admin-nest-web-app-origin-bundled-radio")),
+            Some("off")
+        );
         assert_eq!(
             find("admin-nest-web-app-origin-status").text,
-            t::nest_page::WEB_APP_ORIGIN_LOADING
+            t::nest_page::web_app_origin_status_central_not_live("https://app.fauna.social")
         );
+        // A central press is refused by the same answer; bundled is taken.
+        assert!(
+            super::super::apply_local(&mut app, Action::SelectWebAppOrigin(WebAppOrigin::Central))
+                .is_none()
+        );
+        assert_ne!(app.admin.web_app_origin_draft, Some(WebAppOrigin::Central));
+        super::super::apply_local(&mut app, Action::SelectWebAppOrigin(WebAppOrigin::Bundled));
+        assert_eq!(app.admin.web_app_origin_draft, Some(WebAppOrigin::Bundled));
+        // Saving bundled is offered: the save's own answer is possible (the
+        // painted page's seam also folds the offline gate of the test session,
+        // so the answer is read straight from the predicate the seam applies).
+        assert!(
+            super::super::action_possibility(&app.admin, &Action::SaveWebAppOrigin)
+                .is_some_and(|a| a.is_possible())
+        );
+        let els = nest_elements(&app.admin);
+        let find = |id: &str| els.iter().find(|e| e.id == id).expect(id).clone();
+        assert!(find("admin-nest-web-app-origin-save-button").enabled);
+    }
+
+    /// A nest whose central origin is live paints the whole section, both
+    /// radios included.
+    #[test]
+    fn a_live_central_origin_paints_the_whole_section() {
+        use fauna_client_admin::WebAppOrigin;
+        let mut app = crate::app::tests::test_app();
+        app.admin.sub = AdminPage::Nest;
+        app.admin.nest_snapshot = Some(with_origin(Some(origin_reply(
+            WebAppOrigin::Bundled,
+            Some("example.org"),
+        ))));
+        app.admin.web_app_origin_draft = Some(WebAppOrigin::Bundled);
+        let els = painted(&mut app);
+        let ids = origin_ids(&els);
+        for id in [
+            "admin-nest-web-app-origin-section",
+            "admin-nest-web-app-origin-bundled-radio",
+            "admin-nest-web-app-origin-central-radio",
+            "admin-nest-web-app-origin-save-button",
+            "admin-nest-web-app-origin-status",
+        ] {
+            assert!(ids.iter().any(|i| i == id), "{id} missing");
+        }
+        let find = |id: &str| els.iter().find(|e| e.id == id).expect(id).clone();
+        assert!(find("admin-nest-web-app-origin-central-radio").enabled);
     }
 
     /// Central mode marks the central radio and the status names the nest's
@@ -1933,10 +2048,10 @@ mod tests {
         );
     }
 
-    /// A nest predating the choice: both radios unmarked and disabled, the save
-    /// dead, the status says why — and a radio press changes nothing.
+    /// A nest predating the choice: a feature it does not have, so no element
+    /// of the section is painted — and a radio press or save changes nothing.
     #[test]
-    fn a_nest_predating_the_choice_paints_it_unsettable() {
+    fn a_nest_predating_the_choice_paints_no_section() {
         use fauna_client_admin::WebAppOrigin;
         let mut app = crate::app::tests::test_app();
         app.admin.sub = AdminPage::Nest;
@@ -1947,14 +2062,8 @@ mod tests {
         );
         assert_eq!(app.admin.web_app_origin_draft, None);
         assert!(super::super::apply_local(&mut app, Action::SaveWebAppOrigin).is_none());
-        let els = nest_elements(&app.admin);
-        let find = |id: &str| els.iter().find(|e| e.id == id).expect(id).clone();
-        assert!(!find("admin-nest-web-app-origin-central-radio").enabled);
-        assert!(!find("admin-nest-web-app-origin-save-button").enabled);
-        assert_eq!(
-            find("admin-nest-web-app-origin-status").text,
-            t::nest_page::WEB_APP_ORIGIN_STATUS_PREDATES
-        );
+        let els = painted(&mut app);
+        assert_eq!(origin_ids(&els), Vec::<String>::new());
     }
 
     /// Picking a radio is local: it moves the draft and dispatches nothing.
@@ -2007,7 +2116,7 @@ mod tests {
     fn an_unloaded_update_channel_marks_no_radio_and_cannot_save() {
         let mut app = crate::app::tests::test_app();
         app.admin.sub = AdminPage::Nest;
-        let els = nest_elements(&app.admin);
+        let els = painted(&mut app);
         let find = |id: &str| els.iter().find(|e| e.id == id).expect(id).clone();
         for radio in CHANNEL_RADIOS {
             assert!(!find(radio).enabled, "{radio} live before the read");
@@ -2029,6 +2138,10 @@ mod tests {
     fn the_update_channel_section_follows_the_web_app_origin() {
         let mut app = crate::app::tests::test_app();
         app.admin.sub = AdminPage::Nest;
+        app.admin.nest_snapshot = Some(with_origin(Some(origin_reply(
+            fauna_client_admin::WebAppOrigin::Bundled,
+            None,
+        ))));
         let els = nest_elements(&app.admin);
         let at = |id: &str| els.iter().position(|e| e.id == id).expect(id);
         assert!(
@@ -2080,7 +2193,7 @@ mod tests {
         );
         assert_eq!(app.admin.update_channel_draft, None);
         assert!(super::super::apply_local(&mut app, Action::SaveUpdateChannel).is_none());
-        let els = nest_elements(&app.admin);
+        let els = painted(&mut app);
         let find = |id: &str| els.iter().find(|e| e.id == id).expect(id).clone();
         for radio in CHANNEL_RADIOS {
             assert!(!find(radio).enabled, "{radio}");

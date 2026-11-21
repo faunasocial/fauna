@@ -131,11 +131,16 @@ class MainActivity : FragmentActivity() {
                     // The store-consent lock wraps the WHOLE app — before any
                     // page, onboarding included (account-age-band.md, the
                     // store-law developer duties bullet, item (3)).
-                    StoreConsentLockHost {
-                        FaunaNavHost(
-                            widthSizeClass = windowSizeClass.widthSizeClass,
-                            appState = appState,
-                        )
+                    // Every read-only text on every page is selectable through
+                    // this one wrap (ui/README.md § Text the person reads can be
+                    // copied); controls keep their captions out of it.
+                    com.fauna.app.ui.components.ReadTextRoot {
+                        StoreConsentLockHost {
+                            FaunaNavHost(
+                                widthSizeClass = windowSizeClass.widthSizeClass,
+                                appState = appState,
+                            )
+                        }
                     }
                 }
             }
@@ -216,6 +221,10 @@ class MainActivity : FragmentActivity() {
             // (`fauna-conversations` `poll_secs_override`, read via std::env
             // when the session's receive loop starts at login).
             "FAUNA_CONV_POLL_SECS",
+            // The conversations push arm's e2e off switch (`fauna-client-conversations`
+            // `conv_push_source`, read via std::env when the session starts at login):
+            // conftest's second-real-engine seat sets it for the drain-alone shape.
+            "FAUNA_E2E_SUPPRESS_CONV_PUSH",
         )
     }
 }

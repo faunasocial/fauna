@@ -43,6 +43,8 @@
     type ArchiveImportSnapshot,
     type ArchiveSourceKind,
   } from '#lib/wasm-archive-import';
+  import { paintAnswer, refusal } from '#lib/mail-affordances';
+  import type { Possibility } from '#lib/possibility';
 
   // The settings page owns the single error surface.
   let { error = $bindable('') } = $props();
@@ -206,7 +208,30 @@
     if (snap?.source_export_url) openUrl(snap.source_export_url);
   }
 
-  let profileOffered = $derived(!!snap?.archive_profile && !snap?.profile_applied);
+  // Next (the Archive and Scope steps), the Start and the profile prefill
+  // paint from the machine's own answers (`archive-import.md` § Wizard steps:
+  // no archive opened, a bad range, no profile or already applied) — Next over
+  // the typed date drafts, which only Next commits. Each press asks the same
+  // answer again (`pressAsked`). `snap` is read so they re-read per snapshot.
+  const nextAnswer = $derived.by(() =>
+    snap && machine ? (machine.nextPossibility(dateFromInput, dateToInput) as Possibility) : null,
+  );
+  const nextPaint = $derived(paintAnswer(nextAnswer));
+  const startPaint = $derived(paintAnswer(snap && machine ? (machine.startPossibility() as Possibility) : null));
+  const prefillPaint = $derived(
+    paintAnswer(snap && machine ? (machine.profilePrefillPossibility() as Possibility) : null),
+  );
+
+  /** Rule 6 at the press: ask `answer` again; refused → its reason on the
+   *  page's `error-message` and nothing dispatched, else dispatch `actions`. */
+  function pressAsked(answer: Possibility | null | undefined, ...actions: unknown[]): void {
+    const verdict = refusal(answer ?? null);
+    if (verdict.refused) {
+      if (verdict.reason) error = resolveLocalized(verdict.reason);
+      return;
+    }
+    void dispatch(...actions);
+  }
   let concluded = $derived(snap?.run_state === 'Cancelled' || snap?.run_state === 'Completed');
 </script>
 
@@ -265,10 +290,19 @@
           <button class="btn" data-testid={IDS.WIZARD_BACK_BUTTON} disabled={busy} onclick={() => dispatch('Back')}>
             {t.archive_import.back}
           </button>
-          <button class="btn" data-testid={IDS.WIZARD_NEXT_BUTTON} disabled={busy} onclick={() => dispatch('Next')}>
+          <button
+            class="btn"
+            data-testid={IDS.WIZARD_NEXT_BUTTON}
+            disabled={busy || nextPaint.disabled}
+            title={nextPaint.reason ? resolveLocalized(nextPaint.reason) : undefined}
+            onclick={() => pressAsked(machine?.nextPossibility('', '') as Possibility | undefined, 'Next')}
+          >
             {t.archive_import.next}
           </button>
         </div>
+        {#if nextPaint.reason}
+          <p class="muted small">{resolveLocalized(nextPaint.reason)}</p>
+        {/if}
       </div>
     {:else if snap.step === 'Scope'}
       <div class="step">
@@ -337,9 +371,11 @@
           <button
             class="btn"
             data-testid={IDS.WIZARD_NEXT_BUTTON}
-            disabled={busy}
+            disabled={busy || nextPaint.disabled}
+            title={nextPaint.reason ? resolveLocalized(nextPaint.reason) : undefined}
             onclick={() =>
-              dispatch(
+              pressAsked(
+                machine?.nextPossibility(dateFromInput, dateToInput) as Possibility | undefined,
                 { SetDateFrom: { value: dateFromInput.trim() } },
                 { SetDateTo: { value: dateToInput.trim() } },
                 'Next',
@@ -348,6 +384,9 @@
             {t.archive_import.next}
           </button>
         </div>
+        {#if nextPaint.reason}
+          <p class="muted small">{resolveLocalized(nextPaint.reason)}</p>
+        {/if}
       </div>
     {:else if snap.step === 'Confirm'}
       <div class="step">
@@ -357,10 +396,19 @@
           <button class="btn" data-testid={IDS.WIZARD_BACK_BUTTON} disabled={busy} onclick={() => dispatch('Back')}>
             {t.archive_import.back}
           </button>
-          <button class="btn primary" data-testid={IDS.ARCHIVE_IMPORT_START_BUTTON} disabled={busy} onclick={() => dispatch('Start')}>
+          <button
+            class="btn primary"
+            data-testid={IDS.ARCHIVE_IMPORT_START_BUTTON}
+            disabled={busy || startPaint.disabled}
+            title={startPaint.reason ? resolveLocalized(startPaint.reason) : undefined}
+            onclick={() => pressAsked(machine?.startPossibility() as Possibility | undefined, 'Start')}
+          >
             {t.archive_import.start_button}
           </button>
         </div>
+        {#if startPaint.reason}
+          <p class="muted small">{resolveLocalized(startPaint.reason)}</p>
+        {/if}
       </div>
     {:else if snap.step === 'Progress'}
       <div class="step">
@@ -418,16 +466,21 @@
         {#if showSkipped}
           <pre class="small" data-testid={IDS.ARCHIVE_IMPORT_ERROR_LOG}>{snap.skip_log.join('\n')}</pre>
         {/if}
-        <!-- Offered, never applied silently: enabled while the run's end found
-             a profile in the archive and the tap has not applied it yet. -->
+        <!-- Offered, never applied silently: the shared answer is blocked, with
+             its reason painted, when the run found no profile in the archive and
+             once the tap applied it (`profile_prefill_possibility`). -->
         <button
           class="btn"
           data-testid={IDS.ARCHIVE_IMPORT_PROFILE_PREFILL_BUTTON}
-          disabled={busy || !profileOffered}
-          onclick={() => dispatch('ApplyArchiveProfile')}
+          disabled={busy || prefillPaint.disabled}
+          title={prefillPaint.reason ? resolveLocalized(prefillPaint.reason) : undefined}
+          onclick={() => pressAsked(machine?.profilePrefillPossibility() as Possibility | undefined, 'ApplyArchiveProfile')}
         >
           {t.archive_import.profile_prefill_button}
         </button>
+        {#if prefillPaint.reason}
+          <p class="muted small">{resolveLocalized(prefillPaint.reason)}</p>
+        {/if}
         <button class="link" data-testid={IDS.ARCHIVE_IMPORT_FOLDER_LINK} onclick={() => goto('/app/settings/folders')}>
           {resolveComposed(text.folder_link)}
         </button>

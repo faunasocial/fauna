@@ -61,6 +61,22 @@ struct MediaItemDetailView: View {
     /// current file, and its manifest is what the download walk is keyed by.
     private var latest: FileVersionSummary? { versions.last }
 
+    /// Whether delete and version restore can succeed on this item — the
+    /// shared `MediaMachine::write_possibility` over the item's filter value
+    /// (`ui/media.md` § Errors & edge cases → *What this person may write*):
+    /// absent in a followed scope and in a set this person may only read,
+    /// else possible. A followed item reads absent here without asking, as
+    /// the android and linux details do: its filter value is the scope's,
+    /// not a set the machine resolves.
+    private var write: Possibility {
+        Self.writeAnswer(vm: vm, folder: item.filterValue, followed: followed)
+    }
+
+    /// The detail's one write answer, outside the view so a test can read it.
+    static func writeAnswer(vm: MediaMachineVM, folder: String, followed: Bool) -> Possibility {
+        followed ? .absent : vm.writePossibility(folder: folder)
+    }
+
     var body: some View {
         ZStack {
             Color.black.opacity(0.35)
@@ -124,13 +140,14 @@ struct MediaItemDetailView: View {
                 HStack {
                     // Delete leads (destructive, leading edge) and Close trails —
                     // the same actions-row order linux's `detail.rs` draws. A
-                    // followed item has nothing to delete: the scope is read-only
-                    // structurally, so the button is absent rather than disabled.
-                    if !followed {
-                        Button(L.media.fileDetail.deleteFile) { deleteArmed = true }
-                            .accessibilityIdentifier(Ids.mediaDeleteButton)
-                            .automationActivate(Ids.mediaDeleteButton) { deleteArmed = true }
-                    }
+                    // followed item, and an item of a set this person may only
+                    // read, have nothing to delete: the shared write answer is
+                    // absent there, so the button is left out, not disabled.
+                    Button(L.media.fileDetail.deleteFile) { deleteArmed = true }
+                        .accessibilityIdentifier(Ids.mediaDeleteButton)
+                        .automationActivate(Ids.mediaDeleteButton) { deleteArmed = true }
+                        .faunaPossible(write)
+                    FaunaPossibilityReason(write)
                     // `share-link-button` — absent unless the machine calls the
                     // file eligible (a followed scope's items never are); it
                     // opens the page-level create surface over this detail
@@ -216,6 +233,7 @@ struct MediaItemDetailView: View {
             Button(L.media.versionRestore) { restoreTarget = version }
                 .accessibilityIdentifier(Ids.fileVersionRestoreButton)
                 .automationActivate(Ids.fileVersionRestoreButton) { restoreTarget = version }
+                .faunaPossible(write)
         }
         .padding(.vertical, 2)
         .accessibilityElement(children: .contain)

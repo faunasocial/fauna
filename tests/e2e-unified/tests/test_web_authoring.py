@@ -773,7 +773,22 @@ def test_publishing_a_post_from_the_feed_overflow_menu(
 
     # ── The verbs flip on the card, off the same publish state ──
     app.driver.navigate_to("feed")
-    feed.open_post_actions(index=0)
+    # The card learns the publish from the feed's re-read, which may land
+    # after the web-settings section's own list read: wait for its published
+    # shape (Unpublish offered) before grading the verbs.
+    def _published_menu():
+        feed.open_post_actions(index=0)
+        return feed.web_verb_visible("unpublish-web") or None
+
+    wait_until(
+        _published_menu,
+        web.PAGE_READY_BUDGET_S,
+        diagnose=lambda: (
+            "the card never painted the published post's verbs; "
+            f"publish-web offered={feed.web_verb_visible('publish-web')} "
+            f"error={app.error_text()!r}"
+        ),
+    )
     assert not feed.web_verb_visible("publish-web"), (
         "an already-published post must not offer a second publish"
     )
@@ -859,17 +874,42 @@ def test_the_overflow_copy_verb_is_dead_without_a_serving_origin(
     web.set_subdomain_enabled(False)
 
     app.driver.navigate_to("feed")
-    feed.open_post_actions(index=0)
-    assert feed.web_verb_visible("copy-web-link"), (
-        "the verb must still be PRESENT — it is disabled with a reason, not "
-        "hidden, so the user learns why there is no link"
-    )
-    assert not feed.web_verb_enabled("copy-web-link"), (
-        "with no serving origin the copy affordance must be dead: a link that "
-        f"cannot load is worse on the clipboard than none; error={app.error_text()!r}"
-    )
-    assert feed.web_verb_enabled("unpublish-web"), (
-        "a takedown needs no serving origin"
+
+    # The card learns the publish from the feed's re-read, not the click, and
+    # the origin from the shared web-page read the toggle wrote: grade the
+    # whole open menu in ONE reading, repeated until it holds. Separate reads
+    # raced a card re-render that closed the menu between them (the copy verb
+    # read "absent" a moment after Unpublish read "offered"). Convergence, not
+    # a deadline (convention 14): a copy verb left live for good — the stale
+    # read the toggle must supersede — still never satisfies it.
+    last: dict = {}
+
+    def _menu_without_origin():
+        feed.open_post_actions(index=0)
+        last.clear()
+        last.update(
+            unpublish=feed.web_verb_visible("unpublish-web"),
+            copy_present=feed.web_verb_visible("copy-web-link"),
+        )
+        if not (last["unpublish"] and last["copy_present"]):
+            return None
+        last["copy_live"] = feed.web_verb_enabled("copy-web-link")
+        last["unpublish_live"] = feed.web_verb_enabled("unpublish-web")
+        if last["copy_live"] or not last["unpublish_live"]:
+            return None
+        return True
+
+    wait_until(
+        _menu_without_origin,
+        web.PAGE_READY_BUDGET_S,
+        diagnose=lambda: (
+            "the published post's menu never showed Copy link present but dead "
+            "and Unpublish live with no serving origin — the verb is disabled "
+            "with a reason, not hidden; a link that cannot load is worse on the "
+            "clipboard than none; a takedown needs no origin. Last reading: "
+            f"{last!r}; publish-web offered={feed.web_verb_visible('publish-web')} "
+            f"error={app.error_text()!r}"
+        ),
     )
 
     # Leave the actor as found: this module's actor is shared, so a leaked

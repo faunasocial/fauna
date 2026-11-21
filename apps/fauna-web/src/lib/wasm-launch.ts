@@ -2,6 +2,7 @@ import { asset } from '$app/paths';
 import { joinChunk } from './chunk-join';
 import { adoptStoreKey, announceStartOver, forgetStoreKey } from './identity-store';
 import { clearTabPin } from './tabPin';
+import type { Possibility } from './possibility';
 
 // Re-exported so existing call sites keep importing the snapshot type and its
 // accessors from `#lib/wasm-launch`; they live in their own module only so
@@ -450,6 +451,19 @@ export async function identityStoreSealedAndOpen(): Promise<boolean> {
 function adoptLaunchKey(): void {
   const key = identityStoreFns().identityStoreKey();
   if (key) adoptStoreKey(key);
+}
+
+/** `unlock-submit-button`'s answer over what is typed — `confirm` is create
+ *  mode's second entry, `null` in unlock mode —
+ *  `fauna_client_accounts::passphrase_possibility` (empty, then mismatch).
+ *  The gate paints its submit from it and asks it again; it keeps no
+ *  emptiness or mismatch check of its own. Throws until the launch chunk is up
+ *  (`identityStoreGate()` brings it up before the form is painted). */
+export function passphrasePossibility(passphrase: string, confirm: string | null): Possibility {
+  const fn = (wasm() as unknown as {
+    passphrasePossibilityJson(p: string, c: string | undefined): string;
+  }).passphrasePossibilityJson;
+  return JSON.parse(fn(passphrase, confirm ?? undefined)) as Possibility;
 }
 
 /** Write the header under `passphrase` and seal every row this browser holds. */

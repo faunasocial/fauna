@@ -5,9 +5,9 @@
 //! There is no Continue button — a successful Submit is terminal and the
 //! machine advances on its own.
 //!
-//! `submit_enabled` on the snapshot is the canonical gate (it encodes both
-//! "not in flight" and the machine's own rules); the client adds nothing. The
-//! code is passed to `wizard_submit_claim_code` **verbatim** — no length or
+//! Claim is painted from the machine's `claim_code_submit_possibility` — the
+//! typed code as a draft, and no claim already in flight; the client adds
+//! nothing. The code is passed to `wizard_submit_claim_code` **verbatim** — no length or
 //! charset filter, since the nest normalizes on both sides (`onboarding.md:93`).
 
 use fauna_i18n::strings::common;
@@ -38,14 +38,18 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
         Element::button(
             ids::CLAIM_CODE_SUBMIT_BUTTON,
             t::SUBMIT_BUTTON,
-            snap.submit_enabled,
+            true,
             Action::SubmitClaimCode,
+        )
+        .possible(
+            w.machine
+                .claim_code_submit_possibility(w.field(WizardField::ClaimCode)),
         ),
         Element::label(ids::CLAIM_CODE_STATUS, localized(&snap.message)),
     ];
     // Claiming a nest makes an account: the terms notice above the bottom row
     // (`terms-and-content-guidelines.md` § The decisions, item 3).
-    out.extend(super::terms_notice());
+    out.extend(super::terms_notice(w.terms_copied));
     out.push(Element::button(
         ids::CLAIM_CODE_BACK_BUTTON,
         common::BACK,

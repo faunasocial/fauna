@@ -268,6 +268,7 @@ async fn relay_inbox(
             to_value(&fauna_nest::federation_handlers::FedInboxDeliverRequest {
                 recipient_actor_id: hex::encode(recipient),
                 payload_bytes: payload,
+                origin_nest_url: None,
             }),
             None,
         )

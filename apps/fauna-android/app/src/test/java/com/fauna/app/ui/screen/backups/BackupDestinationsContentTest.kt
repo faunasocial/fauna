@@ -41,6 +41,9 @@ class BackupDestinationsContentTest {
         kind: String = "nest",
         custodianDeviceId: String? = null,
         capacityCapBytes: ULong? = null,
+        // The post-succession review mark, already resolved by the shared FFI
+        // projection (`FfiBackupDestinationView.unattested`).
+        unattested: Boolean = false,
     ) = FfiBackupDestinationView(
         destinationId = id,
         destinationNestUrl = url,
@@ -48,7 +51,7 @@ class BackupDestinationsContentTest {
         kind = kind,
         custodianDeviceId = custodianDeviceId,
         capacityCapBytes = capacityCapBytes,
-        unattested = false,
+        unattested = unattested,
     )
 
     private fun status(
@@ -111,6 +114,7 @@ class BackupDestinationsContentTest {
         onAdd: (String, String) -> Unit = { _, _ -> },
         onEdit: (String, String, String) -> Unit = { _, _, _ -> },
         onRemove: (String, Boolean) -> Unit = { _, _ -> },
+        onKeep: (String) -> Unit = {},
         // FFI-free stand-ins for the shared backupLastUploadLabel/backupBacklogLabel
         // resolve the Screen normally injects (BackupDestinationsSection.kt) — mirror
         // their never-vs-real / absent-baseline shape without touching FFI.
@@ -181,6 +185,7 @@ class BackupDestinationsContentTest {
                 onAdd = onAdd,
                 onEdit = onEdit,
                 onRemove = onRemove,
+                onKeep = onKeep,
                 lastUploadText = lastUploadText,
                 backlogText = backlogText,
                 auditRows = auditRows,
@@ -465,20 +470,23 @@ class BackupDestinationsContentTest {
 
     @Test
     fun custodianConfirm_withUnreadableCapacity_refuses_ratherThanGuessingOne() {
-        // An unreadable cap must enroll NOTHING and report to this page's ONE
-        // error surface (the shell banner — the form deliberately tags no second
-        // `error-message` node of its own). Substituting a default here is how a
-        // device's disk fills.
+        // An unreadable cap must enroll NOTHING: the shared
+        // `destination_form_possibility` paints the confirm disabled with its
+        // reason beside it (never a substituted default — that is how a
+        // device's disk fills), and a press on it does nothing.
         var enrollCalls = 0
-        var errors = 0
-        render(onEnrollCustodian = { _, _ -> enrollCalls++ }, onError = { errors++ })
+        render(onEnrollCustodian = { _, _ -> enrollCalls++ })
         node("backup-destination-add-button").performClick()
         selectKind("This device")
         node("backup-destination-capacity-input")
             .performTextInput("as much as you like")
-        node("backup-destination-add-confirm-button").performClick()
+        node("backup-destination-add-confirm-button").assertIsNotEnabled().performClick()
+        composeTestRule.onNodeWithText(
+            androidx.test.core.app.ApplicationProvider
+                .getApplicationContext<android.content.Context>()
+                .getString(com.fauna.app.R.string.backups_backup_destination_capacity_invalid),
+        ).assertExists()
         assertEquals(0, enrollCalls)
-        assertEquals(1, errors)
     }
 
     @Test
@@ -774,5 +782,80 @@ class BackupDestinationsContentTest {
             DestinationKindOption("nest", "Another nest", isClientDevice = false),
             DestinationKindOption(CLIENT_DEVICE, "This device", isClientDevice = true),
         )
+    }
+
+    // ── The post-succession review mark (succession-aftermath.md § Re-key
+    // scope → Adjudicating what the aftermath carries across) ──
+
+    @Test
+    fun unattestedMark_absent_onAnOrdinaryRow() {
+        // Absent, not empty: a healthy account's own destination carries
+        // neither the mark nor Keep.
+        render(destinations = listOf(dest(id = "id-a")))
+        composeTestRule.onAllNodesWithTag("backup-destination-unattested-mark").assertCountEquals(0)
+        composeTestRule.onAllNodesWithTag("backup-destination-keep-button").assertCountEquals(0)
+        // Remove stays the row's own control either way.
+        composeTestRule.onAllNodesWithTag("backup-destination-remove-button").assertCountEquals(1)
+    }
+
+    @Test
+    fun unattestedMark_paintsOnlyOnTheRaisedRow() {
+        render(
+            destinations = listOf(
+                dest(id = "id-a"),
+                dest(id = "id-b", name = "Inherited", unattested = true),
+            ),
+        )
+        composeTestRule.onAllNodesWithTag("backup-destination-unattested-mark").assertCountEquals(1)
+        composeTestRule.onAllNodesWithTag("backup-destination-keep-button").assertCountEquals(1)
+        // Keep joins the row's Remove rather than minting a second removal path.
+        composeTestRule.onAllNodesWithTag("backup-destination-remove-button").assertCountEquals(2)
+        composeTestRule.onNodeWithTag("backup-destination-unattested-mark")
+            .assertTextContains("recovered", substring = true)
+    }
+
+    @Test
+    fun keep_firesWithTheRowsId_noConfirm() {
+        var kept: String? = null
+        render(
+            destinations = listOf(dest(id = "id-a"), dest(id = "id-b", unattested = true)),
+            onKeep = { kept = it },
+        )
+        node("backup-destination-keep-button").performClick()
+        assertEquals("id-b", kept)
+        // Keep is non-destructive: no remove-confirm opens.
+        composeTestRule.onAllNodesWithTag("backup-destination-remove-confirm-modal").assertCountEquals(0)
+    }
+
+    @Test
+    fun keep_disabled_whileWorking() {
+        render(destinations = listOf(dest(id = "id-b", unattested = true)), working = true)
+        node("backup-destination-keep-button").assertIsNotEnabled()
+    }
+
+    @Test
+    fun keep_settledList_retiresMarkAndKeep() {
+        // The VM assigns the list the shared Keep returns — the at-rest truth —
+        // so a settled row re-renders with neither element.
+        val rows = androidx.compose.runtime.mutableStateOf(listOf(dest(id = "id-b", unattested = true)))
+        composeTestRule.setContent {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                BackupDestinationsContent(
+                    destinations = rows.value,
+                    working = false,
+                    onAdd = { _, _ -> },
+                    onEdit = { _, _, _ -> },
+                    onRemove = { _, _ -> },
+                    onKeep = { id ->
+                        rows.value = rows.value.map { if (it.destinationId == id) dest(id = id) else it }
+                    },
+                )
+            }
+        }
+        node("backup-destination-keep-button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onAllNodesWithTag("backup-destination-unattested-mark").assertCountEquals(0)
+        composeTestRule.onAllNodesWithTag("backup-destination-keep-button").assertCountEquals(0)
+        composeTestRule.onAllNodesWithTag("backup-destination-status-row").assertCountEquals(1)
     }
 }

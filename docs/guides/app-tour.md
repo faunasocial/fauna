@@ -11,7 +11,7 @@
 > New to Fauna? Do [Getting started](getting-started.md) first; this tour
 > assumes you are signed in.
 
-> **A note on completeness.** Fauna is in alpha and the apps advance in parallel: everything below is real, implemented UI, but a few screens reach some platforms before others. This tour deliberately describes the app at its fullest rather than tracking who has what this week — if a screen is missing on your platform, it is still on its way there, not a design difference. A few differences are deliberate. The tour names most of them where they come up, and two are worth knowing up front: the apps installed from an app store leave out the payment features, and the terminal app shows formatting marks as you type them and opens videos in your system's own player.
+> **A note on completeness.** Fauna is in alpha and the apps advance in parallel: everything below is real, implemented UI, but a few screens are on some platforms only. This tour deliberately describes the app at its fullest. A few differences are deliberate. The tour names most of them where they come up, and two are worth knowing up front: the apps installed from an app store leave out the payment features, and the terminal app shows formatting marks as you type them and opens videos in your system's own player.
 
 ## One app, three shapes
 
@@ -30,11 +30,13 @@ factor:
   ever offers keys that do something right then. Below every sidebar entry
   sits **Exit Fauna** — the terminal app's only quit affordance besides `q`
   and Ctrl+C, since a terminal window has no titlebar close button.
-- **The web app** puts the same list in a navigation bar; every page has its
-  own address under `https://<your-nest>/app/`.
+- **The web app** puts the same list in a sidebar on a wide screen and in a bar along the bottom on a narrow one; every page has its own address under `https://<your-nest>/app/`.
 
 Every page shows errors in place — there is no hidden log to consult when
 something fails (though there is a log page, see [Settings](#settings)).
+
+Text the app shows you, rather than a button you press, an error included, can
+be selected and copied the way your device always does it.
 
 ## When the app cannot reach your nest
 
@@ -42,6 +44,12 @@ Most of the app keeps working without a connection. Writing a post, liking
 one, teaching a feed what you like, editing your profile, answering a
 subscription request, accepting a contact — all of these are yours to do
 offline; they are saved on the device and sent on as soon as your nest is back.
+Some of them wait on your nest's answer — a like, a message you send,
+accepting a contact, among others — and are listed under **Unsent changes** in
+Settings → **Account** until they reach it; the list says "Every change has
+reached your nest." once nothing is waiting. If one cannot be sent — your nest
+refused it, say — it stays on that list with the reason, and you can **Send again** or
+**Discard** it; discarding asks you to confirm with **Discard for good**.
 
 A few things genuinely cannot happen without your nest, because it is the one
 that has to decide them: paying for something, following or subscribing to
@@ -89,8 +97,7 @@ you can keep several and switch between them in the feed list.
   same way, fetched through your nest so its server never sees your address.
 - **Content provenance** — a small badge appears on images carrying embedded
   content-credential (C2PA) information — the kind cameras and editing tools
-  can attach to certify how a picture was captured or edited. Tap it to see
-  who signed it and when.
+  can attach to certify how a picture was captured or edited. In the web app, tap it to see who signed it and when.
 - **Post to a tier** — creators can limit a post to one of their subscription
   tiers with the composer's audience picker. You write a public teaser everyone can see and a full body for your subscribers; the full text is encrypted on your device before it leaves, so no server along the way can read it — unless you let your nest serve that tier's paywalled posts on your website (**Settings → Nests**).
   Gated posts wear a small tier badge in the feed; subscribers just open the
@@ -105,7 +112,7 @@ you can keep several and switch between them in the feed list.
   pay-per-view for everyone. You don't create or manage anything beforehand —
   the access is set up for you as part of publishing, and the post behaves like
   any other gated post from then on.
-  There are two separate price fields, and they do different things: the regular price is just text shown to readers (write it however you like, like "$3" or "pay what you want"), while the optional asking price is a number in sats that a payment able to match an amount is checked against — today that is a zap on a post you advertise on Nostr (see [Nostr](#nostr)); any other buyer is approved by you, by a payment provider's verified payment, or with a claim code. Leave it blank if you only want the display price. You can change either price after the post is published with **Change price…** on your post's **⋯** menu in the feed, where emptying a field removes that price; if the post is advertised on Nostr, the dialog tells you what saving does to the advertisement. A subscription tier can carry the same optional asking price, though no payment is checked against a subscription tier's asking price yet.
+  There are two separate price fields, and they do different things: the regular price is just text shown to readers (write it however you like, like "$3" or "pay what you want"), while the optional asking price is a number in sats that a payment able to match an amount is checked against — today that is a zap on a post you advertise on Nostr (see [Nostr](#nostr)); any other buyer is approved by you, by a payment provider's verified payment, or with a claim code. Leave it blank if you only want the display price. You can change either price after the post is published with **Change price…** on your post's **⋯** menu in the feed, where emptying a field removes that price; if the post is advertised on Nostr, the dialog tells you what saving does to the advertisement. A subscription tier can carry the same optional asking price, though no payment is checked against a subscription tier's asking price today.
   A sold post can carry a picture, and the picture is protected the same way the writing is. Attach the
   file the usual way — choose "Sell this post…" first, then attach, so the app
   knows to lock the picture rather than publishing a readable copy of it.
@@ -127,7 +134,7 @@ you can keep several and switch between them in the feed list.
   your own words to a quote is on the way. **Like and repost are both
   toggles**: tap once, tap again to take it back — no confirmation dance either
   way. A liked post keeps its heart lit so you can see at a glance what you
-  have already reacted to, and the count moves in both directions. A repost shows up in the timeline as a compact card of the original with a "reposted" note; open it to read and react to the original itself. When people have reacted to a post with an emoji, each emoji shows under the row of buttons with how many people chose it, and the ones you added are highlighted. Tap one to add the same reaction, or tap one of yours to take it back, again with no confirmation. There is no way yet to pick an emoji nobody has used on the post. A post from Bluesky shows no reactions, and on a post that came in over a bridge from another network, such as the Fediverse or Nostr, they show but you cannot add your own there yet.
+  have already reacted to, and the count moves in both directions. A repost shows up in the timeline as a compact card of the original with a "reposted" note; open it to read and react to the original itself. When people have reacted to a post with an emoji, each emoji shows under the row of buttons with how many people chose it, and the ones you added are highlighted. Tap one to add the same reaction, or tap one of yours to take it back, again with no confirmation. You can only add an emoji someone has already put on the post. A post from Bluesky shows no reactions, and on a post that came in over a bridge from another network, such as the Fediverse or Nostr, they show but you cannot add your own there. A post you brought in from a Facebook or Instagram archive is different: you can add your own there, as on any post written in Fauna.
 - **See who tipped a post** — a post that has received tips shows the total and
   how many people sent one, right on the card. Tap the total to see who they
   were: each tip names the sender when it can, or the account it came from on
@@ -148,7 +155,7 @@ you can keep several and switch between them in the feed list.
 - **Build your own feed** — create a feed from rules (include/require terms,
   tags, sources) combined with ranking factors and weights. Your feeds are
   yours: delete and remake them freely. Two of the factors are what other people did with a public post: **Watched to the end** and **Skipped past**, counted only from people who chose to share these signals, and only once at least three of them have said the same about a post. Weigh the first up
-  and the second down for a feed of what holds attention. A third, **Reported as spam**, counts the people here who share spam reports and marked a post as spam, again only once at least three of them have, and adds a small fixed amount when other nests report the same post — give it a negative weight to sink such posts in a feed of your own.
+  and the second down for a feed of what holds attention. A third, **Reported as spam**, counts the people here who share spam reports and marked a post as spam, again only once at least three of them have, and adds a small fixed amount when other nests report the same post, even if nobody here has — give it a negative weight to sink such posts in a feed of your own.
 - **Follow the wider world** — subscribe a feed to an external source through
   a [bridge](bridges-bluesky-nostr.md) (for example a Bluesky feed), and posts
   from there appear alongside native ones. Pictures on posts from Bluesky and
@@ -274,8 +281,7 @@ enabled), or a bridged network (Bluesky, Nostr, the Fediverse). An icon on each 
   the conversation stays in your list and everything you already read is still
   there to re-read. A conversation over a bridge has no rules to show: its
   room settings hold **Remove conversation from my nest**, described under
-  *Conversations over a bridge* above, and **Leave room**, greyed for the
-  networks your nest connects to itself.
+  *Conversations over a bridge* above, and a greyed **Leave room**.
   In a **community** room — the kind the header describes as searched and
   labelled by the home nest — the same settings also list the community
   labelers published on that nest, each with an *Inspect* button that shows
@@ -434,7 +440,7 @@ Your own active subscriptions are listed under Settings →
 ## Events
 
 A full calendar. Create any number of calendars, control each one's
-visibility, and view them as an agenda, month, week, or day. Events carry description, location, start/end times, and reminders; invitees RSVP with **Going**, **Interested** or **Decline** right on the event — including invitees on other nests. People on Gmail or Outlook get an email invitation and answer from their own calendar (when your nest has mail set up).
+visibility, and view them as an agenda, month, week, or day. Events carry description, location, start/end times, and reminders; invitees RSVP with **Going**, **Interested** or **Decline** right on the event — including invitees on other nests. People on Gmail or Outlook get an email invitation and answer from their own calendar, and their responses come back and update the roster on your event (when your nest has mail set up).
 
 The same calendars are served over CalDAV, so Apple Calendar, Thunderbird,
 and DAVx⁵ can edit them too — the whole story is in
@@ -444,7 +450,7 @@ and DAVx⁵ can edit them too — the whole story is in
 
 A file explorer over everything you store in Fauna. Media shows the contents
 of all your [folders](#folders) in one view — switch between list and
-thumbnail layouts, sort by name, size, or date, filter down to a single folder, and upload new files. The folder filter lists every folder you have, including one you created a moment ago and have not put anything in yet — so a brand-new folder is ready to receive its first upload, and a folder published as a website shows up here too, browsable like any other. (A folder whose content stays on your devices, or a folder shared with you to read but not to add to, can be browsed but not uploaded into — the page tells you why.)
+thumbnail layouts, sort by name, size, or date, filter down to a single folder, and upload new files. The folder filter lists every folder you have, including one you created a moment ago and have not put anything in yet — so a brand-new folder is ready to receive its first upload, and a folder published as a website shows up here too, browsable like any other. If you have no folder of your own and no folder is picked in the filter, your next upload makes one for you — a private folder named Personal — and puts the file in it; from then on it is a folder like any other under [Folders](#folders) in Settings, where you can share it, delete it, or make folders of your own beside it. (A folder whose content stays on your devices, or a folder shared with you to read but not to add to, can be browsed but not uploaded into — the page tells you why.)
 Each item shows whether the files in its folder can be
 reached right now, alongside the file's own state — synced, uploading, downloading, or
 waiting to be fetched. Opening an item gives you a detail view with the file's
@@ -500,7 +506,7 @@ sound, video or plain-text file shown in place; the file is unlocked in their
 own browser, and your nest never sees it, its name or the key. Because the
 key exists only in the link you copied when you made it, **Shared links**
 cannot copy a private link again — keep the one you copied. Files in a folder shared with other people offer no link unless the folder is public, and files in a folder you serve over WebDAV offer none.
-On Windows you can start from File Explorer too, and on Linux from GNOME Files or KDE's Dolphin: right-click a file in a public synced folder → **Fauna → Share**, and Fauna opens on that file with **Share a link** ready; on a synced folder itself, **Share** opens that folder's sharing in Fauna. In GNOME Files the entry appears once its Python extension support is installed (the `python3-nautilus` package on Debian and Ubuntu). Dolphin lists **Share** on every file and folder, and on one that can't be shared, choosing it does nothing. The Snap package offers the entry in neither. On iPhone and iPad the same **Share** is in the Files app's menu for a file in a public Fauna location and for a Fauna location itself; on a Mac it is built into Finder's menu for the same items, but the Finder location does not list your folders in the released Mac app yet.
+On Windows you can start from File Explorer too, and on Linux from GNOME Files or KDE's Dolphin: right-click a file in a public synced folder → **Fauna → Share**, and Fauna opens on that file with **Share a link** ready; on a synced folder itself, **Share** opens that folder's sharing in Fauna. In GNOME Files the entry appears once its Python extension support is installed (the `python3-nautilus` package on Debian and Ubuntu). Dolphin lists **Share** on every file and folder, and on one that can't be shared, choosing it does nothing. The Snap package offers the entry in neither. On iPhone and iPad the same **Share** is in the Files app's menu for a file in a public Fauna location and for a Fauna location itself; on a Mac it is built into Finder's menu for the same items, but the Finder location does not list your folders in the released Mac app.
 
 In the terminal app — which plays no audio or video inline — an audio or video file's detail view offers **Open externally** instead, and so does a video on a post in the feed: Fauna saves the file to a private temporary location (decrypting it first if it is stored encrypted) and hands it to your system's own media player. By default it asks before opening anything; **Play audio & video externally**, on the **Terminal** page of Settings, lets you choose **Always open** or **Never open (show details only)** instead, and the second removes the option from a file's detail view (a video on a post then just shows as a marker that opens nothing).
 
@@ -588,9 +594,7 @@ that a default install includes, and an install without it shows no badge.
 
 **Alerts on a device that isn't open.** In the browser, **Settings → General**
 turns on alerts your nest can send while the app is closed — one switch,
-**Notify me on this device**; an iPhone has the same switch there, but its
-alerts arrive only from a nest holding the project's key for Apple's
-notification service, which no nest you run holds. Switching it on asks your
+**Notify me on this device**. A Mac and an iPhone have the same switch there: on a Mac it cannot be turned on — it settles back off and the line under it says why — and an iPhone's alerts arrive only from a nest holding the project's key for Apple's notification service, which no nest you run holds. Switching it on asks your
 device for permission once, then tells your nest where to send them; switching
 it off tells your nest to stop and forget the address. Off stays off — the app
 will not quietly turn alerts back on the next time you open it, and the switch
@@ -621,7 +625,7 @@ say you reached it over SSH — the page tells you so under the switch.
 ## Search
 
 Search your public posts and profile info, with a type filter to narrow
-results. Every nest answers the same way — your private content is stored encrypted on your nest, and the nest's search on this page only ever reaches what is public (a community room's own search lives in the room — see [Conversations](#conversations)), so there is no per-nest setting that changes what search can see.
+results. Every nest answers the same way — your private content is stored encrypted on your nest, and the nest's search on this page reaches only what is public (a community room's own search lives in the room — see [Conversations](#conversations)), and no setting of the nest's own changes that. The one thing that widens it is yours: ask your nest to keep your mail, calendar or contacts searchable, and its search finds those too (below).
 
 Public posts that reach you over a [bridge](bridges-bluesky-nostr.md) are
 searchable too, so something you saw from someone you follow on Bluesky or
@@ -631,23 +635,21 @@ this way. Your nest keeps a recent window of bridged posts rather than all of
 them, so very old ones eventually drop out of search while staying untouched
 on the network they came from.
 
-Much of what's yours is searched **privately, on your own devices** — and that half works differently, because that content is stored encrypted on your nest. Your apps on a computer build a private search index as content arrives — and as you send it, so a message you just wrote there is findable straight away — and the index travels between your devices encrypted, stored alongside the rest of your content; a phone searches the index your computers built rather than building its own. Your nest cannot read the index, apart from the part covering your mail, which it can open with the password of a mail, calendar, contacts or file app you connect, and only for that app's signed-in session — the session in which that app's own searches of your mail run on your nest. (The web app runs in your browser, which cannot use this private index, so there search covers public posts and profiles only.)
+Much of what's yours is searched **privately, on your own devices** — and that half works differently, because that content is stored encrypted on your nest. Your apps on a computer build a private search index as content arrives — and as you send it, so a message you just wrote there is findable straight away — and the index travels between your devices encrypted, stored alongside the rest of your content; a phone searches the index your computers built rather than building its own. Your nest cannot read the index, apart from the part covering your mail, which it can open with the password of a mail, calendar, contacts or file app you connect, and only for that app's signed-in session — the session in which that app's own searches of your mail run on your nest. (The web app runs in your browser, which cannot use this private index, so there search covers public posts and profiles only — unless you keep your mail, calendar or contacts searchable on your nest, which then finds them for the web app too; see Nests under [Settings](#settings).)
 Each search runs that index on your device and also asks your nest's own
 search, and the results appear mixed in together. A device that hasn't caught
 up yet simply shows fewer results rather than an error, and it catches up on
 its own. Today this on-device search covers your mail, your conversations,
-your unsent drafts, your contacts, your own posts, and your synced or
-backed-up files by their names.
+your unsent drafts, your contacts, your calendar events, your own posts, and your synced or backed-up files by their names.
 
 Every result says what kind of thing it is — a post, a profile, an email, a
-message, a draft, a contact, a file — and shows the words around what matched,
+message, a draft, a contact, an event, a file — and shows the words around what matched,
 so you can tell results apart before opening any of them. If part of a search
 fails, the page says so and still shows everything the rest of it found,
 rather than going blank.
 
 Selecting a result opens it where it lives: a post opens in its full view, a
-message or draft opens its conversation, a contact opens that person's card in
-your address book, and a file opens its details on the Media page. When the
+message or draft opens its conversation, a contact opens that person's card in your address book, an event opens on the Events page, and a file opens its details on the Media page. When the
 result is a message, the conversation doesn't just open — it opens showing the
 message that matched, marked so you can tell it from the ones around it. In a
 long back-and-forth that is the difference between finding what you searched
@@ -657,9 +659,6 @@ post that is nowhere on your current feed is fetched when you open it, a contact
 is found whichever address book holds them, even one you have never opened, and
 a file opens even if you were browsing a different folder at the time — so you
 never land on an empty page. Anything that has gone since you last searched says so rather than opening blank: a post removed under a legal obligation or blocked by your nest's admin after a report, a deleted contact, a file you have since deleted or renamed.
-
-One honest caveat: search doesn't yet reach everything — events use the same
-on-device mechanism and are still being added to it.
 
 ## Family
 
@@ -671,7 +670,7 @@ Appears only when a family relationship involves you (set up when a guardian
   for review, or reject), whether people on other servers can initiate
   contact, whether new feed sources are allowed — plus a queue of pending
   approvals, a way to pre-approve contacts, and a **graduate** button that
-  converts the account to a normal one when the time comes. The same panel holds **Content rules**, the rules for the posts and messages that member sees. **Add rule** starts one. Pick its **Kind** — a **Category** of content (NSFW, spam, phishing or commercial), **Keywords** (separate them with commas), or a **Labeler**, either one you subscribe to or one these rules already include (the list also offers **Prompt**, a rule for an on-device language model; no app can apply one yet, so a prompt rule has no effect today) — and its **Verdict**: **Hide behind a warning** puts a matching post or message behind a "Flagged content" notice with a **Show anyway** button, and **Block** leaves a "Hidden by your family policy" notice in its place. A category, labeler or prompt rule also has a **Level**, how sure a label must be before the rule acts, from **Very strict** to **Very lenient**; a keyword rule has none, since a keyword either appears or it doesn't. Every rule needs a **Reason shown to the member**, in your own words: it appears beside the notice on what the rule hides or blocks, and on the member's own read-only list of your rules. **Save rules** saves them, apart from the rest of the policy; while a rule is incomplete the button stays unavailable, and the editor names the first rule that still needs something. **Remove** takes a rule out; save again to keep the change. The rules are applied on the member's own device after decryption, in their feeds and conversations, and you never see what they hide. The apps themselves detect spam and phishing; a rule on NSFW or commercial content is saved and applies as soon as a post or message is labelled that way. Switching on **Notify me about flagged content** shows, for each supervised member, how many posts or messages your category rules filtered today in each category — a running count only, never the content itself. The same panel
+  converts the account to a normal one when the time comes. The same panel holds **Content rules**, the rules for the posts and messages that member sees. **Add rule** starts one. Pick its **Kind** — a **Category** of content (NSFW, spam, phishing or commercial), **Keywords** (separate them with commas), or a **Labeler**, either one you subscribe to or one these rules already include (the list also offers **Prompt**, a rule for an on-device language model; no app applies one, so a prompt rule has no effect today) — and its **Verdict**: **Hide behind a warning** puts a matching post or message behind a "Flagged content" notice with a **Show anyway** button, and **Block** leaves a "Hidden by your family policy" notice in its place. A category, labeler or prompt rule also has a **Level**, how sure a label must be before the rule acts, from **Very strict** to **Very lenient**; a keyword rule has none, since a keyword either appears or it doesn't. Every rule needs a **Reason shown to the member**, in your own words: it appears beside the notice on what the rule hides or blocks, and on the member's own read-only list of your rules. **Save rules** saves them, apart from the rest of the policy; while a rule is incomplete the button stays unavailable, and the editor names the first rule that still needs something. **Remove** takes a rule out; save again to keep the change. The rules are applied on the member's own device after decryption, in their feeds and conversations, and you never see what they hide. The apps themselves detect spam and phishing; a rule on NSFW or commercial content is saved and applies as soon as a post or message is labelled that way. Switching on **Notify me about flagged content** shows, for each supervised member, how many posts or messages your category rules filtered today in each category — a running count only, never the content itself. The same panel
   lists that account's **devices** with a **Guardian device** switch on each:
   switch it on for a device you enrolled yourself, and the supervised member
   can see it is yours but cannot remove it. Switching it back off lifts that protection; the device can then be removed like any other.
@@ -765,8 +764,10 @@ do. The sub-pages:
   account's window forward whichever way it was opened — or **log in as a new
   user**, which normally hands you over to the window already running, since
   that's where adding an account happens, and otherwise starts you off right
-  here. If the window you asked to switch to closed in the meantime, Fauna
-  just carries on opening the account for you. **Export Identity** shows the
+  here. If you close every window that has the account open while Fauna is
+  still asking, it notices and opens the account here, without your picking
+  anything; and if the window you asked to switch to closed in the meantime,
+  Fauna just carries on opening the account for you. **Export Identity** shows the
   QR a new device scans to import you —
   hidden behind a *Show QR Code* button, with a warning beside it while it is
   on screen, because anyone who scans it gets your identity
@@ -776,8 +777,11 @@ do. The sub-pages:
   content itself stays on your nest, and signing back in re-downloads it.
   Removing a single account from the switcher does the same for just that one
   — unless another Fauna window is using that account, in which case nothing
-  is removed and Fauna asks you to close that window first.
-  **Export My Data** downloads what your nest holds for you as a single zip — your profile, contacts, messages, posts, folders, feeds and devices as JSON files. If you use your nest for mail, calendars or address books,
+  is removed and Fauna asks you to close that window first. An identity you
+  replaced when you took your account back is not removed either while it
+  still has changes waiting to move to your new identity: sign in as your new
+  identity and send or discard them first.
+  **Export My Data** downloads what your nest holds for you as a single zip — your profile, contacts, inbox, posts, folders, feeds and devices as JSON files. If you use your nest for mail, calendars or address books,
   the archive carries those too: your mailbox layout and which messages you had
   read, your calendars and their events, your address books and their cards,
   your addresses and aliases, the mail rules you wrote, your mail settings, and
@@ -831,7 +835,7 @@ do. The sub-pages:
   people who want to start an encrypted conversation with you while your
   devices are off. Your app tops the supply up each time you sign in; the page
   tells you when it is running low, and **Refresh** tops it up on the spot.
-- **Privacy** — who may reach you (*inbox mode*: **Open**, **Allow Knocks**, **Contacts Only** or **Closed** — Allow Knocks and Contacts Only aren't applied yet to someone on another nest who starts a conversation with you, unless they do it by inviting you to a room), spam thresholds, and mail filter rules — create,
+- **Privacy** — who may reach you (*inbox mode*: **Open**, **Allow Knocks**, **Contacts Only** or **Closed** — Allow Knocks and Contacts Only aren't applied to someone on another nest who starts a conversation with you, unless they do it by inviting you to a room), spam thresholds, and mail filter rules — create,
   edit, or delete a rule any time; editing changes it in place, no need to
   delete and recreate.
 - **Devices** — every device signed into your identity, with online status
@@ -910,10 +914,18 @@ do. The sub-pages:
   have put behind a paywall shows on its row by name, and so does each
   change to that trust in the history. To trust a nest
   with something new, pick what from the list on its row — read and filter
-  your mail, read your calendar, or serve one of your subscription tiers'
-  paywalled posts on the web — choose how long it lasts (a few hours, or 90
-  days) and confirm; the trust appears on the row immediately, ready to
-  revoke whenever you change your mind. Tick **Keep this box's trust
+  your mail, read your calendar, serve one of your subscription tiers'
+  paywalled posts on the web, or, on your home nest,
+  **Keep my mail searchable on this nest** (and the same for your calendar and
+  your contacts) — choose how long it lasts (a few hours, or 90 days; the
+  keep-searchable choices start at 90 days) and confirm; the trust appears on
+  the row immediately, ready to revoke whenever you change your mind. Before
+  you confirm one of the keep-searchable choices, the app says what it means:
+  while it is on, that nest can read that part of
+  your account and keeps a searchable copy of it on its disk, which anyone who
+  can read the disk can read too; on an honest nest, turning it off deletes
+  the copy and the nest's key to it, but it cannot undo what a hostile nest
+  already read. Tick **Keep this box's trust
   renewed** on a box you rely on, such as your home server: its 90-day trust
   then renews itself while you use Fauna, and new trust you give it defaults
   to 90 days. On a box you haven't ticked, new trust defaults to a few hours
@@ -970,7 +982,7 @@ do. The sub-pages:
   apps signed in with one of your app passwords, and the Nostr apps your nest
   signs for. Each row says what the app is, where it comes from, what it may
   reach in plain words, when it was last used and how long it lasts, and has
-  a **Disconnect** button that asks you to confirm before it acts. An app that holds keys in your account — to records it keeps there, or to a folder of yours it may read — also shows, under its row, the keys it holds: **Now** lists each one — what it opens (the app's own records by its publisher and the names it gave them, in quotes, and whether it may read and change them or only read them; or your folder by name, which it may only read), until when, and whether it is still active — and **History** lists when each was given and when it was taken back. Disconnecting the app ends them all: on an honest nest it stops the app getting keys again, though it cannot un-see what the app already read, and does not yet block content arriving after you disconnect. Turning off **Allow external apps**, just above the list, pauses every app it affects at once: they are still listed here, marked **Paused**, until you turn it back on. Above the switch, **Connect an app** is where you type the code an app on another device
+  a **Disconnect** button that asks you to confirm before it acts. An app given keys or permissions in your account — keys to records it keeps there or to a folder of yours it may read, or permission to put files into one of your folders, to post or edit your profile as you, to get short-lived Bluesky service tokens, to sign with a key your nest keeps for you, or to read or send in your conversations, among others — also shows, under its row, what it was given: **Now** lists each one — what it opens (the app's own records by its publisher and the names it gave them, in quotes, and whether it may read and change them or only read them; or your folder by name, which it may only read) or what it lets the app do, until when, and whether it is still active — and **History** lists when each was given and when it was taken back. Disconnecting the app ends them all: on an honest nest it stops the app getting keys again, though it cannot un-see what the app already read, and cannot stop an app that kept its keys from opening content that arrives after you disconnect. Turning off **Allow external apps**, just above the list, pauses every app it affects at once: they are still listed here, marked **Paused**, until you turn it back on. Above the switch, **Connect an app** is where you type the code an app on another device
   (a TV, a watch, a command-line tool) shows you; a valid code opens the same
   approval card a browser sign-in shows. An app on the same device as Fauna
   can skip the code: it hands you a link that opens Fauna straight onto its
@@ -1025,9 +1037,7 @@ do. The sub-pages:
 - **Logs** — the app's own recent log, filterable by severity, copyable in
   one click for a bug report. (Admins get the equivalent page for the nest in
   the [admin area](admin-tour.md).)
-- **General** — in the browser and on an iPhone, the **Notify me on this
-  device** switch for alerts while the app is closed (see
-  [Notifications](#notifications)); on the desktop apps, small platform comforts
+- **General** — in the browser, on a Mac and on an iPhone, the **Notify me on this device** switch for alerts while the app is closed (see [Notifications](#notifications)) — the terminal, Linux, Windows and Android apps keep it under **Account** instead; on the desktop apps, small platform comforts
   too. Fauna starts automatically when you sign in to your computer, and on
   Linux and Windows it keeps running in the system tray when you close its
   window (on a Mac, closing a window never quits it), so folder badges and
@@ -1081,7 +1091,7 @@ The full story: [file sync](cloud-sync.md) and
 Everything about your mailbox, in one family of pages (your nest's admin must
 have [mail enabled](own-your-mail.md) first):
 
-- **The main page** — enable mail for your account, see sync status, and set up standard mail apps: **Add credential** creates an app password (generated for you, or one you choose) or a token, and **Mail, calendar & files app setup** shows the connection details (host, ports, username format) for IMAP/CalDAV/CardDAV clients. The credentials you have made are listed under **Connected apps** in [Settings](#settings), where you copy the address a mail app signs in with, reveal or copy its password, or disconnect it — to retire one app, disconnecting its credential is enough. **Rotate mail keys** is for when a password or token may have leaked: rotation walks you through it with a progress indicator, and you can mark any credential you think is compromised, so that it loses access while the others keep working. On a server created without email (the social-only choice in the [setup guide](nest-app-setup.md), or a server set up by hand with its mail parts left out ([Set up a nest on the internet](nest-internet-setup.md))), the page says mail can't be turned on there unless the server is set up again with email, and the **Enable mail** switch stays off.
+- **The main page** — enable mail for your account, see sync status, and set up standard mail apps: **Add credential** creates an app password (generated for you, or one you choose) or a token, and **Mail, calendar & files app setup** shows the connection details (host, ports, username format) for IMAP/CalDAV/CardDAV clients. The credentials you have made are listed under **Connected apps** in [Settings](#settings), where you copy the address a mail app signs in with, reveal or copy its password, or disconnect it — to retire one app, disconnecting its credential is enough. **Rotate mail keys** is for when a password or token may have leaked: rotation walks you through it with a progress indicator, and you can mark any credential you think is compromised, so that it loses access while the others keep working. On a server created without email (the social-only choice in the [setup guide](nest-app-setup.md), or a server set up by hand with its mail parts left out ([Set up a nest on the internet](nest-internet-setup.md))), the page says the server was set up without the virus scanner and spam filter that mail needs, so mail can't be turned on there unless the server is set up again with email, and the **Enable mail** switch stays off.
 - **Aliases** — extra addresses that deliver to you: exact aliases, wildcard prefixes, and one-click **disposable addresses**, each of which expires on its own — after a number of days, or sooner once it has taken as many messages as it allows. Any alias can carry its own **rate limit** — a cap on how much mail it accepts per hour (disposable addresses also have a built-in daily cap); once an address goes over, further mail
   is turned away with a "try again later" that real senders retry, so a leaked
   address can be throttled without losing it (set the cap back up, or to

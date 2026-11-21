@@ -1,9 +1,9 @@
 package com.fauna.app.ui.screen
 
 import androidx.compose.foundation.layout.*
-import androidx.compose.material3.Button
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -14,7 +14,12 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.fauna.app.BuildConfig
 import com.fauna.app.R
+import com.fauna.app.ui.components.AccountSwitcherRows
+import com.fauna.app.ui.components.OnboardingErrorText
+import com.fauna.ffi.FfiAccountEntry
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
 
 /**
  * Launch-screen retry surface per docs/goal/behavior/onboarding.md
@@ -43,74 +48,121 @@ fun LaunchRetryScreen(
     /** `launch-retire-button`: always shown — it needs only a cloud token, no
      *  custodied seed (`nest-retirement.md` § Layout & flow). */
     onRetire: () -> Unit = {},
+    /** The device's accounts in registry order; the account switcher
+     *  (`account-switcher-list`) paints iff more than one. */
+    accounts: List<FfiAccountEntry> = emptyList(),
+    /** The active (unreachable) account — its row is plain, never a switch. */
+    activeActorId: String? = null,
+    accountLabel: (FfiAccountEntry) -> String = { it.actorId },
+    /** A tap on a non-active row — the caller runs the Settings switcher's
+     *  gated switch and re-runs the launch as that account. */
+    onSwitch: (actorId: String) -> Unit = {},
+    /** A refused switch, painted as `error-message`; the surface stays. */
+    switchError: String? = null,
 ) {
-    Column(
-        modifier = Modifier.fillMaxSize().padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
-    ) {
-        identityLine?.let {
-            LaunchIdentityLabel(it)
-            Spacer(Modifier.height(16.dp))
-        }
-        Text(
-            stringResource(R.string.launch_retry_title),
-            style = MaterialTheme.typography.headlineSmall,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.testTag(Ids.LAUNCH_TRANSIENT_ERROR),
-        )
-        Spacer(Modifier.height(32.dp))
-        Button(
-            onClick = onRetry,
+    // Centered as before; scrollable once the switcher's rows outgrow the screen.
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .testTag(Ids.LAUNCH_RETRY_BUTTON),
-        ) { Text(stringResource(R.string.launch_retry_button)) }
-        if (recoverableBoxes.isNotEmpty()) {
-            Spacer(Modifier.height(8.dp))
-            OutlinedButton(
-                onClick = onRecover,
+                .verticalScroll(rememberScrollState())
+                .padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            identityLine?.let {
+                LaunchIdentityLabel(it)
+                Spacer(Modifier.height(16.dp))
+            }
+            Text(
+                stringResource(R.string.launch_retry_title),
+                style = MaterialTheme.typography.headlineSmall,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.testTag(Ids.LAUNCH_TRANSIENT_ERROR),
+            )
+            Spacer(Modifier.height(32.dp))
+            Button(
+                onClick = onRetry,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .testTag(Ids.LAUNCH_RECOVER_BUTTON),
-            ) { Text(stringResource(R.string.onboarding_launch_recover_lost_box)) }
-        }
-        // The kids build never routes into nest retirement (a child joins a
-        // guardian's nest by invite; dynamic-features.md, the kids spine).
-        if (!BuildConfig.KIDS) {
+                    .testTag(Ids.LAUNCH_RETRY_BUTTON),
+            ) { Text(stringResource(R.string.launch_retry_button)) }
+            if (recoverableBoxes.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = onRecover,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag(Ids.LAUNCH_RECOVER_BUTTON),
+                ) { Text(stringResource(R.string.onboarding_launch_recover_lost_box)) }
+            }
+            // The kids build never routes into nest retirement (a child joins a
+            // guardian's nest by invite; dynamic-features.md, the kids spine).
+            if (!BuildConfig.KIDS) {
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = onRetire,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag(Ids.LAUNCH_RETIRE_BUTTON),
+                ) { Text(stringResource(R.string.onboarding_launch_retire_server)) }
+            }
             Spacer(Modifier.height(8.dp))
             OutlinedButton(
-                onClick = onRetire,
+                onClick = onUseDifferentNest,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .testTag(Ids.LAUNCH_RETIRE_BUTTON),
-            ) { Text(stringResource(R.string.onboarding_launch_retire_server)) }
+                    .testTag(Ids.LAUNCH_FALLTHROUGH_BUTTON),
+            ) { Text(stringResource(R.string.launch_use_different_nest)) }
+            // The way back to the previous account after a failed append-mode
+            // finish (`onboarding.md` § Wizard exit handling → *The finished
+            // wizard holds*): the same rows the Settings switcher paints, with
+            // none of its per-row extras. Nothing with one account (or none).
+            if (accounts.size > 1) {
+                Spacer(Modifier.height(24.dp))
+                Column(
+                    modifier = Modifier.fillMaxWidth().testTag(Ids.ACCOUNT_SWITCHER_LIST),
+                ) {
+                    Text(
+                        stringResource(R.string.settings_account_page_accounts),
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    AccountSwitcherRows(
+                        accounts = accounts,
+                        activeActorId = activeActorId,
+                        label = accountLabel,
+                        onSwitch = onSwitch,
+                    )
+                }
+            }
+            OnboardingErrorText(switchError)
         }
-        Spacer(Modifier.height(8.dp))
-        OutlinedButton(
-            onClick = onUseDifferentNest,
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag(Ids.LAUNCH_FALLTHROUGH_BUTTON),
-        ) { Text(stringResource(R.string.launch_use_different_nest)) }
     }
 }
 
 /**
- * `launch_progress` — the in-flight launch: blank but for
- * `launch-identity-label`, the bound account's cached `handle@domain · tier`
- * (`onboarding.md` § App-launch routing → *The cached identity on the launch
- * surfaces*); nothing at all while the cache holds no handle.
+ * `launch_progress` — the in-flight launch: the "Signing you in…" line (tui's
+ * and windows' `launch.signing_in`) and `launch-identity-label`, the bound
+ * account's cached `handle@domain · tier` (`onboarding.md` § App-launch routing
+ * → *The cached identity on the launch surfaces*), absent while the cache holds
+ * no handle. Never nothing: from the wizard's exit to the app this is what the
+ * activity shows (`onboarding.md` § Wizard exit handling → *The wizard becomes
+ * the app in place*), and a first sign-in has no cached handle.
  */
 @Composable
 fun LaunchProgressScreen(identityLine: String?) {
-    if (identityLine == null) return
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        LaunchIdentityLabel(identityLine)
+        Text(
+            stringResource(R.string.launch_signing_in),
+            style = MaterialTheme.typography.bodyMedium,
+            textAlign = TextAlign.Center,
+        )
+        if (identityLine != null) LaunchIdentityLabel(identityLine)
     }
 }
 

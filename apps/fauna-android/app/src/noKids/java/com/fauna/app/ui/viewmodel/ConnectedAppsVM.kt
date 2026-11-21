@@ -1,12 +1,17 @@
 package com.fauna.app.ui.viewmodel
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.fauna.app.core.ApiClient
 import com.fauna.app.core.ConsentHandoff
 import com.fauna.app.core.SessionAccount
 import com.fauna.app.core.ShellLog
+import com.fauna.app.ui.util.answerRefusal
+import com.fauna.ffi.connectedAppsExternalAppsPossibility
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
+import uniffi.fauna_core.Possibility
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
@@ -48,10 +53,15 @@ import javax.inject.Inject
 class ConnectedAppsVM @Inject constructor(
     private val api: ApiClient,
     private val sessionAccount: SessionAccount,
+    @ApplicationContext private val appContext: Context,
 ) : ViewModel() {
 
     /** The last snapshot painted; null until the machine is built. */
     val snapshot = MutableStateFlow<ConnectedAppsSnapshot?>(null)
+
+    /** A press this page refused, for its `error-message` (the snapshot's own
+     *  `error` carries the machine's failures). Cleared by a press that goes. */
+    val refusalMessage = MutableStateFlow<String?>(null)
 
     /** The *Connect an app* field's draft. */
     val code = MutableStateFlow("")
@@ -89,6 +99,7 @@ class ConnectedAppsVM @Inject constructor(
         code.value = ""
         revokeArmed.value = null
         revealed.value = emptyMap()
+        refusalMessage.value = null
         snapshot.value = null
         machine = null
         val generation = ++visitGeneration
@@ -168,9 +179,31 @@ class ConnectedAppsVM @Inject constructor(
 
     fun unblock(clientId: String) = run { it.unblock(clientId) }
 
-    /** The account's external-apps switch (`atproto-external-apps-enable`): the
-     *  machine writes and re-reads, and the toggle paints the re-read. */
-    fun setExternalAppsEnabled(enabled: Boolean) = run { it.setExternalAppsEnabled(enabled) }
+    /**
+     * The account's external-apps switch (`atproto-external-apps-enable`): the
+     * machine writes the flip of the snapshot's confirmed value and re-reads,
+     * and the toggle paints the re-read. The switch's answer
+     * ([externalAppsAnswer], the shared `external_apps_possibility`) is asked
+     * again first: before the page's read returns — or with no machine yet —
+     * it refuses with *still loading* on `error-message`, so the unread
+     * default (ON) is never written back as a choice (`connected-apps.md`
+     * § Errors & edge cases).
+     */
+    fun toggleExternalApps() {
+        val snap = snapshot.value
+        val refusal = answerRefusal(appContext, externalAppsAnswer(snap))
+        val m = machine
+        if (refusal != null || m == null || snap == null) {
+            refusal?.reason?.let { refusalMessage.value = it }
+            return
+        }
+        refusalMessage.value = null
+        val enabled = snap.externalAppsOff
+        viewModelScope.launch {
+            m.setExternalAppsEnabled(enabled)
+            snapshot.value = m.snapshot()
+        }
+    }
 
     /**
      * Show the Now or History lens of a principal row's trust facet — page-local
@@ -249,8 +282,15 @@ class ConnectedAppsVM @Inject constructor(
         }
     }
 
-    private companion object {
-        const val HYDRATE_ATTEMPTS = 10
-        const val HYDRATE_RETRY_MS = 500L
+    companion object {
+        /** `atproto-external-apps-enable`'s answer over [snap] — the shared
+         *  `external_apps_possibility`: still loading until the page's read
+         *  returned (`null`, or a snapshot not yet `loaded`). What the switch
+         *  is painted from and [toggleExternalApps] asks again. */
+        fun externalAppsAnswer(snap: ConnectedAppsSnapshot?): Possibility =
+            connectedAppsExternalAppsPossibility(snap)
+
+        private const val HYDRATE_ATTEMPTS = 10
+        private const val HYDRATE_RETRY_MS = 500L
     }
 }

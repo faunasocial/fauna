@@ -9,6 +9,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import com.fauna.ffi.FfiAuditLog
 import com.fauna.ffi.FfiAuditLogView
+import com.fauna.app.ui.util.askForm
+import uniffi.fauna_core.Possibility
 import uniffi.fauna_log.LogEntry
 import javax.inject.Inject
 
@@ -58,8 +60,16 @@ class AdminLogsVM @Inject constructor(
         }
     }
 
-    /** `admin-audit-more-button` — page older entries in. */
+    /** `admin-audit-more-button`'s answer over the held log: the shared
+     *  `audit_more_possibility` — blocked, saying so, once the whole record is
+     *  shown; `null` before the first page is read. */
+    fun auditMorePossibility(): Possibility? =
+        _auditView.value?.let { askForm { audit.morePossibility() } }
+
+    /** `admin-audit-more-button` — page older entries in, asking the answer
+     *  again first. */
     fun auditMore() {
+        if (auditMorePossibility() !is Possibility.Possible) return
         viewModelScope.launch {
             try {
                 _auditView.value = audit.more()

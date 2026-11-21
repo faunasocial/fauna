@@ -37,11 +37,14 @@
 //! § C.3 / § C.4 / § B tier 3) is Phase 2 and is declared unbuilt in
 //! `ui-actual-tui.yaml` until it lands.
 
+use fauna_client_dns::affordances as dns_answers;
 use fauna_client_dns::{CertStatusRow, DelegationView, DomainView, PendingCertIssue};
+use fauna_client_mail_settings::domain_forms;
 use fauna_client_mail_settings::local_domains::{
     LocalDomainView, LocalDomainsSnapshot, RoleAddressKind, dmarc_policy_options,
     remove_confirm_body, remove_confirm_title,
 };
+use fauna_core::possibility::{Possibility, ReadState};
 use fauna_i18n::strings::admin as t_admin;
 use fauna_i18n::strings::admin::dns as t;
 use fauna_i18n::strings::common;
@@ -70,6 +73,93 @@ pub(super) fn credential_field_ids(provider_id: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+// ── The page's answers (`docs/goal/ui/README.md` § Offer only what is
+// possible; the ruling is `dns-management.md` § Errors & edge cases) ─────────
+//
+// Each control below is painted from one of these and its action asks the same
+// one (`super::refuse_dns`), so what is offered and what is accepted agree. The
+// decisions are the shared crates' (`fauna_client_dns::affordances`,
+// `fauna_client_mail_settings::domain_forms`); only the folding of this page's
+// held state into their inputs is here.
+
+/// Whether the DNS machine exists. It is `None` only when the admin keypair
+/// would not derive at sign-in (`AdminState::dns_unavailable`, painted on
+/// `error-message`), and then every DNS-machine control is "failed to load".
+pub(super) fn machine_answer(state: &AdminState) -> Possibility {
+    if state.dns_unavailable.is_none() {
+        Possibility::Possible
+    } else {
+        Possibility::from_read(ReadState::Failed)
+    }
+}
+
+/// The DNS read: not possible before the matrix and credentials have loaded.
+fn dns_read_answer(state: &AdminState) -> Possibility {
+    machine_answer(state).and(Possibility::once_read(state.dns_snapshot.is_some()))
+}
+
+/// `admin-dns-domain-mode` on `domain`, switching to `managed`.
+pub(super) fn mode_answer(state: &AdminState, domain: &str, managed: bool) -> Possibility {
+    dns_read_answer(state).and(
+        state
+            .dns_snapshot
+            .as_ref()
+            .map_or(Possibility::Possible, |s| {
+                s.set_mode_possibility(domain, managed)
+            }),
+    )
+}
+
+/// `admin-dns-manage-all-toggle`, switching to `managed`.
+pub(super) fn manage_all_answer(state: &AdminState, managed: bool) -> Possibility {
+    let active: Option<Vec<String>> = state
+        .local_domains_snapshot
+        .as_ref()
+        .map(|s| s.active.iter().map(|d| d.domain.clone()).collect());
+    machine_answer(state).and(dns_answers::manage_all_possibility(
+        state.dns_snapshot.as_ref(),
+        active.as_deref(),
+        managed,
+    ))
+}
+
+/// `admin-dns-add-credential-submit-button`, over the picked provider's DNS
+/// fields and what has been typed into each.
+pub(super) fn credential_answer(state: &AdminState) -> Possibility {
+    let ids = state
+        .dns_credential_provider
+        .as_deref()
+        .map(credential_field_ids)
+        .unwrap_or_default();
+    let fields: Vec<(&str, &str)> = ids
+        .iter()
+        .map(|id| {
+            (
+                id.as_str(),
+                state
+                    .dns_credential_fields
+                    .get(id)
+                    .map_or("", String::as_str),
+            )
+        })
+        .collect();
+    machine_answer(state).and(dns_answers::credential_draft_possibility(
+        state.dns_credential_provider.is_some(),
+        &fields,
+    ))
+}
+
+/// `admin-dns-cert-issue-button` on `domain`.
+pub(super) fn cert_issue_answer(state: &AdminState, domain: &str) -> Possibility {
+    machine_answer(state).and(dns_answers::cert_issue_possibility(
+        state
+            .dns_snapshot
+            .as_ref()
+            .and_then(|s| s.pending_cert.as_ref()),
+        domain,
+    ))
 }
 
 /// An empty [`Element`] never registers with the frame, so a per-row field that
@@ -195,6 +285,10 @@ pub(super) fn dns_elements(state: &AdminState) -> Vec<Element> {
                 managed: !all_managed,
             }),
         )
+        // Not before both reads, nothing to switch with no domain, and "on"
+        // only once a held credential covers every domain — the add-credential
+        // step below is what unblocks it.
+        .possible(manage_all_answer(state, !all_managed))
         // The toggle convention's automation mirror (the per-domain auto-renew
         // checkbox's): the label is constant, so the checked state rides an attr.
         .attr("state", if all_managed { "on" } else { "off" }),
@@ -318,12 +412,15 @@ pub(super) fn dns_elements(state: &AdminState) -> Vec<Element> {
                 );
             }
         }
-        els.push(Element::gesture_button(
-            ids::ADMIN_DNS_ADD_CREDENTIAL_SUBMIT_BUTTON,
-            t::ADD_CREDENTIAL_SUBMIT,
-            state.dns_credential_provider.is_some(),
-            Gesture::Admin(Action::SubmitDnsCredential),
-        ));
+        els.push(
+            Element::gesture_button(
+                ids::ADMIN_DNS_ADD_CREDENTIAL_SUBMIT_BUTTON,
+                t::ADD_CREDENTIAL_SUBMIT,
+                true,
+                Gesture::Admin(Action::SubmitDnsCredential),
+            )
+            .possible(credential_answer(state)),
+        );
         els.push(Element::gesture_button(
             ids::ADMIN_DNS_ADD_CREDENTIAL_CANCEL_BUTTON,
             common::CANCEL,
@@ -331,12 +428,15 @@ pub(super) fn dns_elements(state: &AdminState) -> Vec<Element> {
             Gesture::Admin(Action::CancelDnsAddCredential),
         ));
     } else {
-        els.push(Element::gesture_button(
-            ids::ADMIN_DNS_ADD_CREDENTIAL_BUTTON,
-            t::ADD_CREDENTIAL,
-            true,
-            Gesture::Admin(Action::OpenDnsAddCredential),
-        ));
+        els.push(
+            Element::gesture_button(
+                ids::ADMIN_DNS_ADD_CREDENTIAL_BUTTON,
+                t::ADD_CREDENTIAL,
+                true,
+                Gesture::Admin(Action::OpenDnsAddCredential),
+            )
+            .possible(machine_answer(state)),
+        );
     }
 
     // ── The add-domain form (inline reveal) ─────────────────────────────────
@@ -363,12 +463,21 @@ pub(super) fn dns_elements(state: &AdminState) -> Vec<Element> {
                 t::ADD_DOMAIN_PRIMARY_WARNING,
             ));
         }
-        els.push(Element::gesture_button(
-            ids::ADMIN_DNS_ADD_DOMAIN_SUBMIT_BUTTON,
-            t::ADD_DOMAIN_SUBMIT,
-            !state.dns_add_domain_input.trim().is_empty(),
-            Gesture::Admin(Action::SubmitDnsAddDomain),
-        ));
+        // Painted from the shared draft predicate, which also waits for the
+        // domains read — so the first-domain warning above has always been
+        // decided before the submit can be pressed (rule 5).
+        els.push(
+            Element::gesture_button(
+                ids::ADMIN_DNS_ADD_DOMAIN_SUBMIT_BUTTON,
+                t::ADD_DOMAIN_SUBMIT,
+                true,
+                Gesture::Admin(Action::SubmitDnsAddDomain),
+            )
+            .possible(domain_forms::add_domain_possibility(
+                domains,
+                &state.dns_add_domain_input,
+            )),
+        );
         els.push(Element::gesture_button(
             ids::ADMIN_DNS_ADD_DOMAIN_CANCEL_BUTTON,
             common::CANCEL,
@@ -416,11 +525,25 @@ pub(super) fn dns_elements(state: &AdminState) -> Vec<Element> {
 
     // ── One section per active domain ───────────────────────────────────────
     let active: &[LocalDomainView] = domains.map(|s| s.active.as_slice()).unwrap_or_default();
-    if active.is_empty() {
-        els.push(Element::chrome(t::EMPTY));
-        els.push(Element::chrome(t::EMPTY_DESC));
+    // "No domains yet" only once the domains read has said so — before it,
+    // the page is loading, not empty (`README.md` § List pages: loading is
+    // not empty).
+    match domains {
+        None => els.push(Element::chrome(common::STILL_LOADING)),
+        Some(_) if active.is_empty() => {
+            els.push(Element::chrome(t::EMPTY));
+            els.push(Element::chrome(t::EMPTY_DESC));
+        }
+        Some(_) => {}
     }
-    let rename_available = domains.map(|s| s.rename_available).unwrap_or(false);
+    let rename_answer = domains.map_or(
+        Possibility::once_read(false),
+        domain_forms::rename_possibility,
+    );
+    let promote_answer = domains.map_or(
+        Possibility::once_read(false),
+        domain_forms::promote_possibility,
+    );
     let active_rename = domains.and_then(|s| s.active_rename.as_ref());
     // The single in-flight manual-paste issuance, if any: the machine holds at
     // most one (`snapshot.pending_cert`, re-projected from the persisted
@@ -437,7 +560,8 @@ pub(super) fn dns_elements(state: &AdminState) -> Vec<Element> {
             dns.and_then(|s| s.cert_statuses.iter().find(|c| c.domain == row.domain)),
             dns.and_then(|s| s.delegations.iter().find(|d| d.domain == row.domain)),
             pending_cert,
-            rename_available,
+            &rename_answer,
+            &promote_answer,
             active_rename,
         ));
     }
@@ -485,6 +609,7 @@ pub(super) fn page_error(state: &AdminState) -> Option<String> {
     state
         .dns_action_error
         .as_deref()
+        .or(state.dns_unavailable.as_deref())
         .or_else(|| {
             state
                 .local_domains_snapshot
@@ -510,7 +635,8 @@ fn domain_section(
     cert: Option<&CertStatusRow>,
     delegation: Option<&DelegationView>,
     pending_cert: Option<&PendingCertIssue>,
-    rename_available: bool,
+    rename_answer: &Possibility,
+    promote_answer: &Possibility,
     active_rename: Option<
         &fauna_client_mail_settings::primary_domain_rename::PrimaryDomainRenameView,
     >,
@@ -531,19 +657,24 @@ fn domain_section(
     // overlay (opted-in ∧ a held credential covers the domain), never a local
     // `mode == "managed"` string match. No matrix row yet ⇒ manual.
     let managed = matrix.map(|d| d.is_managed()).unwrap_or(false);
-    els.push(scope(Element::checkbox_gesture(
-        ids::ADMIN_DNS_DOMAIN_MODE,
-        if managed {
-            t::MODE_MANAGED
-        } else {
-            t::MODE_MANUAL
-        },
-        managed,
-        Gesture::Admin(Action::ToggleDnsDomainMode {
-            domain: row.domain.clone(),
-            managed: !managed,
-        }),
-    )));
+    // Switching to managed needs a held credential covering the domain — the
+    // add-credential step is what unblocks it; switching back is always open.
+    els.push(scope(
+        Element::checkbox_gesture(
+            ids::ADMIN_DNS_DOMAIN_MODE,
+            if managed {
+                t::MODE_MANAGED
+            } else {
+                t::MODE_MANUAL
+            },
+            managed,
+            Gesture::Admin(Action::ToggleDnsDomainMode {
+                domain: row.domain.clone(),
+                managed: !managed,
+            }),
+        )
+        .possible(mode_answer(state, &row.domain, !managed)),
+    ));
 
     // Auto-renew (`tls-certificates.md` § C.3): shown ONLY for a managed or
     // delegated domain, because only those can auto-issue — a
@@ -658,26 +789,32 @@ fn domain_section(
     // `admin-dns-domain-name`, which the driver's `remove_domain` relies on. The
     // nest is still the authority (it refuses `cannot_remove_primary_domain`).
     // It only opens the confirm; the confirm removes.
-    els.push(scope(Element::gesture_button(
-        ids::ADMIN_DNS_DOMAIN_REMOVE_BUTTON,
-        t::REMOVE,
-        !row.is_primary,
-        Gesture::Admin(Action::OpenDnsRemoveConfirm {
-            domain: row.domain.clone(),
-        }),
-    )));
+    els.push(scope(
+        Element::gesture_button(
+            ids::ADMIN_DNS_DOMAIN_REMOVE_BUTTON,
+            t::REMOVE,
+            true,
+            Gesture::Admin(Action::OpenDnsRemoveConfirm {
+                domain: row.domain.clone(),
+            }),
+        )
+        .possible(domain_forms::remove_possibility(row)),
+    ));
 
     // The rename affordances: the primary row opens the wizard (disabled until a
     // non-primary domain exists — the two-step rule, surfaced by the shared
     // `rename_available` hint, with the nest re-validating); every non-primary
     // row can pre-target itself as the promotion target.
     if row.is_primary {
-        els.push(scope(Element::gesture_button(
-            ids::ADMIN_DNS_DOMAIN_RENAME_BUTTON,
-            t::rename::BUTTON,
-            rename_available && active_rename.is_none(),
-            Gesture::Admin(Action::OpenDnsRenameSheet { target: None }),
-        )));
+        els.push(scope(
+            Element::gesture_button(
+                ids::ADMIN_DNS_DOMAIN_RENAME_BUTTON,
+                t::rename::BUTTON,
+                true,
+                Gesture::Admin(Action::OpenDnsRenameSheet { target: None }),
+            )
+            .possible(rename_answer.clone()),
+        ));
         // During an in-flight rename the primary row states it read-only.
         if let Some(rename) = active_rename {
             els.push(scope(Element::label(
@@ -686,14 +823,17 @@ fn domain_section(
             )));
         }
     } else {
-        els.push(scope(Element::gesture_button(
-            ids::ADMIN_DNS_DOMAIN_PROMOTE_BUTTON,
-            t::rename::PROMOTE,
-            active_rename.is_none(),
-            Gesture::Admin(Action::OpenDnsRenameSheet {
-                target: Some(row.domain.clone()),
-            }),
-        )));
+        els.push(scope(
+            Element::gesture_button(
+                ids::ADMIN_DNS_DOMAIN_PROMOTE_BUTTON,
+                t::rename::PROMOTE,
+                true,
+                Gesture::Admin(Action::OpenDnsRenameSheet {
+                    target: Some(row.domain.clone()),
+                }),
+            )
+            .possible(promote_answer.clone()),
+        ));
     }
 
     // ── The per-domain TLS-cert lifecycle ───────────────────────────────────
@@ -756,16 +896,18 @@ fn cert_elements(
     // A domain a client can auto-publish for finishes in one dispatch; anything
     // else needs the admin to paste the challenge.
     let single_issue = managed || delegation.is_some();
-    let pending_here = pending_cert.is_some_and(|p| p.domain == domain);
-    els.push(Element::gesture_button(
-        ids::ADMIN_DNS_CERT_ISSUE_BUTTON,
-        t::cert::ISSUE,
-        !pending_here,
-        Gesture::Admin(Action::IssueDnsCert {
-            domain: domain.to_string(),
-            single_issue,
-        }),
-    ));
+    els.push(
+        Element::gesture_button(
+            ids::ADMIN_DNS_CERT_ISSUE_BUTTON,
+            t::cert::ISSUE,
+            true,
+            Gesture::Admin(Action::IssueDnsCert {
+                domain: domain.to_string(),
+                single_issue,
+            }),
+        )
+        .possible(cert_issue_answer(state, domain)),
+    );
 
     if let Some(pending) = pending_cert.filter(|p| p.domain == domain) {
         els.push(Element::chrome(t::cert::PASTE_INSTRUCTIONS));
@@ -831,7 +973,10 @@ fn cert_elements(
     } else {
         // Painted-but-disabled with no held credential, never absent: an absent
         // button reads to the driver as "this app did not build the affordance".
-        // The reason rides the label so the terminal needs no tooltip.
+        // The reason rides the label so the terminal needs no tooltip; the
+        // answer is the shared `delegate_possibility`, declared by
+        // `apply_read_gates` — this disable and that answer agree, and the
+        // reason is the button's own text.
         let no_zones = zones.is_empty();
         els.push(Element::gesture_button(
             ids::ADMIN_DNS_CERT_DELEGATE_BUTTON,
@@ -964,9 +1109,14 @@ fn rename_sheet_elements(
         Element::gesture_button(
             ids::ADMIN_DNS_RENAME_SUBMIT_BUTTON,
             t::rename::SUBMIT,
-            !targets.is_empty() && !state.dns_rename_target.is_empty(),
+            true,
             Gesture::Admin(Action::SubmitDnsRename),
         )
+        .possible(domain_forms::rename_draft_possibility(
+            domains,
+            &state.dns_rename_target,
+            &state.dns_rename_grace_days,
+        ))
         .within(ids::ADMIN_DNS_RENAME_SHEET, 0),
         Element::gesture_button(
             ids::ADMIN_DNS_RENAME_CANCEL_BUTTON,
@@ -1029,12 +1179,17 @@ fn rename_banner_elements(
             )
             .labelled(t::rename::EXTEND_DAYS_LABEL),
         ));
-        els.push(scope(Element::gesture_button(
-            ids::ADMIN_DNS_RENAME_EXTEND_BUTTON,
-            t::rename::EXTEND,
-            true,
-            Gesture::Admin(Action::ExtendDnsRenameGrace),
-        )));
+        els.push(scope(
+            Element::gesture_button(
+                ids::ADMIN_DNS_RENAME_EXTEND_BUTTON,
+                t::rename::EXTEND,
+                true,
+                Gesture::Admin(Action::ExtendDnsRenameGrace),
+            )
+            .possible(domain_forms::extend_draft_possibility(
+                &state.dns_rename_extend_days,
+            )),
+        ));
     }
     if rename.can_abort {
         els.push(scope(Element::gesture_button(
@@ -1220,6 +1375,21 @@ pub(crate) mod tests {
         app
     }
 
+    /// Whether the element is live once the page's own answer is applied — the
+    /// state the seam (`App::apply_possibility_seam`) paints and a driver reads.
+    fn live(e: &Element) -> bool {
+        e.enabled && e.possibility.as_ref().is_none_or(Possibility::is_possible)
+    }
+
+    /// The reason key the (first) element with this id is blocked with, if any.
+    fn reason_of(els: &[Element], id: &str) -> Option<String> {
+        els.iter()
+            .find(|e| e.id == id)
+            .and_then(|e| e.possibility.as_ref())
+            .and_then(|p| p.reason())
+            .map(|r| r.key.clone())
+    }
+
     fn texts<'a>(els: &'a [Element], id: &str) -> Vec<&'a str> {
         els.iter()
             .filter(|e| e.id == id)
@@ -1342,7 +1512,7 @@ pub(crate) mod tests {
         let remove: Vec<bool> = els
             .iter()
             .filter(|e| e.id == "admin-dns-domain-remove-button")
-            .map(|e| e.enabled)
+            .map(live)
             .collect();
         assert_eq!(remove, vec![false, true, true]);
         // The badge is primary-only (ui.yaml scopes it that way), so it is NOT an
@@ -1685,7 +1855,7 @@ pub(crate) mod tests {
         );
         assert!(
             els.iter()
-                .any(|e| e.id == "admin-dns-domain-rename-button" && e.enabled),
+                .any(|e| e.id == "admin-dns-domain-rename-button" && live(e)),
             "a non-primary domain exists, so Rename primary enables"
         );
         assert_eq!(texts(&els, "admin-dns-domain-promote-button").len(), 1);
@@ -1704,7 +1874,7 @@ pub(crate) mod tests {
         );
         assert!(
             els.iter()
-                .any(|e| e.id == "admin-dns-rename-submit-button" && e.enabled)
+                .any(|e| e.id == "admin-dns-rename-submit-button" && live(e))
         );
         assert_eq!(texts(&els, "admin-dns-rename-cancel-button").len(), 1);
         // Opening the sheet must not conjure the in-flight banner.
@@ -1726,7 +1896,7 @@ pub(crate) mod tests {
         let els = dns_elements(&app.admin);
         assert!(
             els.iter()
-                .any(|e| e.id == "admin-dns-domain-rename-button" && !e.enabled)
+                .any(|e| e.id == "admin-dns-domain-rename-button" && !live(e))
         );
         assert!(texts(&els, "admin-dns-domain-promote-button").is_empty());
     }
@@ -1777,7 +1947,7 @@ pub(crate) mod tests {
         );
         assert!(
             els.iter()
-                .any(|e| e.id == "admin-dns-domain-rename-button" && !e.enabled)
+                .any(|e| e.id == "admin-dns-domain-rename-button" && !live(e))
         );
 
         app.admin.dns_rename_completing = true;
@@ -2216,7 +2386,7 @@ pub(crate) mod tests {
         let enabled: Vec<bool> = els
             .iter()
             .filter(|e| e.id == "admin-dns-cert-issue-button")
-            .map(|e| e.enabled)
+            .map(live)
             .collect();
         assert_eq!(enabled, vec![true, false]);
     }
@@ -2340,6 +2510,225 @@ pub(crate) mod tests {
         assert_eq!(
             app.error_line_text().as_deref(),
             Some("resolve target nest for a.test: no pairing")
+        );
+    }
+
+    /// Every gated control answers from the shared predicates with its reason
+    /// (`dns-management.md` § Errors & edge cases): nothing is offered before
+    /// the reads, managed mode waits on a covering credential, the primary is
+    /// renamed rather than removed, and a rename needs a second domain.
+    #[test]
+    fn gated_controls_answer_the_shared_predicates_with_their_reasons() {
+        // Before the domains read: loading, not empty, and no add on a guess.
+        let mut app = app_with(None, None);
+        app.admin.dns_add_domain_open = true;
+        app.admin.dns_add_domain_input = "first.test".into();
+        let els = dns_elements(&app.admin);
+        assert!(texts(&els, "").contains(&common::STILL_LOADING));
+        assert!(!texts(&els, "").contains(&t::EMPTY), "loading is not empty");
+        assert_eq!(
+            reason_of(&els, "admin-dns-add-domain-submit-button").as_deref(),
+            Some("common.still_loading")
+        );
+        assert_eq!(
+            reason_of(&els, "admin-dns-manage-all-toggle").as_deref(),
+            Some("common.still_loading")
+        );
+
+        // One primary domain, no credential.
+        let app = app_with(
+            Some(dns_snapshot(vec![matrix("a.test", Vec::new())])),
+            Some(domains_snapshot(
+                vec![domain_row("a.test", true)],
+                Vec::new(),
+            )),
+        );
+        let els = dns_elements(&app.admin);
+        assert_eq!(
+            reason_of(&els, "admin-dns-domain-mode").as_deref(),
+            Some(dns_answers::MODE_NEEDS_CREDENTIAL)
+        );
+        assert_eq!(
+            reason_of(&els, "admin-dns-manage-all-toggle").as_deref(),
+            Some(dns_answers::MANAGE_ALL_NEEDS_CREDENTIAL)
+        );
+        assert_eq!(
+            reason_of(&els, "admin-dns-domain-remove-button").as_deref(),
+            Some(domain_forms::REMOVE_PRIMARY)
+        );
+        assert_eq!(
+            reason_of(&els, "admin-dns-domain-rename-button").as_deref(),
+            Some(domain_forms::RENAME_NEEDS_SECOND_DOMAIN)
+        );
+        // The unblocking step stays offered.
+        assert!(
+            els.iter()
+                .any(|e| e.id == "admin-dns-add-credential-button" && live(e))
+        );
+
+        // A covering credential opens managed mode.
+        let mut dns = dns_snapshot(vec![matrix("a.test", Vec::new())]);
+        dns.credentials.push(fauna_client_dns::CredentialSummary {
+            provider_id: "hetzner".into(),
+            zones: vec!["a.test".into()],
+            label: "Hetzner".into(),
+        });
+        let app = app_with(
+            Some(dns),
+            Some(domains_snapshot(
+                vec![domain_row("a.test", true)],
+                Vec::new(),
+            )),
+        );
+        let els = dns_elements(&app.admin);
+        assert!(
+            els.iter()
+                .any(|e| e.id == "admin-dns-domain-mode" && live(e))
+        );
+        assert!(
+            els.iter()
+                .any(|e| e.id == "admin-dns-manage-all-toggle" && live(e))
+        );
+    }
+
+    /// A refused submit says why on `error-message` and keeps the form open
+    /// with what was typed; a form closes only in the fold of a save that
+    /// succeeded (rules 4 and 7).
+    #[test]
+    fn refused_submits_keep_the_form_and_say_why_and_only_a_saved_form_closes() {
+        use crate::admin::{Action, DnsForm, Outcome, apply_local, apply_outcome};
+        let text = |key: &str| fauna_i18n::strings::lookup(key).unwrap().to_string();
+        let mut app = app_with(
+            Some(dns_snapshot(vec![matrix("a.test", Vec::new())])),
+            Some(domains_snapshot(
+                vec![domain_row("a.test", true)],
+                Vec::new(),
+            )),
+        );
+
+        // Add domain: malformed.
+        app.admin.dns_add_domain_open = true;
+        app.admin.dns_add_domain_input = "nodot".into();
+        assert!(apply_local(&mut app, Action::SubmitDnsAddDomain).is_none());
+        assert_eq!(
+            page_error(&app.admin),
+            Some(text(domain_forms::DOMAIN_MALFORMED))
+        );
+        assert!(app.admin.dns_add_domain_open);
+        assert_eq!(app.admin.dns_add_domain_input, "nodot");
+
+        // A well-formed draft is not closed at the submit …
+        app.admin.dns_add_domain_input = "b.test".into();
+        let _ = apply_local(&mut app, Action::SubmitDnsAddDomain);
+        assert!(
+            app.admin.dns_add_domain_open,
+            "open until the nest has added it"
+        );
+        // … a failed dispatch leaves it open …
+        let domains = Box::new(domains_snapshot(
+            vec![domain_row("a.test", true)],
+            Vec::new(),
+        ));
+        apply_outcome(
+            &mut app,
+            Outcome::LocalDomainsDispatched {
+                domains: domains.clone(),
+                dns: None,
+                saved: None,
+            },
+        );
+        assert!(app.admin.dns_add_domain_open);
+        assert_eq!(app.admin.dns_add_domain_input, "b.test");
+        // … and the saved one closes it and drops the draft.
+        apply_outcome(
+            &mut app,
+            Outcome::LocalDomainsDispatched {
+                domains,
+                dns: None,
+                saved: Some(DnsForm::AddDomain),
+            },
+        );
+        assert!(!app.admin.dns_add_domain_open);
+        assert!(app.admin.dns_add_domain_input.is_empty());
+
+        // Managed mode with no covering credential.
+        assert!(
+            apply_local(
+                &mut app,
+                Action::ToggleDnsDomainMode {
+                    domain: "a.test".into(),
+                    managed: true
+                }
+            )
+            .is_none()
+        );
+        assert_eq!(
+            page_error(&app.admin),
+            Some(text(dns_answers::MODE_NEEDS_CREDENTIAL))
+        );
+
+        // Add credential: a picked provider with a blank field.
+        let provider = PROVIDERS
+            .iter()
+            .find(|p| p.capabilities.contains(&Capability::Dns))
+            .expect("a DNS provider")
+            .id
+            .as_str()
+            .to_string();
+        app.admin.dns_add_credential_open = true;
+        app.admin.dns_credential_provider = Some(provider);
+        assert!(apply_local(&mut app, Action::SubmitDnsCredential).is_none());
+        assert_eq!(
+            page_error(&app.admin),
+            Some(text(dns_answers::CREDENTIAL_FIELD_REQUIRED))
+        );
+        assert!(app.admin.dns_add_credential_open, "the form stays open");
+        apply_outcome(
+            &mut app,
+            Outcome::DnsFormSaved {
+                dns: Box::new(dns_snapshot(Vec::new())),
+                form: DnsForm::AddCredential,
+            },
+        );
+        assert!(!app.admin.dns_add_credential_open);
+        assert!(app.admin.dns_credential_provider.is_none());
+
+        // Rename sheet: an out-of-range grace is refused, never defaulted.
+        let mut two = domains_snapshot(
+            vec![domain_row("a.test", true), domain_row("b.test", false)],
+            Vec::new(),
+        );
+        two.rename_available = true;
+        app.admin.local_domains_snapshot = Some(two);
+        app.admin.dns_rename_sheet_open = true;
+        app.admin.dns_rename_target = "b.test".into();
+        app.admin.dns_rename_grace_days = "99".into();
+        assert!(apply_local(&mut app, Action::SubmitDnsRename).is_none());
+        assert_eq!(
+            page_error(&app.admin),
+            Some(text(domain_forms::RENAME_DAYS_INVALID))
+        );
+        assert!(app.admin.dns_rename_sheet_open);
+        assert_eq!(app.admin.dns_rename_grace_days, "99");
+    }
+
+    /// A DNS machine that could not be built says so on `error-message`, and
+    /// the controls it backs are not offered as if they worked.
+    #[test]
+    fn an_unbuildable_dns_machine_is_said_not_swallowed() {
+        let mut app = app_with(
+            Some(dns_snapshot(Vec::new())),
+            Some(domains_snapshot(Vec::new(), Vec::new())),
+        );
+        app.admin.dns_unavailable = Some("DNS management is unavailable: boom".into());
+        assert_eq!(
+            page_error(&app.admin).as_deref(),
+            Some("DNS management is unavailable: boom")
+        );
+        let els = dns_elements(&app.admin);
+        assert_eq!(
+            reason_of(&els, "admin-dns-add-credential-button").as_deref(),
+            Some("common.load_failed")
         );
     }
 }

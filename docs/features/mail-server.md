@@ -219,9 +219,9 @@ Stamped 2026-11-07 at b844c771f6.
 | 36 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_an_app_send_to_an_outside_recipient_arrives_dkim_signed` | nest (linux): passed, nest (macos): passed |
 | 36 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_submission_dkim_per_domain_from_selects_second_domain_key` | nest (linux): passed |
 | 37 | nest | `tests/e2e-unified/tests/api/test_mail_deliverability.py::test_admin_reads_warmup_status` | nest (linux): passed, nest (macos): passed |
-| 38 | nest | `tests/e2e-unified/tests/api/test_mail_health.py::test_the_allowance_grows_along_the_ramp_and_lifts_after_thirty_days` | nest (linux): passed |
-| 39 | nest | `tests/e2e-unified/tests/api/test_mail_health.py::test_a_nest_restart_leaves_the_ramp_where_it_was` | nest (linux): passed |
-| 40 | nest | `tests/e2e-unified/tests/api/test_mail_deliverability.py::test_warmup_held_list_send_reads_back_held_on_sent` | nest (linux): passed |
+| 38 | nest | `tests/e2e-unified/tests/api/test_mail_health.py::test_the_allowance_grows_along_the_ramp_and_lifts_after_thirty_days` | nest (linux): passed, nest (macos): passed |
+| 39 | nest | `tests/e2e-unified/tests/api/test_mail_health.py::test_a_nest_restart_leaves_the_ramp_where_it_was` | nest (linux): passed, nest (macos): passed |
+| 40 | nest | `tests/e2e-unified/tests/api/test_mail_deliverability.py::test_warmup_held_list_send_reads_back_held_on_sent` | nest (linux): passed, nest (macos): passed |
 | 40 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_mail_app_send_wider_than_the_warmup_allowance_reads_back_held_on_sent` | nest (linux): passed, nest (macos): passed |
 | 41 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_peer_publishing_a_mailto_rua_receives_our_aggregate_report` | nest (linux): passed, nest (macos): passed |
 | 42 | nest | `tests/e2e-unified/tests/test_mail_rests_sealed.py::test_received_mail_rests_only_sealed_on_the_nest` | nest (linux): passed |

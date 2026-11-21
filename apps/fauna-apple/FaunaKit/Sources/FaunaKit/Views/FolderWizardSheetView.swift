@@ -352,6 +352,10 @@ struct FolderWizardSheetView: View {
             }
             if let error = snap.error {
                 ErrorBanner(message: renderLocalizedText(error))
+            } else if let refusal = vm.sharingError, !refusal.isEmpty {
+                // A refused Next/Create press, said inside the sheet — the
+                // page's own banner sits under it.
+                ErrorBanner(message: refusal)
             }
         }
     }
@@ -373,32 +377,23 @@ struct FolderWizardSheetView: View {
             case .review, .done:
                 Button(L.common.create) { Task { await create() } }
                     .buttonStyle(.borderedProminent)
-                    // While the declassify confirm asks, Create stays painted
-                    // but dim: answering the dialog is the gesture that creates.
-                    .disabled(!wiz.review.createEnabled || wiz.review.declassifyArmed)
                     .accessibilityIdentifier(Ids.wizardCreateButton)
-                    // Same async `create()` the Button runs; `isEnabled` live
-                    // re-reads the machine's `createEnabled` (don't capture).
-                    // Env-gated no-op in production.
-                    .automationActivate(Ids.wizardCreateButton,
-                        isEnabled: {
-                            guard let review = vm.snapshot?.wizard?.review else { return false }
-                            return review.createEnabled && !review.declassifyArmed
-                        }) {
+                    // Same async `create()` the Button runs. Env-gated no-op.
+                    .automationActivate(Ids.wizardCreateButton) {
                         Task { await create() }
                     }
+                    // The shared `wizard_create_possibility`: while the declassify
+                    // confirm asks, Create stays painted but dim (answering the
+                    // dialog is the gesture that creates), with its reason.
+                    .faunaPossible(vm.wizardCreateAnswer)
             default:
-                Button(L.common.next) { vm.wizardMachine?.next() }
+                Button(L.common.next) { vm.wizardNext() }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!continueEnabled(wiz))
                     .accessibilityIdentifier(Ids.wizardNextButton)
-                    // Same `next()` the Button runs; `isEnabled` live re-reads
-                    // the machine's per-step continue predicate (don't capture).
-                    // Env-gated no-op in production.
-                    .automationActivate(Ids.wizardNextButton,
-                        isEnabled: { vm.snapshot?.wizard.map(continueEnabled) ?? false }) {
-                        vm.wizardMachine?.next()
-                    }
+                    // Same `wizardNext()` the Button runs. Env-gated no-op.
+                    .automationActivate(Ids.wizardNextButton) { vm.wizardNext() }
+                    // The shared `wizard_next_possibility` for the step shown.
+                    .faunaPossible(vm.wizardNextAnswer)
             }
         }
         .padding()
@@ -410,6 +405,9 @@ struct FolderWizardSheetView: View {
     /// confirm and sends nothing (the machine's `submit()` owns that rule);
     /// the confirm's answer is `confirmPublicCreate()`.
     private func create() async {
+        // Asks the answer Create was painted from; a refusal says why on
+        // `error-message` and sends nothing.
+        if vm.refuseWizardCreate() { return }
         guard let machine = vm.wizardMachine else { return }
         await finish(machine.submit())
     }
@@ -431,14 +429,6 @@ struct FolderWizardSheetView: View {
         case .name: 1
         case .devices: 2
         case .review, .done: 3
-        }
-    }
-
-    private func continueEnabled(_ wiz: FolderWizardSnapshot) -> Bool {
-        switch wiz.step {
-        case .name: wiz.name.continueEnabled
-        case .devices: wiz.devicePlaces.continueEnabled
-        case .review, .done: wiz.review.createEnabled
         }
     }
 }

@@ -105,9 +105,9 @@ Stamped 2026-10-21 at 77c610862e.
 | web | ✅ full | 0.1.6-dev+8cbf2a90 standalone |
 | linux | ✅ full | 0.1.6-dev+aa0b8e99 standalone |
 | windows | ⚠ partial | 0.1.5-dev+97d945a3 standalone |
-| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ⚠ partial | 0.1.6 docker |
-| android | ⚠ partial | 0.1.6 docker |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.7 docker |
+| android | ⚠ partial | 0.1.7 docker |
 | tui | ✅ full | 0.1.5-dev+1e755069 standalone |
 | android-kids |  no run recorded | |
 | ios-kids |  no run recorded | |
@@ -135,13 +135,13 @@ Stamped 2026-10-21 at 77c610862e.
 | 17 | app | `tests/e2e-unified/tests/test_media_upload_one_shape.py::test_a_media_upload_into_a_private_folder_takes_a_link_a_stranger_opens` | tui (linux): passed, tui (macos): passed |
 | 18 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_a_folder_shared_with_named_people_offers_no_link_unless_public` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 19 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_the_author_links_a_private_file_and_the_link_is_the_key` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, android (linux): error, tui (linux): passed, tui (macos): passed |
-| 20 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_a_stranger_opens_a_private_link_in_a_browser` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 20 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_a_stranger_opens_a_private_link_in_a_browser` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 21 | nest | `tests/e2e-unified/tests/api/test_share_links_private_arm.py::test_the_nest_serves_a_private_link_blind_and_stops_on_revoke` | nest (linux): passed |
 | 22 | nest | `tests/e2e-unified/tests/api/test_share_links_private_arm.py::test_the_nest_serves_a_private_link_blind_and_stops_on_revoke` | nest (linux): passed |
-| 23 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_a_stranger_opens_a_private_link_in_a_browser` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 24 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_a_stranger_opens_a_private_link_in_a_browser` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 25 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_a_stranger_opens_a_private_link_in_a_browser` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 26 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_a_stranger_opens_a_private_link_in_a_browser` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 23 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_a_stranger_opens_a_private_link_in_a_browser` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 24 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_a_stranger_opens_a_private_link_in_a_browser` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 25 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_a_stranger_opens_a_private_link_in_a_browser` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 26 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_a_stranger_opens_a_private_link_in_a_browser` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 27 | nest | `tests/e2e-unified/tests/api/test_share_links_private_arm.py::test_the_nest_serves_a_private_link_blind_and_stops_on_revoke` | nest (linux): passed |
 | 28 | app | `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_the_printed_routes_open_the_create_surface_and_the_member_share_flow` | linux (linux): passed |
 | 28 | app | `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_open_launches_the_route_only_where_share_is_offered` | linux (linux): passed |

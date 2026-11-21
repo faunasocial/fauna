@@ -19,7 +19,7 @@ duplicates cost nothing.
 Every phone and Mac **strips location and device metadata before upload**, for
 the picture formats listed under
 [What the metadata strip covers](#what-the-metadata-strip-covers) below — read
-that first, because it does **not** cover every format yet. What does get
+that first, because it does **not** cover every format. What does get
 stripped is stripped *losslessly*: the metadata is lifted out of the file and
 the picture itself is untouched, so the copy on your nest is the photo your
 camera took and not a lower-quality re-encoding of it.
@@ -117,7 +117,7 @@ something an outsider can read, nor your nest's host — unless you serve the fo
 | Photo Library folder (snapshots, retention, off-site copies) | **Available** on iPhone, Mac, and Android |
 | Android photo backup (on-demand "back up now") | **Available** |
 | Location/metadata strip for JPEG, PNG, WebP, GIF, HEIC/HEIF, video (MP4/MOV), and Motion Photos | **Available** |
-| Location/metadata strip for PDFs, WebM video, and RAW photos (ProRAW/DNG) | **Not yet** — those files keep their metadata; see above |
+| Location/metadata strip for PDFs, WebM video, and RAW photos (ProRAW/DNG) | **Not available** — those files keep their metadata; see above |
 | Android automatic background photo backup (no need to open the app) | **Available** — unmetered connections such as Wi-Fi only, every 15 minutes |
 | Encrypted, deduplicated upload + encrypted thumbnails | **Available** — except in a folder you make public |
 | Media browser (all folders, list/grid, sort, filter) on all 7 apps | **Available** |

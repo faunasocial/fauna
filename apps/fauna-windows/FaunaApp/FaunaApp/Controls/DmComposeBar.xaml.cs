@@ -190,8 +190,14 @@ public sealed partial class DmComposeBar : UserControl
         // view, readable and never writable (conversations.md § Element IDs: "stay in
         // view, disabled — no new id"); the e2e driver reads UIA IsEnabled. Programmatic
         // draft seeding (MessageText) still works — only IsReadOnly blocks SetText.
-        MessageBox.IsEnabled = caps.canSend;
-        SendButton.IsEnabled = caps.canSend;
+        // Painted from the shared answer (thread_send_possibility), never the bool:
+        // blocked by the sentence thread-room-notice already states on the page, so no
+        // second copy is painted here (docs/goal/ui/README.md § Offer only what is
+        // possible).
+        var send = PossibilityPaint.Of(
+            uniffi.fauna_conversations.FaunaConversationsMethods.ThreadSendPossibility(caps));
+        MessageBox.ApplyPossibility(send);
+        SendButton.ApplyPossibility(send);
         AttachButton.IsEnabled = caps.supportsAttachments;
         TopicToggleButton.IsEnabled = caps.supportsSubject;
         Toolbar.SetToolbarEnabled(caps.supportsMarkdown);

@@ -17,7 +17,6 @@ Structure per check:
 macOS is excluded from UI comparisons because:
   - Detail pane elements are invisible to XCUITest
   - Navigating to some pages (notifications) crashes the bridge
-  - compose-text-field is inaccessible (can't create posts via UI)
 macOS still runs state-only consistency checks.
 
 Uses app_capabilities.py for state section availability and UI read safety.
@@ -174,7 +173,7 @@ class TestStateUIHonesty:
     def test_feed_post_body_matches_ui(self, app):
         """Post body text in state must match feed-post-text UI element.
 
-        On platforms where compose UI is inaccessible (macOS detail pane),
+        On platforms excluded from UI reads (``can_read_ui_for_honesty``),
         this check verifies state consistency only — it reads existing posts
         from state rather than trying to create one via UI.
         """

@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
 
 /**
  * Everything one feature-limits authoring host paints (`dynamic-features.md`
@@ -25,6 +26,9 @@ data class FeatureAuthoringState(
     val openFeature: String? = null,
     /** The shared editor's derived view; set exactly while [openFeature] is. */
     val view: FfiPolicyEditorView? = null,
+    /** `feature-policy-editor-save-button`'s paint — the shared draft's own
+     *  validity ([FfiPolicyEditorInterface.savePossibility]), re-read with [view]. */
+    val saveAnswer: Possibility = Possibility.Possible,
     /** `feature-policy-editor-status` — present only after a write. */
     val status: String? = null,
     /** A refused cell or a failed write, worded — the page's `error-message`. */
@@ -101,7 +105,13 @@ class FeatureAuthoringHost(
                 val opened = openEditor(tier, feature)
                 editor = opened
                 _state.update {
-                    it.copy(openFeature = feature, view = opened.view(), status = null, error = null)
+                    it.copy(
+                        openFeature = feature,
+                        view = opened.view(),
+                        saveAnswer = opened.savePossibility(),
+                        status = null,
+                        error = null,
+                    )
                 }
             } catch (e: Exception) {
                 _state.update { it.copy(error = failure("features.editor_load_failed", e)) }
@@ -113,14 +123,14 @@ class FeatureAuthoringHost(
     fun setOn(on: Boolean) {
         val open = editor ?: return
         open.setOn(on)
-        _state.update { it.copy(view = open.view()) }
+        _state.update { it.copy(view = open.view(), saveAnswer = open.savePossibility()) }
     }
 
     /** `feature-policy-editor-cell-input[index]` — one keystroke's new text. */
     fun setCell(index: Int, text: String) {
         val open = editor ?: return
         open.setCell(index.toUInt(), text)
-        _state.update { it.copy(view = open.view()) }
+        _state.update { it.copy(view = open.view(), saveAnswer = open.savePossibility()) }
     }
 
     /** `feature-policy-editor-save-button`. */
@@ -132,7 +142,13 @@ class FeatureAuthoringHost(
     /** `feature-policy-editor-cancel-button` — closes the editor, touching nothing. */
     fun cancel() {
         editor = null
-        _state.update { it.copy(openFeature = null, view = null, status = null, error = null) }
+        _state.update { it.copy(
+                openFeature = null,
+                view = null,
+                saveAnswer = Possibility.Possible,
+                status = null,
+                error = null,
+            ) }
     }
 
     /**
@@ -151,7 +167,11 @@ class FeatureAuthoringHost(
                     _state.update { it.copy(error = resolve(invalid)) }
                 } else {
                     _state.update {
-                        it.copy(view = open.view(), status = verdict.status?.let(resolve))
+                        it.copy(
+                            view = open.view(),
+                            saveAnswer = open.savePossibility(),
+                            status = verdict.status?.let(resolve),
+                        )
                     }
                     refresh()
                     onWritten()

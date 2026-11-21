@@ -102,7 +102,24 @@ class WebSettingsActions:
         The ``state`` attr is written only from a nest-confirmed view, never from
         the click, so waiting on it is a round-trip proof rather than an echo of
         the gesture.
+
+        The toggle paints DISABLED until the page's nest-confirmed view is in
+        (the shared ``subdomain_toggle_possibility`` answers Pending without
+        one), and its ``state`` until then is the default-OFF guess. So wait
+        for it to come live before reading ``state``: read early, an ON toggle
+        reads ``off`` and a request to turn it off returns having done nothing
+        (the 2026-11-17 delayed-e2e red of
+        ``test_the_overflow_copy_verb_is_dead_without_a_serving_origin[web]``).
         """
+        wait_until(
+            lambda: not self.driver.is_disabled("web-settings-subdomain-toggle"),
+            self.PAGE_READY_BUDGET_S,
+            diagnose=lambda: (
+                "the subdomain toggle never came live (the page's view never "
+                "hydrated, or the toggle is blocked); "
+                f"error={self.driver.get_text('error-message') if self.driver.is_visible('error-message') else None!r}"
+            ),
+        )
         if self.subdomain_enabled() == enabled:
             return
         self.driver.click("web-settings-subdomain-toggle")

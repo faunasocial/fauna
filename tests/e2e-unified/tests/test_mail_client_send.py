@@ -48,6 +48,8 @@ import pytest
 
 from helpers.app_surface import require_surface
 from i18n.strings import S
+from helpers.nav_tab_click import click_nav_tab
+from helpers.use_case_walk import assert_use_case_walked
 
 # Client-driven SMTP send is wired on linux + web + windows (apple/android
 # compose-send is the shared-Rust conversations-rails follow-up). Mark the supported clients so
@@ -152,6 +154,7 @@ def test_client_driven_send_relays_to_external_mx(logged_in_app, mail_bridge_mta
     _assert_from_is_the_sender(received, test_user)
 
 
+@pytest.mark.use_case("send-a-mail")
 @pytest.mark.feature("email-in-conversations")
 def test_client_send_without_committing_chip_still_relays(logged_in_app, mail_bridge_mta, test_user):
     """Regression for the live "I click Send and nothing happens" bug.
@@ -171,6 +174,9 @@ def test_client_send_without_committing_chip_still_relays(logged_in_app, mail_br
     subject = f"No-chip-commit outbound {token}"
     body = "Sent without committing the recipient chip.\n"
 
+    # The tab is the use case's first step: open it by its click, which a state
+    # write (the action's own `navigate()`) does not record.
+    click_nav_tab(app.driver, "conversations-tab", canary="new-conversation-button")
     app.conversations.start_new_conversation(
         recipient, subject=subject, body=body, commit_chip=False
     )
@@ -193,6 +199,7 @@ def test_client_send_without_committing_chip_still_relays(logged_in_app, mail_br
         "the flushed recipient must carry through to the relayed message headers"
     )
     _assert_from_is_the_sender(received, test_user)
+    assert_use_case_walked(logged_in_app.driver, "send-a-mail")
 
 
 # Per-function markers (not the module pytestmark above) so this doesn't widen to

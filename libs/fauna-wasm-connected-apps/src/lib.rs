@@ -285,6 +285,19 @@ mod bindings {
             })
         }
 
+        /// `atproto-external-apps-enable`'s answer, as JSON in
+        /// `fauna_core::possibility::Possibility`'s serde form —
+        /// `ConnectedAppsSnapshot::external_apps_possibility` over the held
+        /// snapshot: still loading until the page's read returned
+        /// (`docs/goal/ui/connected-apps.md` § Errors & edge cases). The
+        /// switch paints from it and its press asks it again. The wasm twin
+        /// of the native `connected_apps_external_apps_possibility`.
+        #[wasm_bindgen(js_name = externalAppsPossibilityJson)]
+        pub fn external_apps_possibility_json(&self) -> String {
+            serde_json::to_string(&self.inner.snapshot().external_apps_possibility())
+                .unwrap_or_default()
+        }
+
         /// Show the History (`history = true`) or Now lens of the trust facet
         /// on the row `key` — page-local, no nest call
         /// (`connected-apps.md` § The trust facet and history lens → *Lens state*).
@@ -422,6 +435,29 @@ mod bindings {
     #[wasm_bindgen(js_name = lineSeparator)]
     pub fn line_separator() -> String {
         fauna_client_connected_apps::compose::LINE_SEPARATOR.to_string()
+    }
+
+    /// `connected-apps-connect-submit` and the code input's Enter: the shared
+    /// `connect_code_possibility` over the typed code, as a JSON `Possibility`
+    /// — asked before the lookup, so a blank code is never sent
+    /// (`docs/goal/ui/connected-apps.md` § Errors & edge cases).
+    #[wasm_bindgen(js_name = connectCodePossibilityJson)]
+    pub fn connect_code_possibility_json(code: &str) -> Result<String, JsValue> {
+        let answer = fauna_client_connected_apps::connect_code_possibility(code);
+        serde_json::to_string(&answer).map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// `connected-apps-request-approve`: one snapshot `requests` entry's
+    /// `ConsentCardRow::approve_possibility`, as a JSON `Possibility` — a
+    /// folder card approves once a folder is chosen. Throws on a card that is
+    /// not a `ConsentCardRow`.
+    #[wasm_bindgen(js_name = requestApprovePossibilityJson)]
+    pub fn request_approve_possibility_json(consent_json: &str) -> Result<String, JsValue> {
+        let consent: fauna_atproto_settings_machine::ConsentCardRow =
+            serde_json::from_str(consent_json)
+                .map_err(|e| JsValue::from_str(&format!("not a consent card: {e}")))?;
+        serde_json::to_string(&consent.approve_possibility())
+            .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     // Each wasm chunk is its own module with its own Rust runtime, so the panic

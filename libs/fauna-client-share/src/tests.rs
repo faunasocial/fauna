@@ -312,6 +312,7 @@ fn sealed_file(secret: [u8; 32]) -> (Vec<u8>, ChunkManifest, Vec<Vec<u8>>) {
         stored_hashes: Some(stored),
         sealed_hashes: None,
         min_reader: None,
+        pages: None,
     }
     .seal_hashes(&root)
     .unwrap();
@@ -352,7 +353,8 @@ fn an_unbound_folder_whose_owner_root_the_seat_holds_is_eligible() {
 #[test]
 fn a_private_link_carries_its_key_only_in_the_fragment_and_opens_the_file() {
     let (content, manifest, ciphertexts) = sealed_file(SECRET);
-    let minted = mint_private_link(&author(), &file(), manifest, DEFAULT_EXPIRY_SECS, NOW).unwrap();
+    let minted =
+        mint_private_link(&author(), &file(), manifest, &[], DEFAULT_EXPIRY_SECS, NOW).unwrap();
     let request = minted.request().clone();
 
     // The token declares the fragment key and names no file.
@@ -391,8 +393,8 @@ fn a_private_link_carries_its_key_only_in_the_fragment_and_opens_the_file() {
 #[test]
 fn a_private_link_reveals_only_against_its_own_registration() {
     let (_, manifest, _) = sealed_file(SECRET);
-    let minted = mint_private_link(&author(), &file(), manifest.clone(), DAY, NOW).unwrap();
-    let other = mint_private_link(&author(), &file(), manifest, DAY, NOW + 1).unwrap();
+    let minted = mint_private_link(&author(), &file(), manifest.clone(), &[], DAY, NOW).unwrap();
+    let other = mint_private_link(&author(), &file(), manifest, &[], DAY, NOW + 1).unwrap();
     assert!(minted.reveal(&reply_for(other.request())).is_none());
 }
 
@@ -403,13 +405,13 @@ fn a_plaintext_manifest_or_a_foreign_root_mints_no_private_link() {
     let mut plaintext = sealed.unseal_hashes(&root).unwrap();
     plaintext.stored_hashes = None;
     assert!(matches!(
-        mint_private_link(&author(), &file(), plaintext, DAY, NOW).err(),
+        mint_private_link(&author(), &file(), plaintext, &[], DAY, NOW).err(),
         Some(MintError::Manifest(_))
     ));
     // A file sealed under someone else's root does not open under this seat's.
     let (_, foreign, _) = sealed_file([9u8; 32]);
     assert!(matches!(
-        mint_private_link(&author(), &file(), foreign, DAY, NOW).err(),
+        mint_private_link(&author(), &file(), foreign, &[], DAY, NOW).err(),
         Some(MintError::Manifest(_))
     ));
 }
@@ -419,7 +421,7 @@ fn a_file_sealed_before_succession_links_under_the_predecessor_root() {
     let predecessor = [5u8; 32];
     let (content, manifest, ciphertexts) = sealed_file(predecessor);
     let a = author().with_predecessors(vec![BackupKey::derive(&predecessor)]);
-    let minted = mint_private_link(&a, &file(), manifest, DAY, NOW).unwrap();
+    let minted = mint_private_link(&a, &file(), manifest, &[], DAY, NOW).unwrap();
     assert_eq!(
         open_as_viewer(minted, &ciphertexts),
         ("holiday.jpg".to_string(), content)
@@ -434,6 +436,7 @@ fn create_private_link_reveals_the_fragment_url_after_registration() {
         &author(),
         &file(),
         manifest,
+        &[],
         DEFAULT_EXPIRY_SECS,
         NOW,
     ))
@@ -460,12 +463,58 @@ struct ServedLink {
 fn served_link(secret: [u8; 32], filename: &str) -> ServedLink {
     let (content, manifest, ciphertexts) = sealed_file(secret);
     let raw = encoding::canonical_encode(&manifest).unwrap();
+    serve_minted(secret, filename, content, raw, manifest, &[], ciphertexts)
+}
+
+/// A file of many small chunks whose manifest is a paged root under a small
+/// paging rule (`file-sync.md` § Paged manifests): the root bytes as the nest
+/// holds them, its pages, and the stored ciphertext.
+#[allow(clippy::type_complexity)]
+fn paged_sealed_file(
+    secret: [u8; 32],
+) -> (Vec<u8>, Vec<u8>, ChunkManifest, Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    let content: Vec<u8> = (0..40 * 300u32).map(|i| (i % 241) as u8).collect();
+    let root = BackupKey::derive(&secret).convergent_chunk_root();
+    let (mut hashes, mut stored, mut ciphertexts) = (Vec::new(), Vec::new(), Vec::new());
+    for c in content.chunks(300) {
+        let hash = ContentHash::of_raw(c);
+        let (store_key, body) = fauna_core::chunk_seal::seal_chunk_body(&hash, c, &root).unwrap();
+        hashes.push(hash);
+        stored.push(store_key);
+        ciphertexts.push(body);
+    }
+    let view = ChunkManifest {
+        file_hash: ContentHash::of_raw(&content),
+        total_size: content.len() as u64,
+        chunk_sizes: content.chunks(300).map(|c| c.len() as u64).collect(),
+        chunk_hashes: hashes,
+        stored_hashes: Some(stored),
+        sealed_hashes: None,
+        min_reader: None,
+        pages: None,
+    };
+    let rule = fauna_core::manifest_paging::PagingRule::with_thresholds(16, 4, 32, 3);
+    let (raw, pages) = view.into_wire_parts_with(&rule, Some(&root)).unwrap();
+    assert!(!pages.is_empty(), "the fixture is a paged root");
+    let manifest: ChunkManifest = encoding::canonical_decode(&raw).unwrap();
+    (content, raw, manifest, pages, ciphertexts)
+}
+
+fn serve_minted(
+    secret: [u8; 32],
+    filename: &str,
+    content: Vec<u8>,
+    raw: Vec<u8>,
+    manifest: ChunkManifest,
+    pages: &[Vec<u8>],
+    ciphertexts: Vec<Vec<u8>>,
+) -> ServedLink {
     let linked = LinkFile {
         manifest_hash: ContentHash::of_raw(&raw).digest(),
         filename: filename.into(),
     };
     let a = ShareAuthor::new(secret, NEST);
-    let minted = mint_private_link(&a, &linked, manifest, DAY, NOW).unwrap();
+    let minted = mint_private_link(&a, &linked, manifest, pages, DAY, NOW).unwrap();
     let request = minted.request().clone();
     let url = minted.reveal(&reply_for(&request)).expect("revealed");
     let (_, fragment) = url.split_once('#').expect("a fragment");
@@ -526,6 +575,34 @@ fn the_viewer_opens_a_private_link_to_exactly_the_file() {
     assert_eq!(opened.chunk_count(), link.ciphertexts.len());
     assert_eq!(opened.content_type(), "text/plain");
     assert_eq!(opened.preview(), viewer::PreviewKind::Text);
+    assert_eq!(opened.assemble(&link.ciphertexts).unwrap(), link.content);
+}
+
+/// A private link to a paged file (`file-sync.md` § Paged manifests →
+/// *Compatibility*, the share clause): the mint opens the root and its pages
+/// for the plaintext hashes, and the viewer — which reads only the root the
+/// nest serves, the envelope carrying every hash — opens exactly the file.
+#[test]
+fn a_private_link_to_a_paged_file_mints_and_opens_in_the_viewer() {
+    let (content, raw, manifest, pages, ciphertexts) = paged_sealed_file(SECRET);
+    // Without its pages the root names no plaintext hash: no link.
+    assert!(matches!(
+        mint_private_link(&author(), &file(), manifest.clone(), &[], DAY, NOW).err(),
+        Some(MintError::Manifest(_))
+    ));
+    let link = serve_minted(
+        SECRET,
+        "big.txt",
+        content,
+        raw,
+        manifest,
+        &pages,
+        ciphertexts,
+    );
+    let opened =
+        viewer::open_share(&link.token, &link.fragment, &link.fragment_manifest).expect("opens");
+    assert_eq!(opened.total_size(), link.content.len() as u64);
+    assert_eq!(opened.chunk_count(), link.ciphertexts.len());
     assert_eq!(opened.assemble(&link.ciphertexts).unwrap(), link.content);
 }
 

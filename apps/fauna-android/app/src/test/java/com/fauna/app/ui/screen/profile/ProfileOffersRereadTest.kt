@@ -69,7 +69,7 @@ class ProfileOffersRereadTest {
                 ProfileOffersSection(
                     targetActorIdHex = author,
                     reloadToken = token,
-                    vm = ProfileOffersVM(api),
+                    vm = ProfileOffersVM(api, mock(android.content.Context::class.java)),
                 )
             }
         }
@@ -100,7 +100,7 @@ class ProfileOffersRereadTest {
                 ProfileOffersSection(
                     targetActorIdHex = author,
                     reloadToken = 0,
-                    vm = ProfileOffersVM(api),
+                    vm = ProfileOffersVM(api, mock(android.content.Context::class.java)),
                 )
             }
         }
@@ -128,7 +128,7 @@ class ProfileOffersRereadTest {
                     targetActorIdHex = author,
                     home = home,
                     reloadToken = 0,
-                    vm = ProfileOffersVM(api),
+                    vm = ProfileOffersVM(api, mock(android.content.Context::class.java)),
                 )
             }
         }

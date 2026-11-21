@@ -32,7 +32,7 @@ use crate::share_body::BodySource;
 /// `None` for a manifest whose parallel lists disagree in length, or whose
 /// offsets overflow: nothing in it can be trusted to address a range.
 pub fn held_chunks_of(manifest: &ChunkManifest) -> Option<Vec<HeldChunk>> {
-    let keys = manifest.store_keys();
+    let keys = manifest.store_keys().ok()?;
     if keys.len() != manifest.chunk_hashes.len() || keys.len() != manifest.chunk_sizes.len() {
         return None;
     }

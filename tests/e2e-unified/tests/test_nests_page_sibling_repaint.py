@@ -21,15 +21,15 @@ never leaves it; seat B mints a grant (one test) or links a nest (the other)
 through its own Nests page (convention 8), and it must appear on seat A's open
 page.
 
-**The link half's source is indirect.** The link itself is a nest-side write
-(``fauna.pair.add``, then the machine's own refresh) that moves nothing in the
-account store, so seat A's repaint arrives through the store notice after seat
-B's next pass — not through the link's own reply. The link test therefore
-settles both stores first, so a fresh sign-in's own rows (enrollment, device
-endpoints) cannot be what re-drives the page. Measured 2026-11-07 on tui: green
-alone, green settled, green right after a grant on the same open page; one red
-in a 25-minute run on a loaded box (the repaint not inside 240 s, a re-visit
-listing the pairing), not reproduced since.
+**The link half's source is the pairing mark.** The link itself is a nest-side
+write (``fauna.pair.add``, then the machine's own re-list) that moves nothing in
+the account store; after the re-list seat B's machine puts the connected nest's
+*pairing mark* (``fauna.state.pairing-mark``, the listing's digest —
+``account-runtime.md`` § Multi-instance concurrency → *A nest-side change a
+store-backed page shows leaves a mark in the store*), and seat A's walk applying
+it is the notice that re-drives the open page. The link test therefore settles
+both stores first, so a fresh sign-in's own rows (enrollment, device endpoints)
+cannot be what re-drives the page.
 
 tier_3: a real nest, two real seats, the real account runtimes. Every wait is a
 deadline poll on painted state with both seats' pumps poked (convention 14);

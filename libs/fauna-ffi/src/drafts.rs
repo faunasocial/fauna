@@ -55,6 +55,16 @@ pub fn autosave_debounce_ms() -> u32 {
     fauna_client_drafts::autosave_debounce().as_millis() as u32
 }
 
+/// The shared bound on a leave-door drafts flush, in milliseconds —
+/// `fauna_client_drafts::LEAVE_FLUSH_BUDGET`, the one budget every app's quit
+/// or sign-out flush waits at most (`docs/goal/behavior/reserved-folders.md`
+/// § The leave-flush promise: the door differs per platform, the promise does
+/// not). `u32`, matching [`autosave_debounce_ms`]'s shape.
+#[uniffi::export]
+pub fn leave_flush_budget_ms() -> u32 {
+    fauna_client_drafts::LEAVE_FLUSH_BUDGET.as_millis() as u32
+}
+
 /// UniFFI handle for the `fauna.drafts.{get,put}` kinds. Thin wrapper over the
 /// shared `fauna_client_drafts::DraftsClient` bound to this connection's
 /// `NestClient` and the owner's derived `BackupKey`. Cheap to hold (a transport

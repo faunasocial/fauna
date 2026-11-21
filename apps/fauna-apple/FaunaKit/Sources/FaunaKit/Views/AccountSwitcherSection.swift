@@ -189,6 +189,7 @@ public struct AccountSwitcherSection: View {
         .padding(.vertical, 6)
         // Make the whole row the hit target, not just the label.
         .contentShape(Rectangle())
+        .faunaActsOnClick()
         .onTapGesture { activate(entry, isActive: isActive) }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(Ids.accountSwitcherItem)

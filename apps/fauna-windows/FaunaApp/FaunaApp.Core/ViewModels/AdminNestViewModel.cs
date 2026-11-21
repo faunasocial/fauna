@@ -1,8 +1,10 @@
 using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using FaunaApp.Core.Helpers;
 using FaunaApp.Core.Services;
 using uniffi.fauna_ffi;
+using Possibility = uniffi.fauna_core.Possibility;
 
 namespace FaunaApp.Core.ViewModels;
 
@@ -138,6 +140,16 @@ public partial class AdminNestViewModel : ObservableObject
     // this VM holds its answer plus the local radio draft. The draft is a private
     // FFI enum (uniffi-bindgen-cs `internal` types stay out of public members —
     // CS0053) folded into the two bools below.
+    //
+    // What is offered is the view's two shared answers and the shared draft
+    // predicate (web-content-hosting.md § Same-origin security model → *While
+    // the central origin is not live, the choice is not offered*, rule 5;
+    // docs/goal/ui/README.md § Offer only what is possible, rule 6): the section
+    // paints from `section_possibility`, the central radio from
+    // `central_possibility`, and each radio and the save ask
+    // `admin_web_app_origin_set_possibility` with the mode the press would take
+    // — so this VM keeps no guard of its own. Mirrors FaunaKit's AdminNestVM
+    // webAppOrigin{Section,Central,Select,Set}Possibility.
 
     /// The answered view, or <c>null</c> until the read lands (or if it failed —
     /// best-effort, like <see cref="LoadOauthKeysAsync"/>: a failed read leaves
@@ -147,18 +159,52 @@ public partial class AdminNestViewModel : ObservableObject
     /// The marked radio — the local selection the save commits.
     private FfiWebAppOrigin? _webAppOriginDraft;
 
-    /// <summary>Whether the read has landed. The radios stay unmarked and disabled
-    /// until it has — pre-marking bundled would state a choice the nest may not
-    /// hold.</summary>
+    /// <summary>Whether the read has landed.</summary>
     public bool WebAppOriginLoaded => _webAppOriginView is not null;
 
-    /// <summary>Whether the radios are live — the view's <c>can_set</c> verbatim,
-    /// withheld while a save is in flight (re-tap guard).</summary>
-    public bool WebAppOriginCanSet => _webAppOriginView is { canSet: true } && !WebAppOriginWorking;
+    /// <summary><c>admin-nest-web-app-origin-section</c> and every element in it —
+    /// the view's <c>section_possibility</c>; absent until the read lands (whether
+    /// the section exists is the read's answer, and painting it to take it away
+    /// again would offer a choice and withdraw it) and after a failed read.</summary>
+    internal PossibilityPaint WebAppOriginSection() =>
+        PossibilityPaint.Of(_webAppOriginView?.sectionPossibility ?? new Possibility.Absent());
+
+    /// <summary><c>admin-nest-web-app-origin-bundled-radio</c> — the shared draft
+    /// predicate asked with bundled; disabled while a save is in flight.</summary>
+    internal PossibilityPaint WebAppOriginBundledRadio() => WebAppOriginRadio(FfiWebAppOrigin.Bundled);
+
+    /// <summary><c>admin-nest-web-app-origin-central-radio</c> — absent wherever the
+    /// view's <c>central_possibility</c> is (the central origin is not live), else
+    /// the shared draft predicate asked with central.</summary>
+    internal PossibilityPaint WebAppOriginCentralRadio() =>
+        PossibilityPaint.Of(_webAppOriginView?.centralPossibility ?? new Possibility.Absent()).Shown
+            ? WebAppOriginRadio(FfiWebAppOrigin.Central)
+            : PossibilityPaint.Of(new Possibility.Absent());
+
+    /// <summary>One radio's answer: the shared predicate asked with that radio's own
+    /// mode, so a press the save would refuse is never taken.</summary>
+    internal PossibilityPaint WebAppOriginSelect(FfiWebAppOrigin mode) =>
+        PossibilityPaint.Of(FaunaFfiMethods.AdminWebAppOriginSetPossibility(_webAppOriginView, mode));
+
+    /// <summary><c>admin-nest-web-app-origin-save-button</c>'s answer: the shared
+    /// predicate asked with the marked draft — blocked <i>still loading</i> until the
+    /// read lands, by the status sentence where the choice cannot be set, and a
+    /// <c>central</c> draft by the nest's own refusal while the central origin is not
+    /// live. The button paints from it and the save asks it again.</summary>
+    internal PossibilityPaint WebAppOriginSave() =>
+        PossibilityPaint.Of(FaunaFfiMethods.AdminWebAppOriginSetPossibility(_webAppOriginView, _webAppOriginDraft));
+
+    private PossibilityPaint WebAppOriginRadio(FfiWebAppOrigin mode)
+    {
+        var paint = WebAppOriginSelect(mode);
+        return WebAppOriginWorking ? paint with { Enabled = false } : paint;
+    }
 
     /// <summary>Whether <c>admin-nest-web-app-origin-save-button</c> is enabled —
-    /// live radios and a marked one.</summary>
-    public bool WebAppOriginCanSave => WebAppOriginCanSet && _webAppOriginDraft is not null;
+    /// its shared answer is possible, a radio is marked, and no save is in flight
+    /// (re-tap guard).</summary>
+    public bool WebAppOriginCanSave =>
+        WebAppOriginSave().IsPossible && _webAppOriginDraft is not null && !WebAppOriginWorking;
 
     /// <summary><c>admin-nest-web-app-origin-bundled-radio</c> is marked.</summary>
     public bool WebAppOriginBundledSelected => _webAppOriginDraft == FfiWebAppOrigin.Bundled;
@@ -166,17 +212,17 @@ public partial class AdminNestViewModel : ObservableObject
     /// <summary><c>admin-nest-web-app-origin-central-radio</c> is marked.</summary>
     public bool WebAppOriginCentralSelected => _webAppOriginDraft == FfiWebAppOrigin.Central;
 
-    /// <summary><c>admin-nest-web-app-origin-status</c> — the view's line, or the
-    /// loading caption until the read lands.</summary>
+    /// <summary><c>admin-nest-web-app-origin-status</c> — the view's line; empty
+    /// until the read lands (the section is not shown before then).</summary>
     public string WebAppOriginStatus => _webAppOriginView is { } v
         ? Strings.Resolve(v.status)
-        : Strings.Get("admin/nest_page/web_app_origin_loading");
+        : string.Empty;
 
     /// <summary><c>admin-nest-web-app-origin-central-radio</c>'s label — the
-    /// view's (it names the central origin), or the loading caption.</summary>
+    /// view's (it names the central origin); empty until the read lands.</summary>
     public string WebAppOriginCentralLabel => _webAppOriginView is { } v
         ? Strings.Resolve(v.centralLabel)
-        : Strings.Get("admin/nest_page/web_app_origin_loading");
+        : string.Empty;
 
     /// <summary>The scope sentence under the radios; empty until the read lands.</summary>
     public string WebAppOriginScope => _webAppOriginView is { } v
@@ -594,21 +640,31 @@ public partial class AdminNestViewModel : ObservableObject
         _webAppOriginDraft = view.selected;
     }
 
-    /// <summary>A radio pick is local — it only arms the save. Ignored while the
-    /// radios are not live (unloaded, <c>can_set</c> false, or mid-save).
+    /// <summary>A radio pick is local — it only arms the save. A pick its own
+    /// answer refuses (unloaded, not settable, a central press while the central
+    /// origin is not live) or one made mid-save is not taken.
     /// <c>internal</c>, not <c>public</c>: <c>FfiWebAppOrigin</c> is a
     /// <c>uniffi-bindgen-cs</c> <c>internal</c> type (CS0051).</summary>
     internal void SelectWebAppOrigin(FfiWebAppOrigin mode)
     {
-        if (WebAppOriginCanSet) _webAppOriginDraft = mode;
+        if (WebAppOriginSelect(mode).IsPossible && !WebAppOriginWorking) _webAppOriginDraft = mode;
     }
 
     /// <summary><c>admin-nest-web-app-origin-save-button</c> —
     /// <c>fauna.admin.web_app_origin.set</c>, repainting from the set's own reply.
-    /// A failure routes to <see cref="Error"/> and leaves the draft as it was.</summary>
+    /// Asks the button's own answer first and refuses with its reason on
+    /// <see cref="Error"/>, sending nothing (rule 6: what the page offers and what
+    /// the save accepts cannot disagree). A failure routes to <see cref="Error"/>
+    /// and leaves the draft as it was.</summary>
     public async Task SaveWebAppOriginAsync()
     {
-        if (!WebAppOriginCanSave || _webAppOriginDraft is not { } mode) return;
+        var answer = WebAppOriginSave();
+        if (!answer.IsPossible)
+        {
+            if (answer.Reason is { } reason) Error = reason;
+            return;
+        }
+        if (WebAppOriginWorking || _webAppOriginDraft is not { } mode) return;
         WebAppOriginWorking = true;
         try
         {

@@ -52,7 +52,7 @@ class WebPublishStore @Inject constructor(
     /** `(kind, message)` for the last publish/unpublish/paywall-mint failure —
      *  `kind` is `"publish"` / `"unpublish"` / `"paywall"`, so the screen
      *  applies the right `web_publish_error_*` template (mirrors
-     *  `FeedVM.deleteError`/`trainError`'s separate-channel-per-op shape). */
+     *  `FeedVM.deleteError`'s separate-channel-per-op shape). */
     val error: StateFlow<Pair<String, String>?> = _error.asStateFlow()
 
     private val _copied = MutableStateFlow<Triple<String, String, String>?>(null)

@@ -19,6 +19,10 @@ hand matrix).
 from __future__ import annotations
 
 import ast
+import gc
+import re
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -278,18 +282,62 @@ class TestFacts:
         return self.node_id.split("::", 1)[0]
 
 
+#: `{id(node): (node, {mark name: [its calls, walk order]}, {bare mark names})}`
+#: while a `scan_file` runs, else None. Each decorator used to be walked once per
+#: question asked of it — feature, surface, platform, two app vocabularies, three
+#: parametrize readers — eight `ast.walk`s of one subtree, ~4 of the lint's 9 s on
+#: macOS (2026-11-16; merge-gates.md § The 10-second budget, rule 7). One walk
+#: answers all eight. The node is held in the entry so its id cannot be reused
+#: while cached, and the map lives only for one file's scan: nothing outlives the
+#: process, so it is the in-process memo rule 3 sanctions, never a verdict cache.
+_MARK_INDEX: dict | None = None
+#: The scanned module's source lines while a `scan_file` runs, else None. A
+#: `<x>.mark.<name>` attribute spells the identifier `mark` inside its node's
+#: lines, so a node whose lines never say `mark` has no mark and is not walked —
+#: most decorators (`@pytest.fixture`) and nearly every helper function body
+#: `scan_file`'s mark-helper test reads in full.
+_SOURCE_LINES: list | None = None
+_EMPTY_INDEX: tuple = ({}, frozenset())
+#: The line breaks Python's tokenizer counts — never `str.splitlines`, which also
+#: breaks at a form feed or ` ` and would shift every later `lineno`.
+_LINE_BREAK = re.compile(r"\r\n|\r|\n")
+
+
+def _mark_index(node: ast.AST) -> tuple:
+    """`({name: [calls]}, {names})` — every `pytest.mark.<name>(...)` call in `node`
+    by name, in `ast.walk` order, and every `<x>.mark.<name>` spelled bare or called."""
+    cache = _MARK_INDEX
+    if cache is not None:
+        hit = cache.get(id(node))
+        if hit is not None and hit[0] is node:
+            return hit[1], hit[2]
+    lines = _SOURCE_LINES
+    first, last = getattr(node, "lineno", None), getattr(node, "end_lineno", None)
+    if lines is not None and first is not None and last is not None \
+            and not any("mark" in line for line in lines[first - 1:last]):
+        return _EMPTY_INDEX
+    calls: dict = {}
+    marks: set = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call):
+            target = sub.func
+            if isinstance(target, ast.Attribute):
+                owner = target.value
+                if isinstance(owner, ast.Attribute) and owner.attr == "mark":
+                    calls.setdefault(target.attr, []).append(sub)
+                    marks.add(target.attr)
+        elif isinstance(sub, ast.Attribute):
+            owner = sub.value
+            if isinstance(owner, ast.Attribute) and owner.attr == "mark":
+                marks.add(sub.attr)
+    if cache is not None:
+        cache[id(node)] = (node, calls, marks)
+    return calls, marks
+
+
 def _mark_calls(node: ast.AST, name: str) -> list:
     """Every `@pytest.mark.<name>(...)` / `pytest.mark.<name>(...)` call in `node`."""
-    found = []
-    for sub in ast.walk(node):
-        if not isinstance(sub, ast.Call):
-            continue
-        func = sub.func
-        if isinstance(func, ast.Attribute) and func.attr == name:
-            owner = func.value
-            if isinstance(owner, ast.Attribute) and owner.attr == "mark":
-                found.append(sub)
-    return found
+    return list(_mark_index(node)[0].get(name, ()))
 
 
 def _constant_param_marks(node: ast.AST, scope: tuple) -> set:
@@ -347,15 +395,7 @@ def _app_marks(node: ast.AST, names: frozenset = APP_MARKERS) -> set:
     Unlike `_mark_calls` this must see the BARE form, because that is how an app
     marker is almost always written (`@pytest.mark.windows`, no parentheses).
     """
-    found = set()
-    for sub in ast.walk(node):
-        target = sub.func if isinstance(sub, ast.Call) else sub
-        if (isinstance(target, ast.Attribute)
-                and target.attr in names
-                and isinstance(target.value, ast.Attribute)
-                and target.value.attr == "mark"):
-            found.add(target.attr)
-    return found
+    return _mark_index(node)[1] & names
 
 
 def _helper_file(module: str, path: Path | None) -> Path | None:
@@ -369,6 +409,32 @@ def _helper_file(module: str, path: Path | None) -> Path | None:
         if (base / rel).is_file():
             return base / rel
     return None
+
+
+#: (helper path, mtime_ns, size, depth) → its `_module_scope`, or None when it
+#: does not parse. Every test file importing from `helpers.*` used to re-parse
+#: each helper it names: ~3,500 helper parses beside the 1,581 test files, about
+#: two thirds of the lint's 16 s on macOS (merge-gates.md § The 10-second
+#: budget). Keyed on the file's stat, so an edited helper is read again.
+_HELPER_SCOPES: dict = {}
+
+
+def _helper_scope(helper: Path, depth: int):
+    try:
+        st = helper.stat()
+    except OSError:
+        return None
+    key = (helper.as_posix(), st.st_mtime_ns, st.st_size, depth)
+    if key in _HELPER_SCOPES:
+        return _HELPER_SCOPES[key]
+    try:
+        tree = ast.parse(helper.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, SyntaxError):
+        got = None
+    else:
+        got = _module_scope(tree, helper, depth)
+    _HELPER_SCOPES[key] = got
+    return got
 
 
 def _module_scope(tree: ast.Module, path: Path | None = None, depth: int = 0) -> tuple:
@@ -390,11 +456,9 @@ def _module_scope(tree: ast.Module, path: Path | None = None, depth: int = 0) ->
             helper = _helper_file(node.module or "", path)
             if helper is None:
                 continue
-            try:
-                helper_tree = ast.parse(helper.read_text(encoding="utf-8", errors="replace"))
-            except (OSError, SyntaxError):
+            helper_scope = _helper_scope(helper, depth + 1)
+            if helper_scope is None:
                 continue
-            helper_scope = _module_scope(helper_tree, helper, depth + 1)
             for alias in node.names:
                 if alias.name not in helper_scope[0]:
                     continue
@@ -569,6 +633,27 @@ def fixture_param_sets(tree: ast.Module, scope: tuple) -> dict:
     return out
 
 
+#: The fields that hold a STATEMENT list (or, for `handlers`/`cases`, the
+#: clauses that hold one).
+_STATEMENT_FIELDS = ("body", "orelse", "finalbody", "handlers", "cases")
+
+
+def _statements(tree: ast.AST):
+    """Every statement node of `tree`, at any nesting — `ast.walk` minus the
+    expression subtrees. `_module_facts` asks only of imports and function
+    definitions, which Python's grammar allows only as statements, so the
+    answer is the same; the expressions it skips were ~5 of the lint's 9 s on
+    macOS (2026-11-16; merge-gates.md § The 10-second budget)."""
+    todo = [tree]
+    while todo:
+        node = todo.pop()
+        yield node
+        for field in _STATEMENT_FIELDS:
+            children = getattr(node, field, None)
+            if isinstance(children, list):
+                todo.extend(c for c in children if isinstance(c, ast.AST))
+
+
 def _module_facts(tree: ast.AST) -> tuple:
     """`(drives_browser, fixture definitions)` from ONE walk of the module.
 
@@ -594,7 +679,7 @@ def _module_facts(tree: ast.AST) -> tuple:
     """
     browser = False
     fixtures: dict = {}
-    for node in ast.walk(tree):
+    for node in _statements(tree):
         if isinstance(node, ast.ImportFrom):
             if not browser:
                 if (node.module or "").split(".")[0] == "playwright":
@@ -632,7 +717,17 @@ def scan_file(path: Path, repo: Path = REPO, launching: frozenset | None = None)
     """`launching` is the app-launching fixture set the tree's conftest yields
     (`scan_tree` computes it once); the module's own fixture definitions are folded
     in here, so a test-local `@pytest.fixture def two_account_app(app)` counts too."""
+    global _MARK_INDEX, _SOURCE_LINES
     source = path.read_text(encoding="utf-8", errors="replace")
+    outer = _MARK_INDEX, _SOURCE_LINES
+    _MARK_INDEX, _SOURCE_LINES = {}, _LINE_BREAK.split(source)
+    try:
+        return _scan_file(path, source, repo, launching)
+    finally:
+        _MARK_INDEX, _SOURCE_LINES = outer
+
+
+def _scan_file(path: Path, source: str, repo: Path, launching: frozenset | None) -> list:
     tree = ast.parse(source, filename=str(path))
     rel = path.relative_to(repo).as_posix()
     browser, own_fixtures = _module_facts(tree)
@@ -675,6 +770,23 @@ def scan_file(path: Path, repo: Path = REPO, launching: frozenset | None = None)
             todo.extend(own_fixtures.get(name, ()))
         return [param_fixtures[n] for n in sorted((seen - overridden) & set(param_fixtures))]
 
+    # A module-local mark helper — a plain function the module applies as a bare
+    # decorator (`@_desktop`), whose body applies `pytest.mark.<app>` /
+    # `host_platform` marks to the test it wraps (`test_sign_out_tui.py`) — marks
+    # its tests exactly as the literal decorators would. Its body is read in the
+    # decorator's place, so such a test is not scanned as unmarked (and counted
+    # on every column).
+    mark_helpers = {
+        node.name: node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and not node.name.startswith("test")
+        and not node.decorator_list
+        and (_app_marks(node) or _mark_calls(node, "host_platform"))
+    }
+
+    def expand(decorators) -> list:
+        return [mark_helpers[d.id] if isinstance(d, ast.Name) and d.id in mark_helpers else d
+                for d in decorators]
+
     facts: list = []
 
     def visit(fn, prefix: str, class_drives: bool = False,
@@ -691,7 +803,7 @@ def scan_file(path: Path, repo: Path = REPO, launching: frozenset | None = None)
         params = list(module_params) + list(inherited_params)
         overridden = set(module_overrides) | set(inherited_overrides)
         opt = set(module_opt) | set(inherited_opt)
-        for dec in fn.decorator_list:
+        for dec in expand(fn.decorator_list):
             slugs.extend(_feature_slugs(dec))
             surfaces.extend(_surface_keys(dec))
             platform_marks.extend(_platform_marks(dec))
@@ -741,7 +853,7 @@ def scan_file(path: Path, repo: Path = REPO, launching: frozenset | None = None)
             class_opt: set = set()
             class_surfaces: list = []
             class_platforms: list = []
-            for dec in node.decorator_list:
+            for dec in expand(node.decorator_list):
                 class_surfaces.extend(_surface_keys(dec))
                 class_platforms.extend(_platform_marks(dec))
                 class_apps |= _app_marks(dec)
@@ -787,6 +899,58 @@ def _tree_fingerprint(root: Path) -> tuple:
                  for st in (p.stat(),))
 
 
+#: The scan's process pool (2026-11-17; `merge-gates.md` § The 10-second budget,
+#: rule 7). The per-file scan is independent across files, so the sorted file list
+#: is dealt into `_POOL_WIDTH * 4` interleaved chunks and scanned in worker
+#: processes that live and die inside this one call — no state outlives it, so
+#: rule 3's ruling against a parse cache stands. Fixed, never a knob: rule 7 counts
+#: the at most three extra processes, for about one second, inside the gate phase's
+#: uncounted width.
+_POOL_WIDTH = 4
+#: Below this many files the scan stays serial and in-process: starting the
+#: workers (spawn on macOS and Windows, each importing this module) costs more than
+#: a fixture world of a few files takes to scan.
+_POOL_MIN_FILES = 64
+#: The pool's maker, a module attribute so the tests can stand in a pool that
+#: cannot start, or one that records that it was started.
+_make_pool = ProcessPoolExecutor
+
+
+def _scan_chunk(chunk: list, repo: Path, launching: frozenset) -> list:
+    """The pool's worker: `[(index, [TestFacts, ...]), ...]` for one chunk of
+    `(index, path)` pairs, the cyclic collector paused as in `scan_tree`.
+    Module-level, so a spawned child finds it by name (`features_scan`, importable
+    there because spawn hands the child the parent's `sys.path`); `_HELPER_SCOPES`
+    is per process, so each worker parses the helpers its own files import."""
+    paused = gc.isenabled()
+    gc.disable()
+    try:
+        return [(i, scan_file(path, repo=repo, launching=launching)) for i, path in chunk]
+    finally:
+        if paused:
+            gc.enable()
+
+
+def _scan_pooled(files: list, repo: Path, launching: frozenset):
+    """Each file's facts in `files` order, scanned over the pool — or None when no
+    pool could be had (it could not start, or a worker died), so the caller falls
+    back to the serial loop and the lint never goes red for want of a pool. An
+    error a file's own scan raises is raised here as the serial loop would."""
+    n = _POOL_WIDTH * 4
+    indexed = list(enumerate(files))
+    chunks = [c for c in (indexed[k::n] for k in range(n)) if c]
+    per_file: list = [None] * len(files)
+    try:
+        with _make_pool(max_workers=_POOL_WIDTH) as pool:
+            for got in pool.map(_scan_chunk, chunks,
+                                [repo] * len(chunks), [launching] * len(chunks)):
+                for i, facts in got:
+                    per_file[i] = facts
+    except (OSError, BrokenProcessPool):
+        return None
+    return per_file
+
+
 def scan_tree(root: Path = E2E, repo: Path = REPO) -> dict:
     """`{node id: TestFacts}` for every `test_*.py` under `root`."""
     out: dict = {}
@@ -803,8 +967,30 @@ def scan_tree(root: Path = E2E, repo: Path = REPO) -> dict:
         return cached
 
     launching = app_launching_fixtures(conftest_fixtures(root))
-    for path in sorted(root.rglob("test_*.py")):
-        for facts in scan_file(path, repo=repo, launching=launching):
-            out[facts.node_id] = facts
+    files = sorted(root.rglob("test_*.py"))
+    per_file = _scan_pooled(files, repo, launching) if len(files) >= _POOL_MIN_FILES else None
+    if per_file is not None:
+        # Merged in sorted-path order, then file order: the serial loop's
+        # insertion order, which every caller iterates.
+        for facts_of_file in per_file:
+            for facts in facts_of_file:
+                out[facts.node_id] = facts
+        _SCAN_CACHE[key] = out
+        return out
+    # The cyclic collector paused over the walk: each parse allocates tens of
+    # thousands of nodes, every few hundred allocations start a collection, and
+    # an AST holds no reference cycle (no parent links), so refcounting frees
+    # every tree the moment its file is done and the collector finds nothing —
+    # ~0.7 s of a 4 s scan on macOS (2026-11-16; merge-gates.md § The 10-second
+    # budget, rule 7). Restored on every exit.
+    paused = gc.isenabled()
+    gc.disable()
+    try:
+        for path in files:
+            for facts in scan_file(path, repo=repo, launching=launching):
+                out[facts.node_id] = facts
+    finally:
+        if paused:
+            gc.enable()
     _SCAN_CACHE[key] = out
     return out

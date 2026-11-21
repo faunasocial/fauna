@@ -100,7 +100,7 @@ struct OfflineReasonCaptionTests {
             "fauna.bridges.discard_export_blob",
         ] {
             #expect(
-                offlineAffordance(kind: kind, connectionState: "disconnected").available == false,
+                offlinePossibility(kind: kind, connectionState: "disconnected").isPossible == false,
                 "\(kind) must desensitize when disconnected"
             )
             #expect(
@@ -111,16 +111,16 @@ struct OfflineReasonCaptionTests {
     }
 
     // The property that makes one call site honest: the caption and the
-    // control's own desensitizing come from the SAME `offlineAffordance` call,
+    // control's own desensitizing come from the SAME `offlinePossibility` call,
     // so "captioned" and "disabled" cannot disagree for any connection word.
     // Written as a sweep rather than three asserts so a newly-recognised
     // offline word cannot quietly land on one side only.
     @Test("captioned iff gated, for every connection word the transport can report")
     func captionAgreesWithTheGateForEveryWord() {
         for word in ["connected", "connecting", "disconnected", "reconnecting", "unknown", ""] {
-            let available = offlineAffordance(
+            let available = offlinePossibility(
                 kind: Self.onlineOnly, connectionState: word
-            ).available
+            ).isPossible
             let captioned = FaunaOfflineReason.captionText(
                 kind: Self.onlineOnly, connectionState: word
             ) != nil

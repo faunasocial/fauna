@@ -49,9 +49,10 @@ use fauna_client_caldav::{
     parse_ical_attendees, parse_ical_organizer, project_attendee_rsvp, seal_calendar_metadata,
     set_reminder, uid_hash, unseal_calendar_metadata,
 };
+use fauna_client_config::DavCustody;
 use fauna_client_config::DavStoreContext;
 #[cfg(feature = "account-runtime")]
-use fauna_client_config::dav_store_context as shared_dav_store_context;
+use fauna_client_config::dav_custody as shared_dav_custody;
 use fauna_client_conversations::NestImipDispatch;
 use fauna_client_email::EmailClient;
 use fauna_conversations::ConversationsSession;
@@ -385,6 +386,150 @@ impl FfiCaldavClient {
             }
         }
         Ok(None)
+    }
+}
+
+/// The calendar read's four answers, as they cross UniFFI
+/// ([`fauna_client_caldav::CalendarsRead`], events.md § Errors & edge cases →
+/// *No calendar to hold an event*, ruling 2), the calendars as the page's
+/// decrypted rows.
+#[cfg(feature = "value-format")]
+#[derive(uniffi::Enum, Clone, Debug, PartialEq, Eq)]
+pub enum FfiCalendarsRead {
+    /// Not finished, the custody read failed (the account store is not up
+    /// yet), or custody holds no key yet (the first-connect mint is in
+    /// flight): a wait, re-read when the store changes.
+    Unresolved,
+    /// The lazy `Personal` was refused; the next read retries.
+    ProvisionFailed { error: String },
+    /// At least one calendar. `unreadable` counts the listed calendars whose
+    /// metadata would not unseal, left out of `calendars` and said on the
+    /// page's `error-message` (`events.calendars_unreadable`; events.md §
+    /// *The other calendar writes*, ruling 3).
+    Loaded {
+        calendars: Vec<FfiCalendarRow>,
+        unreadable: u32,
+    },
+}
+
+#[cfg(feature = "value-format")]
+impl FfiCalendarsRead {
+    fn state(&self) -> fauna_client_caldav::CalendarsReadState {
+        use fauna_client_caldav::CalendarsReadState as S;
+        match self {
+            FfiCalendarsRead::Unresolved => S::Unresolved,
+            FfiCalendarsRead::ProvisionFailed { error } => S::ProvisionFailed {
+                error: error.clone(),
+            },
+            FfiCalendarsRead::Loaded { .. } => S::Loaded,
+        }
+    }
+}
+
+/// UniFFI face of [`fauna_client_caldav::event_create_possibility`]: can this
+/// person open an event compose now? Every door to the compose paints from it
+/// (enabled, or disabled with the reason), and the create asks
+/// [`event_create_target`] (the same predicate) before it sends. Gated
+/// `value-format` for the bare-`fauna_core`-type reason `offline_possibility`
+/// gives.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn event_create_possibility(read: FfiCalendarsRead) -> fauna_core::possibility::Possibility {
+    fauna_client_caldav::event_create_possibility(&read.state())
+}
+
+/// UniFFI face of [`fauna_client_caldav::calendar_write_possibility`]: can
+/// this person create a calendar or import an `.ics` now (events.md § Errors &
+/// edge cases → *The other calendar writes*)? `new-calendar-btn`,
+/// `create-calendar` and `calendar-import-button` paint from it, and each
+/// action asks it again before it sends. Gated `value-format` like
+/// [`event_create_possibility`].
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn calendar_write_possibility(read: FfiCalendarsRead) -> fauna_core::possibility::Possibility {
+    fauna_client_caldav::calendar_write_possibility(&read.state())
+}
+
+/// The answer [`event_create_target`] gives: the calendar id (hex) a create
+/// goes to, or the reason it refuses.
+#[cfg(feature = "value-format")]
+#[derive(uniffi::Enum, Clone, Debug, PartialEq, Eq)]
+pub enum FfiEventCreateTarget {
+    Calendar {
+        id: String,
+    },
+    Refused {
+        reason: fauna_core::localized::LocalizedText,
+    },
+}
+
+/// UniFFI face of [`fauna_client_caldav::event_create_target`]: the submit's
+/// side of the gate — the predicate first, then the live selection else the
+/// first loaded calendar — so no app's create can send an empty calendar id.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn event_create_target(
+    read: FfiCalendarsRead,
+    selected: Option<String>,
+) -> FfiEventCreateTarget {
+    let ids: Vec<String> = match &read {
+        FfiCalendarsRead::Loaded { calendars, .. } => {
+            calendars.iter().map(|c| c.id.clone()).collect()
+        }
+        _ => Vec::new(),
+    };
+    match fauna_client_caldav::event_create_target(&read.state(), selected.as_deref(), ids) {
+        Ok(id) => FfiEventCreateTarget::Calendar { id },
+        Err(reason) => FfiEventCreateTarget::Refused { reason },
+    }
+}
+
+#[cfg(feature = "value-format")]
+#[fauna_uniffi_async::export]
+impl FfiCaldavClient {
+    /// The Events page's calendar load in its answers
+    /// ([`fauna_client_caldav::CalDavClient::read_calendars`]): unlike
+    /// [`Self::list_calendars`], a wait (custody not readable yet, or no key
+    /// minted yet) and a refused lazy `Personal` are kept apart instead of
+    /// reading as an empty list (or an error). A list error is the call's error.
+    pub async fn read_calendars(&self) -> Result<FfiCalendarsRead, FfiError> {
+        let custody = dav_custody(&self.nest).await;
+        let read = self
+            .client()
+            .read_calendars(&custody)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(match read {
+            fauna_client_caldav::CalendarsRead::Unresolved => FfiCalendarsRead::Unresolved,
+            fauna_client_caldav::CalendarsRead::ProvisionFailed { error } => {
+                FfiCalendarsRead::ProvisionFailed { error }
+            }
+            fauna_client_caldav::CalendarsRead::Loaded { calendars } => {
+                // `read_calendars` lists only with the key, so a loaded read
+                // always has one; the empty fallback keeps this panic-free.
+                let DavCustody::Ready(ctx) = &custody else {
+                    return Ok(FfiCalendarsRead::Unresolved);
+                };
+                let keys =
+                    DavRecipientKeys::from_mseks(DavKind::Calendar, &ctx.msek, &ctx.prior_mseks);
+                let rows: Vec<FfiCalendarRow> = calendars
+                    .iter()
+                    .filter_map(|e| {
+                        let meta = unseal_calendar_metadata(&e.encrypted_metadata, &keys).ok()?;
+                        Some(FfiCalendarRow {
+                            id: hex::encode(&e.calendar_id),
+                            name: meta.displayname,
+                            color: meta.color,
+                        })
+                    })
+                    .collect();
+                let unreadable = u32::try_from(calendars.len() - rows.len()).unwrap_or(u32::MAX);
+                FfiCalendarsRead::Loaded {
+                    calendars: rows,
+                    unreadable,
+                }
+            }
+        })
     }
 }
 
@@ -1056,21 +1201,29 @@ impl FfiCaldavClient {
 /// this seat's account runtime; a build that hosts no runtime (the
 /// `--no-default-features` Go mail-bridge and watchOS builds) holds no custody,
 /// so it reads as the mail-disabled state.
-#[cfg(feature = "account-runtime")]
 pub(crate) async fn dav_store_context(nest: &Arc<NestClient>) -> Option<DavStoreContext> {
+    dav_custody(nest).await.into_context()
+}
+
+/// The custody answer behind [`dav_store_context`], its three answers kept
+/// apart ([`fauna_client_config::DavCustody`]) for the calendar read
+/// ([`FfiCaldavClient::read_calendars`]).
+#[cfg(feature = "account-runtime")]
+pub(crate) async fn dav_custody(nest: &Arc<NestClient>) -> DavCustody {
     let actor_id = nest
         .auth()
         .keypair()
         .expect("identity keypair required for encrypted DAV")
         .actor_id()
         .0;
-    shared_dav_store_context(crate::account_runtime::mail_store().as_ref(), actor_id).await
+    shared_dav_custody(crate::account_runtime::mail_store().as_ref(), actor_id).await
 }
 
-/// The runtime-less build's twin — see the doc above.
+/// The runtime-less build's twin — see the doc above: no custody is held, so
+/// it reads as the never-enabled state.
 #[cfg(not(feature = "account-runtime"))]
-pub(crate) async fn dav_store_context(_nest: &Arc<NestClient>) -> Option<DavStoreContext> {
-    None
+pub(crate) async fn dav_custody(_nest: &Arc<NestClient>) -> DavCustody {
+    DavCustody::NoKey
 }
 
 /// Map a decoded event (unsealed + parsed VEVENT) to the UI [`FfiCalEvent`],

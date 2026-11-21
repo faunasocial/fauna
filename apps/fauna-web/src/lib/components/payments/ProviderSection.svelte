@@ -30,12 +30,19 @@
   } from '#lib/payments';
   import { PAYMENTS_IDS } from '#lib/components/payments/generatedIds';
   import { siteLink, ensureWebPageHydrated } from '#lib/web-publish';
+  import { subscriptionProviderAddPossibility } from '#lib/wasm';
+  import { askPossibility, formGate, formRefusal } from '#lib/form-gate';
+  import type { ReadWord } from '#lib/read-gate';
 
   interface Props {
     /** The logged-in actor's secret, or null before identity resolves. */
     secretHex: string | null;
     /** The author's own §1 tiers — a provider maps to exactly one of them. */
     tiers: { name: string }[];
+    /** Where the page's read of `tiers` stands — the add's answer keeps a
+     *  pending or failed read apart from "no tier" (profile.md § Errors & edge
+     *  cases, *A tier before what sells it*). */
+    tiersRead: ReadWord;
     /** The author's hex actor id, for the webhook-URL preview. */
     actorIdHex: string;
     /** Bumped by the page wherever it reloads the SELF surfaces; every change
@@ -45,7 +52,18 @@
      *  (convention 2 — the page owns the one error surface). */
     onerror: (message: string) => void;
   }
-  let { secretHex, tiers, actorIdHex, reloadTick, onerror }: Props = $props();
+  let { secretHex, tiers, tiersRead, actorIdHex, reloadTick, onerror }: Props = $props();
+
+  // `subscription-provider-add-button`: the shared own-tier answer
+  // (`own_tiers_possibility`, use `PaymentProvider`). The gate is at the
+  // entry: painted here, asked again by `openForm()`, so the form never opens
+  // with no tier for it to sell.
+  function addAnswer() {
+    return subscriptionProviderAddPossibility(tiersRead, tiers.length);
+  }
+  const addGate = $derived(
+    formGate(askPossibility(() => addAnswer())),
+  );
 
   // The webhook secret is never pre-filled — the nest deliberately omits it from
   // the list reply, so a re-save re-enters it.
@@ -105,6 +123,8 @@
   });
 
   function openForm(): void {
+    const refusal = formRefusal(askPossibility(() => addAnswer()));
+    if (refusal !== null) { onerror(refusal); return; }
     // Hydrate the web origin once on open (a no-op once populated); the display
     // re-renders when the read lands. Best-effort: a failure leaves the
     // "unavailable" line, not a page error.
@@ -173,7 +193,8 @@
   <h2>{t.subscriptions.payment_providers}</h2>
   <button
     class="btn primary" data-testid={PAYMENTS_IDS.SUBSCRIPTION_PROVIDER_ADD_BUTTON}
-    onclick={openForm}
+    onclick={openForm} disabled={addGate.disabled}
+    title={addGate.reason || undefined}
   >{t.subscriptions.add_provider}</button>
 
   {#if formVisible}

@@ -346,3 +346,64 @@ fn dns_provider_override_wins_over_gandi_api_base_cred() {
     .expect("gandi dns construction");
     assert_eq!(dispatch.base_url(), "http://override.example/api");
 }
+
+/// The DNS plan names a record one way whatever the connected provider
+/// (onboarding-provisioning.md § 6 *The DNS plan*): zone-relative, the form the
+/// admin DNS page names records in. Cloudflare's API wants fully-qualified
+/// owners and Hetzner's zone-relative ones, so the same domain's records reach
+/// the plan in two forms; `dns_plan::named_in_zone` gives the rows — the key
+/// `<name>|<type>` and the sentence every app renders — one.
+#[test]
+fn the_dns_plan_names_records_zone_relative_under_every_provider() {
+    use fauna_provisioning::dns::DnsRecord;
+    use fauna_provisioning::dns_plan::{self, DnsPlanRow};
+    use fauna_provisioning::orchestrator::planned_records;
+
+    let zone = "example.test";
+    let plan_under = |p: &fauna_provisioning::dispatch::DnsDispatch| -> Vec<DnsPlanRow> {
+        let records = planned_records(p, zone, "zone-id", Some(zone), None);
+        // The zone holds an old box's apex `A` and an `AAAA`, named the way
+        // this provider names them (its records echo the queried owner).
+        let apex = records
+            .iter()
+            .find(|r| r.record_type == "A")
+            .expect("an apex A")
+            .name
+            .clone();
+        let old = |t: &str, v: &str| DnsRecord {
+            record_type: t.into(),
+            name: apex.clone(),
+            value: v.into(),
+            ttl: 300,
+            priority: None,
+        };
+        let current = [old("A", "192.0.2.1"), old("AAAA", "2001:db8::1")];
+        let rows = dns_plan::plan(&records, |n, t| {
+            current
+                .iter()
+                .filter(|r| r.name == n && r.record_type == t)
+                .cloned()
+                .collect()
+        });
+        dns_plan::named_in_zone(rows, zone)
+    };
+
+    let cf = dispatch::dns_provider(ProviderId::Cloudflare, creds(&[("api-token", "t")]), None)
+        .expect("cloudflare dns dispatch");
+    let hz = dispatch::dns_provider(ProviderId::Hetzner, creds(&[("api-token", "t")]), None)
+        .expect("hetzner dns dispatch");
+    assert!(!cf.record_names_relative_to_zone() && hz.record_names_relative_to_zone());
+
+    let under_cf = plan_under(&cf);
+    let under_hz = plan_under(&hz);
+    assert_eq!(under_cf, under_hz, "one form whatever the provider");
+    let names: Vec<&str> = under_hz.iter().map(|r| r.name.as_str()).collect();
+    assert!(
+        names.contains(&"@") && names.contains(&"mail") && names.contains(&"_dmarc"),
+        "{names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n.contains(zone)),
+        "zone-relative: {names:?}"
+    );
+}

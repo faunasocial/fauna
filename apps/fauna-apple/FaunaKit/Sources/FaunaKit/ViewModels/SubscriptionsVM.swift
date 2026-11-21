@@ -39,6 +39,14 @@ public final class SubscriptionsVM {
     /// exclusion is client-side, scoped to just this list, same shape as linux
     /// `tiers.rs::render_tier_rows`'s `shown`.
     public var myTiers: [FfiTierItem] { tiers.filter { $0.unlocksPost == nil } }
+    /// Where the §1 tier read stands — `.pending` until the tab's first read
+    /// answers, `.failed` when it failed before ever answering; a later failure
+    /// (a mutation's, or a re-read's) leaves an answered list standing. The
+    /// controls that need a tier (`subscription-claim-mint-button`,
+    /// `subscription-provider-add-button`) are painted from the shared own-tier
+    /// answer over it, so an unanswered read never reads as "you have no tier"
+    /// (`profile.md` § Errors & edge cases, *A tier before what sells it*).
+    public private(set) var tiersRead: ReadState = .pending
     /// The inline create/edit form is visible.
     public var showForm = false
     /// `Some(name)` while editing an existing tier; `nil` while creating. The tier
@@ -141,6 +149,7 @@ public final class SubscriptionsVM {
         api = nil
         authorIdHex = ""
         tiers = []
+        tiersRead = .pending
         showForm = false
         editingTier = nil
         formName = ""
@@ -235,6 +244,7 @@ public final class SubscriptionsVM {
             // the subscriber roster and the mintable claim codes.
             guard self.api === api else { return }
             tiers = loadedTiers
+            tiersRead = .resolved
             requests = loadedRequests
             #if !FAUNA_EXCISE_PAYMENTS
             providers = loadedProviders
@@ -256,6 +266,8 @@ public final class SubscriptionsVM {
             await refreshRoster()
         } catch {
             guard self.api === api else { return }
+            // Failed before ever answering: say so. An answered list stands.
+            if tiersRead == .pending { tiersRead = .failed }
             errorMessage = DisplayError.message(error)
         }
     }
@@ -308,12 +320,25 @@ public final class SubscriptionsVM {
         showForm = false
     }
 
+    /// `subscription-tier-form-save`: the shared draft-validity predicate
+    /// (`fauna_client_subscriptions::forms::tier_form_possibility`, rule 4's
+    /// form case of `docs/goal/ui/README.md` § Offer only what is possible) —
+    /// blocked with `subscriptions.tier_name_required` while the name is blank.
+    public var tierFormPossibility: Possibility {
+        subscriptionTierFormPossibility(name: formName)
+    }
+
 #if !FAUNA_KIDS
     /// Create or update the tier depending on `editingTier`, then refresh.
+    /// Asks ``tierFormPossibility`` first and refuses with its reason on
+    /// `error-message` — never a silent return.
     public func saveForm() async {
+        if let refusal = tierFormPossibility.refusal {
+            errorMessage = refusal
+            return
+        }
         guard let api else { return }
         let name = formName.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty else { return }
         let rank = UInt32(formRank.trimmingCharacters(in: .whitespaces)) ?? 0
         let description = optTrim(formDescription)
         let priceHint = optTrim(formPriceHint)
@@ -417,7 +442,15 @@ public final class SubscriptionsVM {
     /// secret starts empty — it is write-only, never pre-filled even when
     /// re-adding a kind that already has a saved config (that's an overwrite,
     /// not an edit-in-place; the nest has no read-back to prefill from).
+    ///
+    /// Asks ``providerAddAnswer`` first: with no tier the form does not open (its
+    /// tier map would have nothing to save), and the refusal says why on
+    /// `error-message`.
     public func openProviderForm() {
+        if let refusal = providerAddAnswer.refusal {
+            errorMessage = refusal
+            return
+        }
         formProviderKind = providerKinds.first ?? ""
         formProviderProduct = savedProduct(kind: formProviderKind)
         formProviderTier = tierNames.first ?? ""
@@ -473,12 +506,32 @@ public final class SubscriptionsVM {
         }
     }
 
+    /// `subscription-provider-add-button`'s answer — the shared own-tier answer
+    /// (use `PaymentProvider`) over the §1 tier read (`profile.md` § Errors &
+    /// edge cases, *A tier before what sells it*).
+    public var providerAddAnswer: Possibility {
+        subscriptionProviderAddPossibility(read: tiersRead, ownTiers: UInt32(clamping: tierNames.count))
+    }
+
     // MARK: - §5 Manual claim codes
+
+    /// `subscription-claim-mint-button`'s answer — the shared own-tier answer
+    /// (use `ClaimCode`) over the §1 tier read.
+    public var claimMintAnswer: Possibility {
+        subscriptionClaimMintPossibility(read: tiersRead, ownTiers: UInt32(clamping: tierNames.count))
+    }
 
     /// Manually mint a claim code for `selectedClaimTier` (provider always
     /// `"manual"`, no expiry — mirrors linux `claims_mint(tier, None)`), then
     /// refresh so the new code appears in the audit list.
+    ///
+    /// Asks ``claimMintAnswer`` first, the answer the button was painted from,
+    /// and refuses with its reason on `error-message`.
     public func mintClaim() async {
+        if let refusal = claimMintAnswer.refusal {
+            errorMessage = refusal
+            return
+        }
         guard let api, !selectedClaimTier.isEmpty else { return }
         mintingClaim = true
         do {

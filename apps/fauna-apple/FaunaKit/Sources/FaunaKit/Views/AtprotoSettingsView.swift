@@ -61,6 +61,37 @@ public struct AtprotoSettingsView: View {
                     ErrorBanner(message: error)
                 }
 
+                if vm.buildFailed {
+                    // A machine that failed to build offers nothing
+                    // (`atproto.md` § Errors & edge cases): one line stands in
+                    // for every control, and the shell's own back navigation
+                    // stays (tui's `atproto_elements`, linux's
+                    // `show_unavailable`).
+                    Text(L.atprotoSettings.pageUnavailable)
+                        .foregroundStyle(.secondary)
+                } else {
+                    controls
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityIdentifier(Ids.atprotoPage)
+        .automationValue(Ids.atprotoPage, text: { "" })
+        .pageTitle(L.atprotoSettings.title)
+        .task {
+            guard let client else { return }
+            await vm.configure(api: client.api)
+            linkedVM.singleBridgeId = "bluesky"
+            linkedVM.configure(api: client.api, familyStatus: familyStatus)
+            await linkedVM.refresh()
+        }
+    }
+
+    /// Every control of the page — painted while the machine exists or is
+    /// still being built, never once its build failed.
+    @ViewBuilder
+    private var controls: some View {
                 // The recovery-fork contest card leads the page, above the
                 // depth selector — an identity under active attack outranks
                 // every settings row below it (atproto-identity-custody.md
@@ -108,20 +139,6 @@ public struct AtprotoSettingsView: View {
                 if isFullPds || snapshot?.delegation != nil {
                     delegationSection
                 }
-            }
-            .padding(24)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .accessibilityIdentifier(Ids.atprotoPage)
-        .automationValue(Ids.atprotoPage, text: { "" })
-        .pageTitle(L.atprotoSettings.title)
-        .task {
-            guard let client else { return }
-            await vm.configure(api: client.api)
-            linkedVM.singleBridgeId = "bluesky"
-            linkedVM.configure(api: client.api, familyStatus: familyStatus)
-            await linkedVM.refresh()
-        }
     }
 
     private var snapshot: AtprotoSettingsSnapshot? { vm.snapshot }
@@ -149,15 +166,12 @@ public struct AtprotoSettingsView: View {
             ForEach(Self.depthLevels, id: \.level) { rung in
                 depthRow(rung)
             }
-            // Copy comprehensibility rule 5 — a gated row must always carry a
-            // reason, including the pre-fetch window before `configure`
-            // resolves: `vm.snapshot` is seeded from the Rust-ratified
-            // `atprotoSettingsPrefetchSnapshot()` default there, so
-            // `hostedGateReason` is never nil while the gate is closed — no
-            // local stand-in needed (mirrors web/android reading the seam
-            // directly).
-            if snapshot?.hostedAllowed != true, let reason = snapshot?.hostedGateReason {
-                Text(renderLocalizedText(reason))
+            // A greyed rung owes its reason on the same surface (rule 2). The
+            // rungs carry their own labels, so the reason rides one untagged
+            // line, once per distinct reason — the hosted gate's own line
+            // follows when it differs (tui's `atproto_elements`, the lead).
+            ForEach(rungReasonLines, id: \.self) { line in
+                Text(line)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -166,19 +180,34 @@ public struct AtprotoSettingsView: View {
         .automationValue(Ids.atprotoDepthSelector, value: { level })
     }
 
+    /// The distinct reasons the rungs are blocked with, in rung order, then the
+    /// hosted gate's own reason while the gate is closed and no rung already
+    /// says it (copy comprehensibility rule 5: a gated row always carries a
+    /// reason — the pre-fetch snapshot seeds `hostedGateReason` too).
+    private var rungReasonLines: [String] {
+        var lines: [String] = []
+        for rung in Self.depthLevels {
+            if let text = vm.rungAnswer(rung.level).reasonText, !lines.contains(text) {
+                lines.append(text)
+            }
+        }
+        if snapshot?.hostedAllowed != true, let reason = snapshot?.hostedGateReason {
+            let text = renderLocalizedText(reason)
+            if !lines.contains(text) { lines.append(text) }
+        }
+        return lines
+    }
+
     @ViewBuilder
     private func depthRow(_ rung: DepthLevelOption) -> some View {
         // `rung.hosted` is the catalog's own fact, not a `hasPrefix("hosted")`
-        // sniff over the wire spelling — a string-prefix read of a closed
-        // vocabulary is exactly what would mis-gate a future `hosted_*`-but-
-        // ungated rung on six surfaces at once (`atproto.md` § Where logic
-        // lives). The `!gated || active` rule below stays the app's.
+        // sniff over the wire spelling (`atproto.md` § Where logic lives). It
+        // feeds only the e2e's `gated`/`ok` marker: whether the rung is live is
+        // the machine's `rung_possibility` (rule 6) — still loading until the
+        // status read resolves, and a hosted rung the user is already AT stays
+        // selectable so a step-down is reachable.
         let gated = rung.hosted && snapshot?.hostedAllowed != true
-        // A hosted rung the user is *already at* stays selectable so a step-down
-        // is reachable even if the domain later stops being public — the gate
-        // only ever blocks *entering* a hosted level from a lower one (mirrors
-        // linux `render`).
-        let enabled = !gated || level == rung.level
+        let answer = vm.rungAnswer(rung.level)
         Button {
             Task { await vm.selectLevel(rung.level) }
         } label: {
@@ -191,10 +220,15 @@ public struct AtprotoSettingsView: View {
                 }
             }
         }
-        .disabled(!enabled)
         .buttonStyle(.plain)
         .accessibilityIdentifier(rung.uiId)
-        .automationActivate(rung.uiId, isEnabled: { enabled }, value: { gated ? "gated" : "ok" }) {
+        .automationActivate(
+            rung.uiId, value: { gated ? "gated" : "ok" },
+            // The rung's own `reason` read stays the e2e's `gated`/`ok` marker
+            // (`actions/atproto_settings.py::depth_gate_marker`, tui's rung
+            // attr): an entry's own `reason` wins over the painter's fold.
+            attributes: { ["reason": gated ? "gated" : "ok"] }
+        ) {
             Task { await vm.selectLevel(rung.level) }
         }
         // A rung is not purely staging: `select_level` applies an effect-free
@@ -203,6 +237,7 @@ public struct AtprotoSettingsView: View {
         // So the rung is a dispatch-on-change control and declares, exactly as
         // the confirm below does for the carded moves.
         .faunaGate("fauna.bridges.atproto.set_integration_level")
+        .faunaPossible(answer)
     }
 
     // MARK: - Recovery-fork contest
@@ -571,6 +606,10 @@ public struct AtprotoSettingsView: View {
                     Task { await vm.authorizeDelegation() }
                 }
                 .faunaGate("fauna.bridges.atproto.provision_authoring_delegation")
+                // Gated on the identity at the entry, not at the submit
+                // (rule 4): no signing identity → blocked with the machine's
+                // reason.
+                .faunaPossible(vm.authorizeAnswer)
                 if snapshot?.delegation != nil {
                     Button(L.atprotoSettings.delegationRevokeButton, role: .destructive) {
                         Task { await vm.revokeDelegation() }
@@ -582,6 +621,7 @@ public struct AtprotoSettingsView: View {
                     .faunaGate("fauna.bridges.atproto.revoke_authoring_delegation")
                 }
             }
+            FaunaPossibilityReason(vm.authorizeAnswer)
         }
     }
 

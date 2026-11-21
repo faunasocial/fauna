@@ -1631,6 +1631,14 @@ impl<'a, B: StoreBackend, R: RpcRequester> AccountStatePlane<'a, B, R> {
         Ok(())
     }
 
+    /// Whether this replica's store records this plane's scope **listed**
+    /// ([`AccountStore::listed`]) — the durable fact, whichever process
+    /// sharing the store recorded it (an app's runtime, or the sync agent
+    /// hosting the same store).
+    pub async fn store_listed(&self) -> Result<bool> {
+        self.store.listed(&self.scope).await
+    }
+
     pub fn scope(&self) -> &str {
         &self.scope
     }

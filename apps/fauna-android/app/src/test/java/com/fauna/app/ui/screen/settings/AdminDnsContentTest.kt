@@ -20,12 +20,16 @@ import uniffi.fauna_client_dns.CredentialSummary
 import uniffi.fauna_client_dns.DelegationView
 import uniffi.fauna_client_dns.DnsCredentialField
 import uniffi.fauna_client_dns.DnsRecordRow
+import uniffi.fauna_client_dns.DnsSnapshot
+import uniffi.fauna_client_dns.DnsStatus
 import uniffi.fauna_client_dns.DomainView
 import uniffi.fauna_client_dns.PendingCertIssue
 import uniffi.fauna_client_dns.RecordVerdict
 import uniffi.fauna_client_dns.VerifyStatus
 import uniffi.fauna_client_mail_settings.DomainDmarcPolicy
+import uniffi.fauna_client_mail_settings.LocalDomainStatus
 import uniffi.fauna_client_mail_settings.LocalDomainView
+import uniffi.fauna_client_mail_settings.LocalDomainsSnapshot
 import uniffi.fauna_client_mail_settings.PrimaryDomainRenameView
 import uniffi.fauna_client_mail_settings.RoleAddressKind
 import uniffi.fauna_client_mail_settings.RoleAddressOverrideView
@@ -171,13 +175,38 @@ class AdminDnsContentTest {
         pendingCert: PendingCertIssue? = null,
         working: Boolean = false,
         error: String? = null,
+        // The whole snapshots the page's shared `Possibility` answers read, built
+        // from the seeded state; pass `null` for a read that has not resolved.
+        dnsSnapshot: DnsSnapshot? = DnsSnapshot(
+            domains = dnsDomains,
+            credentials = credentials,
+            status = DnsStatus.IDLE,
+            error = null,
+            pendingCert = pendingCert,
+            delegations = delegations,
+            certStatuses = certStatuses,
+            certIssuanceErrors = certIssuanceErrors,
+            uncoveredSans = emptyList(),
+        ),
+        localDomainsSnapshot: LocalDomainsSnapshot? = LocalDomainsSnapshot(
+            active = activeDomains,
+            softDeleted = removedDomains,
+            status = LocalDomainStatus.IDLE,
+            error = null,
+            lastAddSkipped = false,
+            activeRename = activeRename,
+            renameAvailable = renameAvailable,
+            addingFirstDomain = addingFirstDomain,
+            removeConfirmDomain = removeConfirmDomain,
+        ),
+        onRefuse: (String?) -> Unit = {},
         onRefresh: () -> Unit = {},
-        onAddDomain: (String) -> Unit = {},
+        onAddDomain: (String, () -> Unit) -> Unit = { _, _ -> },
         onArmRemoveDomain: (String) -> Unit = {},
         onConfirmRemoveDomain: () -> Unit = {},
         onCancelRemoveDomain: () -> Unit = {},
         onRestoreDomain: (String) -> Unit = {},
-        onStartRename: (ByteArray, Long?) -> Unit = { _, _ -> },
+        onStartRename: (ByteArray, Long?, () -> Unit) -> Unit = { _, _, _ -> },
         onCompleteRename: (ByteArray, Boolean) -> Unit = { _, _ -> },
         onExtendRename: (ByteArray, Long) -> Unit = { _, _ -> },
         onAbortRename: (ByteArray) -> Unit = {},
@@ -186,7 +215,7 @@ class AdminDnsContentTest {
         onSetDmarcPolicy: (String, DomainDmarcPolicy) -> Unit = { _, _ -> },
         onSetMode: (String, Boolean) -> Unit = { _, _ -> },
         onSetManageAll: (Boolean) -> Unit = {},
-        onPutCredential: (String, List<DnsCredentialField>, String) -> Unit = { _, _, _ -> },
+        onPutCredential: (String, List<DnsCredentialField>, String, () -> Unit) -> Unit = { _, _, _, _ -> },
         onClearCredential: (UInt) -> Unit = {},
         onIssueCert: (String) -> Unit = {},
         onBeginManualIssue: (String) -> Unit = {},
@@ -214,6 +243,9 @@ class AdminDnsContentTest {
                 pendingCert = pendingCert,
                 working = working,
                 error = error,
+                dnsSnapshot = dnsSnapshot,
+                localDomainsSnapshot = localDomainsSnapshot,
+                onRefuse = onRefuse,
                 onBack = {},
                 onRefresh = onRefresh,
                 onAddDomain = onAddDomain,
@@ -365,16 +397,50 @@ class AdminDnsContentTest {
         render(
             activeDomains = listOf(localDomain(domain = "extra.org", primary = false)),
             dnsDomains = listOf(dnsDomain(domain = "extra.org", mode = "manual")),
+            credentials = listOf(CredentialSummary(providerId = "hetzner", zones = listOf("extra.org"), label = "Hetzner")),
             onSetMode = { d, m -> got = d to m },
         )
         composeTestRule.onNodeWithTag("admin-dns-domain-mode").performScrollTo().performClick()
         assertEquals("extra.org" to true, got)
     }
 
+    // Managed mode needs a held credential covering the domain: without one the
+    // switch is painted disabled with the shared answer's reason, and the
+    // add-credential step stays offered (`dns-management.md` § Errors & edge cases).
+    @Test
+    fun modeToManagedIsDisabledWithItsReasonWithoutACoveringCredential() {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        render(
+            activeDomains = listOf(localDomain(domain = "extra.org", primary = false)),
+            dnsDomains = listOf(dnsDomain(domain = "extra.org", mode = "manual")),
+            credentials = listOf(CredentialSummary(providerId = "hetzner", zones = listOf("other.org"), label = "Hetzner")),
+        )
+        composeTestRule.onNodeWithTag("admin-dns-domain-mode").performScrollTo().assertIsNotEnabled()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.admin_dns_mode_needs_credential))
+            .performScrollTo().assertExists()
+        composeTestRule.onNodeWithTag("admin-dns-add-credential-button").performScrollTo().assertIsEnabled()
+    }
+
+    // Loading is not empty: before the domains read resolves, the page never
+    // says "No domains yet".
+    @Test
+    fun loadingIsNotEmptyBeforeTheDomainsReadResolves() {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        render(localDomainsSnapshot = null)
+        composeTestRule.onNodeWithText(ctx.getString(R.string.admin_dns_empty)).assertDoesNotExist()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.common_loading)).assertExists()
+    }
+
     @Test
     fun manageAllToggleFires() {
         var managed: Boolean? = null
-        render(manageAll = false, onSetManageAll = { managed = it })
+        render(
+            activeDomains = listOf(localDomain(primary = true)),
+            dnsDomains = listOf(dnsDomain()),
+            credentials = listOf(CredentialSummary(providerId = "hetzner", zones = listOf("example.com"), label = "Hetzner")),
+            manageAll = false,
+            onSetManageAll = { managed = it },
+        )
         composeTestRule.onNodeWithTag("admin-dns-manage-all-toggle").performScrollTo().performClick()
         assertEquals(true, managed)
     }
@@ -382,11 +448,40 @@ class AdminDnsContentTest {
     @Test
     fun addDomainRevealsFormAndSubmits() {
         var added: String? = null
-        render(onAddDomain = { added = it })
+        render(onAddDomain = { d, _ -> added = d })
         composeTestRule.onNodeWithTag("admin-dns-add-domain-button").performScrollTo().performClick()
         composeTestRule.onNodeWithTag("admin-dns-add-domain-input").performTextInput("New.Example.COM")
         composeTestRule.onNodeWithTag("admin-dns-add-domain-submit-button").performScrollTo().performClick()
         assertEquals("new.example.com", added)
+    }
+
+    // Forms close only once saved: the add-domain form stays open with what was
+    // typed until the save's `onSaved` fires, and closes then.
+    @Test
+    fun addDomainFormClosesOnlyOnceTheSaveSucceeded() {
+        var saved: (() -> Unit)? = null
+        render(onAddDomain = { _, onSaved -> saved = onSaved })
+        composeTestRule.onNodeWithTag("admin-dns-add-domain-button").performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("admin-dns-add-domain-input").performTextInput("new.example.com")
+        composeTestRule.onNodeWithTag("admin-dns-add-domain-submit-button").performScrollTo().performClick()
+        // Not saved yet (or failed): still open, still holding the draft.
+        composeTestRule.onNodeWithTag("admin-dns-add-domain-input").assertTextContains("new.example.com")
+        composeTestRule.runOnIdle { saved!!.invoke() }
+        composeTestRule.onNodeWithTag("admin-dns-add-domain-input").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("admin-dns-add-domain-button").assertExists()
+    }
+
+    // The submit is painted from the shared draft answer: a malformed name is
+    // disabled with its reason, never sent.
+    @Test
+    fun addDomainSubmitIsDisabledWithItsReasonForAMalformedName() {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        render()
+        composeTestRule.onNodeWithTag("admin-dns-add-domain-button").performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("admin-dns-add-domain-input").performTextInput("nodot")
+        composeTestRule.onNodeWithTag("admin-dns-add-domain-submit-button").performScrollTo().assertIsNotEnabled()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.admin_dns_domain_malformed))
+            .performScrollTo().assertExists()
     }
 
     // A domainless nest's first add is a one-way door (`deployment-home-with-
@@ -742,7 +837,7 @@ class AdminDnsContentTest {
             ),
             dnsDomains = listOf(dnsDomain(domain = "old.example.com"), dnsDomain(domain = "new.example.com")),
             renameAvailable = true,
-            onStartRename = { id, days -> got = id to days },
+            onStartRename = { id, days, _ -> got = id to days },
         )
         // "Promote to primary" pre-targets this row; submit dispatches its id +
         // null grace (blank input → nest default 7).

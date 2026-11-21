@@ -95,8 +95,12 @@
 //! address to the OS opener; the grant connects by itself and the step moves
 //! on to Scope with nothing more pressed. The Progress repaint tick also runs
 //! while a sign-in is in flight, so the code appears without a click. A
-//! platform without a registration paints the unavailable sentence and keeps
-//! the button inert (`MailImportSnapshot::microsoft_signin_available`).
+//! The Outlook source paints from ONE shared answer,
+//! `MailImportSnapshot::outlook_source_possibility()` (`ui/README.md` § Offer
+//! only what is possible, rules 2 and 6): a build with no sign-in transport
+//! leaves Outlook out of the source picker; a deployment without a
+//! registration paints the unavailable sentence and keeps the button inert,
+//! its reason on the tooltip.
 //!
 //! # The Entries ARE the draft buffers, committed at the transition
 //!
@@ -144,6 +148,7 @@ use fauna_client_mail_settings::{
     ImportTlsMode, MailImportAction, MailImportMachine, MailImportSnapshot, MicrosoftSignInState,
     SOURCE_KINDS, TLS_MODES, import_source_kind_label, import_tls_mode_label,
 };
+use fauna_core::possibility::Possibility;
 use fauna_core::secret::SecretString;
 
 use crate::async_helper::spawn_with_snapshot;
@@ -234,11 +239,23 @@ fn microsoft_sign_in_in_flight(snap: &MailImportSnapshot) -> bool {
 
 /// Paint one copy of the sign-in rows from `snap`; `shown` says whether the
 /// step hosting them is the one asking for Microsoft.
+///
+/// The button is painted through the seam (`crate::possible::paint`) from the
+/// shared Outlook answer: absent → the rows are not shown at all; blocked →
+/// inert with the reason on its tooltip and the unavailable sentence under it
+/// (the rows may sit on a hidden step, so the reason never rides a line the
+/// step hides); possible → live. A sign-in in flight only narrows it further.
 fn render_microsoft_rows(m: &MicrosoftRows, snap: &MailImportSnapshot, shown: bool) {
-    let available = snap.microsoft_signin_available;
+    let answer = snap.outlook_source_possibility();
+    let available = answer.is_possible();
+    let blocked = matches!(answer, Possibility::Blocked { .. });
+    let shown = shown && answer.is_shown();
     m.row.set_visible(shown);
-    m.button
-        .set_sensitive(available && !microsoft_sign_in_in_flight(snap));
+    crate::possible::paint(&m.button, None, answer);
+    if microsoft_sign_in_in_flight(snap) {
+        // Narrowing only: the answer already decided whether it may be live.
+        m.button.set_sensitive(false);
+    }
     let waiting = snap.microsoft_signin.as_ref().filter(|v| {
         shown && available && v.state == MicrosoftSignInState::Waiting && !v.user_code.is_empty()
     });
@@ -251,7 +268,7 @@ fn render_microsoft_rows(m: &MicrosoftRows, snap: &MailImportSnapshot, shown: bo
         crate::testid::set_test_attr_text(&m.code_label, "code", &v.user_code);
         crate::testid::set_test_attr_text(&m.code_label, "url", &v.verification_uri);
     }
-    let note = if shown && !available {
+    let note = if shown && blocked {
         Some(S::MICROSOFT_UNAVAILABLE)
     } else if waiting.is_some() {
         Some(S::MICROSOFT_WAITING)
@@ -272,6 +289,9 @@ struct ImportWidgets {
     // Step 1 — Source.
     source_group: adw::PreferencesGroup,
     source_picker: gtk::DropDown,
+    /// The source kinds the picker offers now, in picker order
+    /// ([`offered_source_kinds`]); the picker's positions index into it.
+    source_kinds: Rc<std::cell::RefCell<Vec<ImportSourceKind>>>,
     username_row: adw::ActionRow,
     username_input: gtk::Entry,
     app_password_row: adw::ActionRow,
@@ -297,9 +317,15 @@ struct ImportWidgets {
     date_from_input: gtk::Entry,
     max_size_input: gtk::Entry,
     import_duplicates_toggle: gtk::CheckButton,
+    /// The Scope step's `wizard-next-button` — painted from
+    /// `MailImportSnapshot::next_possibility` over the typed since-date draft
+    /// ([`paint_scope_answers`]).
+    scope_next: gtk::Button,
 
     // Step 3 — Confirm.
     confirm_group: adw::PreferencesGroup,
+    /// `mail-import-start-button` — painted from `start_possibility`.
+    start_button: gtk::Button,
     confirm_summary: gtk::Label,
 
     // Step 4 — Progress.
@@ -403,19 +429,46 @@ fn tls_mode_label(mode: ImportTlsMode) -> String {
     import_tls_mode_label(mode).resolve(crate::i18n::strings::lookup)
 }
 
-/// `ImportSourceKind` for a DropDown position. An out-of-range index keeps the
-/// ratified default (Gmail) rather than panicking — the
-/// `mail_export::format_at` contract.
-fn source_kind_at(index: u32) -> ImportSourceKind {
+/// The source kinds the picker offers for the shared Outlook answer: every
+/// kind, except Outlook when the answer is absent — a build with no Microsoft
+/// sign-in transport can never import from it (`ui/README.md` § Offer only
+/// what is possible, rule 2; tui's `source_kind_options`).
+fn offered_source_kinds(outlook: &Possibility) -> Vec<ImportSourceKind> {
     SOURCE_KINDS
+        .into_iter()
+        .filter(|kind| *kind != ImportSourceKind::Outlook || outlook.is_shown())
+        .collect()
+}
+
+/// `ImportSourceKind` for a DropDown position over the offered `kinds`. An
+/// out-of-range index keeps the ratified default (Gmail) rather than panicking
+/// — the `mail_export::format_at` contract.
+fn source_kind_at(kinds: &[ImportSourceKind], index: u32) -> ImportSourceKind {
+    kinds
         .get(index as usize)
         .copied()
         .unwrap_or(ImportSourceKind::Gmail)
 }
 
-/// DropDown position for an `ImportSourceKind`.
-fn source_kind_index(kind: ImportSourceKind) -> u32 {
-    SOURCE_KINDS.iter().position(|k| *k == kind).unwrap_or(0) as u32
+/// DropDown position for an `ImportSourceKind` over the offered `kinds`.
+fn source_kind_index(kinds: &[ImportSourceKind], kind: ImportSourceKind) -> u32 {
+    kinds.iter().position(|k| *k == kind).unwrap_or(0) as u32
+}
+
+/// Re-offer the picker's kinds when the shared Outlook answer changes what is
+/// offered (the caller holds the echo guard: replacing the model moves the
+/// selection).
+fn paint_source_options(w: &ImportWidgets, snap: &MailImportSnapshot) {
+    let kinds = offered_source_kinds(&snap.outlook_source_possibility());
+    if *w.source_kinds.borrow() == kinds {
+        return;
+    }
+    if let Some(model) = w.source_picker.model().and_downcast::<gtk::StringList>() {
+        let labels: Vec<String> = kinds.iter().copied().map(source_kind_label).collect();
+        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        model.splice(0, model.n_items(), &refs);
+    }
+    *w.source_kinds.borrow_mut() = kinds;
 }
 
 /// `ImportTlsMode` for a DropDown position; out-of-range keeps Implicit.
@@ -481,7 +534,14 @@ fn build_page_parts() -> (adw::PreferencesPage, ImportWidgets, WizardButtons) {
         .title(S::SOURCE_TITLE)
         .build();
 
-    let source_options: Vec<String> = SOURCE_KINDS.into_iter().map(source_kind_label).collect();
+    // Every kind until the first snapshot answers for Outlook (rule 5: not
+    // known yet is not absent); `paint_source_options` re-offers from then on.
+    let source_kinds = offered_source_kinds(&Possibility::once_read(false));
+    let source_options: Vec<String> = source_kinds
+        .iter()
+        .copied()
+        .map(source_kind_label)
+        .collect();
     let source_refs: Vec<&str> = source_options.iter().map(String::as_str).collect();
     let source_picker = gtk::DropDown::from_strings(&source_refs);
     source_picker.set_valign(gtk::Align::Center);
@@ -831,6 +891,7 @@ fn build_page_parts() -> (adw::PreferencesPage, ImportWidgets, WizardButtons) {
         error_label,
         source_group,
         source_picker,
+        source_kinds: Rc::new(std::cell::RefCell::new(source_kinds)),
         username_row,
         username_input,
         app_password_row,
@@ -852,6 +913,8 @@ fn build_page_parts() -> (adw::PreferencesPage, ImportWidgets, WizardButtons) {
         mailboxes_placeholder,
         scope_group,
         date_from_input,
+        scope_next: scope_next.clone(),
+        start_button: start_button.clone(),
         max_size_input,
         import_duplicates_toggle,
         confirm_group,
@@ -920,7 +983,30 @@ struct WizardButtons {
 /// wire every interaction. Returns the page's context, for the push re-read;
 /// `None` (and a no-op) when no client is available (the unit test).
 fn wire_machine(widgets: ImportWidgets, b: WizardButtons) -> Option<Rc<ImportCtx>> {
-    let client = crate::settings::get_client()?;
+    let Some(client) = crate::settings::get_client() else {
+        // No machine: every gesture says so on `error-message` (rule 7:
+        // never silent) instead of doing nothing.
+        super::mail_gate::wire_unbuilt(
+            &widgets.error_label,
+            &[
+                &b.connect_button,
+                &b.scope_back,
+                &b.scope_next,
+                &b.confirm_back,
+                &b.start_button,
+                &b.pause_button,
+                &b.resume_button,
+                &b.cancel_button,
+                &b.forget_button,
+                &b.dismiss_button,
+                &b.view_imported_button,
+                &b.review_skipped_button,
+                &widgets.microsoft.button,
+                &widgets.resume_microsoft.button,
+            ],
+        );
+        return None;
+    };
     let machine = Arc::new(
         crate::mail_glue::build_mail_import_machine(&client)
             .with_source_memory(crate::account_runtime::mail_import_source_store()),
@@ -974,7 +1060,7 @@ fn wire_machine(widgets: ImportWidgets, b: WizardButtons) -> Option<Rc<ImportCtx
                 if ctx.syncing.get() {
                     return;
                 }
-                let kind = source_kind_at(dd.selected());
+                let kind = source_kind_at(&ctx.w.source_kinds.borrow(), dd.selected());
                 apply_source_visibility(&ctx.w, kind);
                 dispatch_actions(&ctx, vec![MailImportAction::SelectSourceKind { kind }]);
             });
@@ -1027,16 +1113,39 @@ fn wire_machine(widgets: ImportWidgets, b: WizardButtons) -> Option<Rc<ImportCtx
             }
         });
     }
-    // Step 2→3 — commit both Scope drafts, then advance.
+    // Step 2→3 — commit both Scope drafts, then advance. The press asks the
+    // answer the button painted from again (rule 6): blocked → its reason on
+    // `error-message`, nothing dispatched.
     {
         let ctx = Rc::clone(&ctx);
-        b.scope_next
-            .connect_clicked(move |_| dispatch_actions(&ctx, scope_next_actions(&ctx)));
+        b.scope_next.connect_clicked(move |_| {
+            if crate::form_gate::refuse(&scope_next_answer(&ctx), &ctx.w.error_label) {
+                return;
+            }
+            dispatch_actions(&ctx, scope_next_actions(&ctx));
+        });
+    }
+    // The since-date draft is committed only at Next, so Next repaints from the
+    // answer over it as it is typed.
+    {
+        let ctx = Rc::clone(&ctx);
+        ctx.w.date_from_input.clone().connect_changed(move |_| {
+            paint_scope_answers(&ctx, &ctx.machine.snapshot());
+        });
     }
 
     wire_dispatch(&ctx, &b.scope_back, MailImportAction::Back);
     wire_dispatch(&ctx, &b.confirm_back, MailImportAction::Back);
-    wire_dispatch(&ctx, &b.start_button, MailImportAction::Start);
+    {
+        let ctx = Rc::clone(&ctx);
+        b.start_button.connect_clicked(move |_| {
+            let answer = ctx.machine.snapshot().start_possibility();
+            if crate::form_gate::refuse(&answer, &ctx.w.error_label) {
+                return;
+            }
+            dispatch_actions(&ctx, vec![MailImportAction::Start]);
+        });
+    }
     wire_dispatch(&ctx, &b.pause_button, MailImportAction::Pause);
     wire_dispatch(
         &ctx,
@@ -1123,7 +1232,7 @@ fn wire_dispatch(ctx: &Rc<ImportCtx>, button: &gtk::Button, action: MailImportAc
 /// here, before the shared fn ever sees a single resolved secret.
 fn connect_actions(ctx: &Rc<ImportCtx>) -> Vec<MailImportAction> {
     let w = &ctx.w;
-    let kind = source_kind_at(w.source_picker.selected());
+    let kind = source_kind_at(&w.source_kinds.borrow(), w.source_picker.selected());
     let secret = match kind {
         ImportSourceKind::Gmail | ImportSourceKind::ICloud => w.app_password_input.text(),
         _ => w.password_input.text(),
@@ -1147,6 +1256,29 @@ fn microsoft_start_actions(ctx: &Rc<ImportCtx>) -> Vec<MailImportAction> {
     } else {
         fauna_client_mail_settings::microsoft_sign_in_actions(&ctx.w.username_input.text())
     }
+}
+
+/// `wizard-next-button`'s answer on the Scope step: the machine's own over
+/// the typed since-date draft (`MailImportSnapshot::with_scope_draft`) —
+/// zero mailboxes, a malformed date (`mailbox-migration.md` § Wizard steps).
+fn scope_next_answer(ctx: &Rc<ImportCtx>) -> Possibility {
+    ctx.machine
+        .snapshot()
+        .with_scope_draft(&ctx.w.date_from_input.text())
+        .next_possibility()
+}
+
+/// Paint Next off Scope and the Start from the machine's answers (Next over
+/// the typed draft); blocked → insensitive with the reason on the tooltip.
+fn paint_scope_answers(ctx: &Rc<ImportCtx>, snap: &MailImportSnapshot) {
+    let w = &ctx.w;
+    crate::possible::paint(
+        &w.scope_next,
+        None,
+        snap.with_scope_draft(&w.date_from_input.text())
+            .next_possibility(),
+    );
+    crate::possible::paint(&w.start_button, None, snap.start_possibility());
 }
 
 /// Step 2→3: commit both Scope-step drafts, then advance. The wire-action
@@ -1511,12 +1643,14 @@ fn render(ctx: &Rc<ImportCtx>, snap: &MailImportSnapshot) {
     if snap.step != ImportStep::Done {
         ctx.show_skipped.set(false);
     }
+    paint_scope_answers(ctx, snap);
 
     // Pickers (echo-guarded).
     ctx.syncing.set(true);
-    if w.source_picker.selected() != source_kind_index(snap.source_kind) {
-        w.source_picker
-            .set_selected(source_kind_index(snap.source_kind));
+    paint_source_options(w, snap);
+    let source_index = source_kind_index(&w.source_kinds.borrow(), snap.source_kind);
+    if w.source_picker.selected() != source_index {
+        w.source_picker.set_selected(source_index);
     }
     if w.tls_mode_picker.selected() != tls_mode_index(snap.tls_mode) {
         w.tls_mode_picker
@@ -1882,6 +2016,69 @@ pub(super) mod tests {
         });
     }
 
+    /// The Outlook source paints from the shared answer
+    /// (`MailImportSnapshot::outlook_source_possibility`): possible → offered
+    /// and live; blocked (no registration) → offered, the button inert with the
+    /// reason on its tooltip beside the unavailable sentence; absent (no
+    /// sign-in transport on this build) → left out of the picker and no
+    /// sign-in rows at all (`ui/README.md` § Offer only what is possible, rule
+    /// 2). Red-verify by offering every kind in `offered_source_kinds`.
+    #[test]
+    fn the_outlook_source_paints_from_its_shared_answer() {
+        crate::testid::run_on_gtk_thread(|| {
+            let _ = adw::init();
+            let (_page, w, _buttons) = build_page_parts();
+            let picker_labels = |w: &ImportWidgets| -> Vec<String> {
+                let model = w
+                    .source_picker
+                    .model()
+                    .and_downcast::<gtk::StringList>()
+                    .expect("a string-list model");
+                (0..model.n_items())
+                    .filter_map(|i| model.string(i).map(|s| s.to_string()))
+                    .collect()
+            };
+            let outlook = source_kind_label(ImportSourceKind::Outlook);
+            let mut snap = a_mail_import_snapshot(ImportStep::Source);
+            snap.source_kind = ImportSourceKind::Outlook;
+
+            // Possible.
+            snap.microsoft_signin_transport = true;
+            snap.microsoft_signin_available = true;
+            paint_source_options(&w, &snap);
+            render_microsoft_rows(&w.microsoft, &snap, true);
+            assert!(picker_labels(&w).contains(&outlook));
+            assert!(w.microsoft.row.is_visible() && w.microsoft.button.is_sensitive());
+
+            // Blocked: offered, inert, the reason on the tooltip.
+            snap.microsoft_signin_available = false;
+            paint_source_options(&w, &snap);
+            render_microsoft_rows(&w.microsoft, &snap, true);
+            assert!(picker_labels(&w).contains(&outlook));
+            assert!(w.microsoft.row.is_visible() && !w.microsoft.button.is_sensitive());
+            assert_eq!(
+                w.microsoft.button.tooltip_text().as_deref(),
+                Some(S::MICROSOFT_UNAVAILABLE)
+            );
+            assert!(w.microsoft.note.is_visible());
+
+            // Absent: not offered, no rows.
+            snap.microsoft_signin_transport = false;
+            paint_source_options(&w, &snap);
+            render_microsoft_rows(&w.microsoft, &snap, true);
+            assert!(!picker_labels(&w).contains(&outlook));
+            assert_eq!(picker_labels(&w).len(), SOURCE_KINDS.len() - 1);
+            assert!(!w.microsoft.row.is_visible() && !w.microsoft.button.is_visible());
+            assert!(!w.microsoft.note.is_visible());
+            // The positions index the offered kinds, not the full list.
+            let kinds = w.source_kinds.borrow().clone();
+            assert!(!kinds.contains(&ImportSourceKind::Outlook));
+            for (i, kind) in kinds.iter().enumerate() {
+                assert_eq!(source_kind_at(&kinds, i as u32), *kind);
+            }
+        });
+    }
+
     use crate::testid::widget_names;
     use fauna_client_mail_settings::SourceMailboxOption;
     use fauna_client_mail_settings::testing::a_mail_import_snapshot;
@@ -2130,12 +2327,15 @@ pub(super) mod tests {
     #[test]
     fn picker_index_maps_round_trip() {
         for kind in SOURCE_KINDS {
-            assert_eq!(source_kind_at(source_kind_index(kind)), kind);
+            assert_eq!(
+                source_kind_at(&SOURCE_KINDS, source_kind_index(&SOURCE_KINDS, kind)),
+                kind
+            );
         }
         for mode in TLS_MODES {
             assert_eq!(tls_mode_at(tls_mode_index(mode)), mode);
         }
-        assert_eq!(source_kind_at(99), ImportSourceKind::Gmail);
+        assert_eq!(source_kind_at(&SOURCE_KINDS, 99), ImportSourceKind::Gmail);
         assert_eq!(tls_mode_at(99), ImportTlsMode::Implicit);
     }
 

@@ -3,9 +3,58 @@ pub mod cloudflare;
 pub mod gandi;
 pub mod namecheap;
 pub mod porkbun;
+pub mod spaceship;
 
 use crate::error::ProvisionError;
 use serde::{Deserialize, Serialize};
+
+/// Normalise a free-text phone number into the EPP `+CC.NNNNNNNNNN` form
+/// that every registrar taking per-registration contacts demands (Namecheap's
+/// `…Phone` parameters, Spaceship's contact `phone`), and that both reject
+/// with an opaque validation error when it is typed any other way.
+///
+/// A number that is already in the required shape passes through. Otherwise the
+/// country code is taken from the digits between the leading `+` and the first
+/// separator, and the remainder becomes the subscriber number. When the split
+/// can't be determined — no `+`, or no separator to split on, so the country
+/// code would have to be guessed — this returns an error naming `provider` and
+/// the exact expected format. Guessing is the worse failure: a wrong country
+/// code registers a domain against an unreachable contact.
+pub(crate) fn normalize_epp_phone(provider: &str, raw: &str) -> Result<String, ProvisionError> {
+    let bad_format = || {
+        ProvisionError::Other(format!(
+            "{provider} needs the phone number as +CountryCode.Number (for example \
+             +1.5551234567). Enter it with the country code separated from the rest, \
+             e.g. \"+1 555 123 4567\". Got: {raw:?}"
+        ))
+    };
+
+    let trimmed = raw.trim();
+    let rest = trimmed.strip_prefix('+').ok_or_else(bad_format)?;
+
+    // Already `+CC.NNNN`? Accept as-is once both halves are digits.
+    if let Some((cc, number)) = rest.split_once('.')
+        && !cc.is_empty()
+        && cc.len() <= 3
+        && cc.chars().all(|c| c.is_ascii_digit())
+        && number.len() >= 4
+        && number.chars().all(|c| c.is_ascii_digit())
+    {
+        return Ok(format!("+{cc}.{number}"));
+    }
+
+    // Otherwise split at the first non-digit: those leading digits are the
+    // country code, everything else contributes its digits to the number.
+    let split = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .ok_or_else(bad_format)?;
+    let (cc, tail) = rest.split_at(split);
+    let number: String = tail.chars().filter(char::is_ascii_digit).collect();
+    if cc.is_empty() || cc.len() > 3 || number.len() < 4 {
+        return Err(bad_format());
+    }
+    Ok(format!("+{cc}.{number}"))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DomainAvailability {
@@ -116,6 +165,26 @@ pub trait Registrar: Send + Sync {
         agreed_price_cents: u64,
         contact: Option<&ContactInfo>,
     ) -> Result<RegistrationResult, ProvisionError>;
+
+    /// The nameserver door: replace the delegation of `domain`, registered on
+    /// this account, with `nameservers`. A replace, so repeating it is
+    /// harmless. Declared per provider as `registrar_sets_nameservers` in
+    /// `i18n/providers.yaml`; the default answers
+    /// [`ProvisionError::Unsupported`] before any request, and
+    /// `tests/delegation_doors.rs` holds the declaration and the override
+    /// together (`docs/goal/architecture/provisioning/registry.md`
+    /// § Delegation doors).
+    async fn set_nameservers(
+        &self,
+        client: &reqwest::Client,
+        domain: &str,
+        nameservers: &[String],
+    ) -> Result<(), ProvisionError> {
+        let _ = (client, domain, nameservers);
+        Err(ProvisionError::Unsupported {
+            operation: "setting a domain's nameservers",
+        })
+    }
 
     /// Whether this registrar's API accepts WHOIS contact fields per
     /// registration. Default true. Porkbun overrides to false — Porkbun's

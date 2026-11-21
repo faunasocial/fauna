@@ -278,6 +278,29 @@ pub fn sync_agent_status_text(health: crate::sync_agent::AgentHealth) -> &'stati
 /// main loop consumes the hit regions the same way, on the next mouse event,
 /// and the painted page for everything that asks what is on screen
 /// ([`PaintedPage`]).
+/// What the frame just drawn showed at the root, for the
+/// `fauna_e2e_agent::ROOT_SURFACE_KEY` journal: the signed-in app, or the
+/// launch surface the screen is handed to (the wizard, the launch progress
+/// view, …), or `None` when the screen frame painted no title, no description
+/// line and no element — nothing a person could read. The branch is
+/// [`render`]'s own: [`App::showing_launch_surface`] decides whether the page
+/// area shows a launch surface (the append-mode wizard over a live session
+/// included), which is what [`App::page_elements`] paints.
+pub fn root_surface(app: &App, page: &PaintedPage) -> Option<&'static str> {
+    if !app.showing_launch_surface() {
+        return Some(fauna_e2e_agent::ROOT_SURFACE_APP);
+    }
+    let name = if app.wizard.retire.is_some() {
+        "nest_retire"
+    } else {
+        app.launch.root_surface_name()
+    };
+    let painted_nothing = page.elements.is_empty()
+        && app.screen_title().trim().is_empty()
+        && app.screen_description().iter().all(|l| l.trim().is_empty());
+    (!painted_nothing).then_some(name)
+}
+
 pub fn render(frame: &mut Frame, app: &App) -> DrawnFrame {
     if app.authenticated() {
         render_shell(frame, app)
@@ -321,6 +344,11 @@ fn control_text(element: &crate::element::Element) -> String {
         // (`mua_webdav_url()` must start with "https://", not with a prompt). A
         // label-less value paints alone — which is also what makes a grid's
         // fixed-width cell come through untouched.
+        // An activity indicator paints its frame, never its text: the text is
+        // the registry's stable read (`Element::spinner`, `crate::spinner`).
+        Role::Label if element.spinner.is_some() => {
+            crate::spinner::glyph(element.spinner.unwrap_or_default()).to_string()
+        }
         Role::Label => match element.label.as_deref() {
             Some(prompt) => format!("{}: {}", prompt, element.text),
             None => element.text.clone(),
@@ -1962,6 +1990,45 @@ mod tests {
     /// a nav button drops them and takes the trailing ▸ — the fix for a Settings
     /// rail on which `[ Copy ]` and `[ Account ]` were indistinguishable, which
     /// a live user reported as not knowing what was "navigational?".
+    /// `onboarding-provisioning.md` § 6: a `Running` step's checkbox paints an
+    /// animated glyph — two paints a frame apart differ — while a finished
+    /// step's paint holds still, and both keep `status_glyph` as the text the
+    /// registry reads.
+    #[test]
+    fn a_running_step_checkbox_animates_and_a_finished_one_holds_still() {
+        use fauna_provisioning::progress::{StepStatus, status_glyph};
+        let paint = |status, t| {
+            let el = crate::spinner::step_checkbox(status, t);
+            line_text(&element_lines(std::slice::from_ref(&el), None).lines[0])
+        };
+        let tick = crate::spinner::FRAME_MS;
+
+        let (a, b) = (
+            paint(StepStatus::Running, 0),
+            paint(StepStatus::Running, tick),
+        );
+        assert_ne!(a, b, "a running row's paint advances one tick later");
+        assert!(
+            !a.contains(&status_glyph(StepStatus::Running)),
+            "{a:?} paints the frame"
+        );
+
+        let (c, d) = (
+            paint(StepStatus::Succeeded, 0),
+            paint(StepStatus::Succeeded, tick),
+        );
+        assert_eq!(c, d, "a finished row's paint holds still");
+        assert!(c.contains(&status_glyph(StepStatus::Succeeded)));
+
+        for t in [0, tick] {
+            assert_eq!(
+                crate::spinner::step_checkbox(StepStatus::Running, t).text,
+                status_glyph(StepStatus::Running),
+                "the automation text never carries a frame"
+            );
+        }
+    }
+
     #[test]
     fn a_nav_button_paints_as_a_destination_and_a_plain_one_as_an_action() {
         let gesture = crate::element::Gesture::Settings(crate::settings::Action::OpenAccount);

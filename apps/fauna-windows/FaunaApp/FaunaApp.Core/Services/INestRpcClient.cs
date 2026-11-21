@@ -1718,8 +1718,10 @@ internal interface INestRpcClient
     /// <summary>The ONE shared post-claim serving-enablement step (onboarding.md
     /// § 3b <i>Mechanism</i>) over this session's connection.
     /// <paramref name="nodeUrl"/> is the nest's literal URL, which derives the MUA
-    /// details (never the test-override dial URL).</summary>
-    Task ApplyPostClaimServingEnablementAsync(
+    /// details (never the test-override dial URL). Answers the page's
+    /// <c>error-message</c> text when a step was refused for good (onboarding.md § 3b
+    /// → <i>The step completes; it is not fired once</i>), else <c>null</c>.</summary>
+    Task<string?> ApplyPostClaimServingEnablementAsync(
         string nodeUrl, bool email, bool caldav, bool carddav, bool webdav);
 
     /// <summary>Register the kit the <c>recovery_kit</c> screen minted and the user
@@ -2143,6 +2145,13 @@ internal interface INestRpcClient
     /// <summary><c>fauna.subscriptions.tiers.list</c> — the calling author's own
     /// tier definitions (the authenticated own-read powering §1 "My tiers").</summary>
     Task<IReadOnlyList<FfiTierItem>> SubscriptionTiersListAsync();
+
+    /// <summary>The sold post's <i>Change price…</i> save (monetization.md § The asking
+    /// price → <i>Re-pricing a sold post</i>): ONE shared call
+    /// (<c>FfiSubscriptionsClient.sale_price_save</c>) plans the edit against
+    /// <paramref name="tier"/>, sends only what changed and answers
+    /// Unchanged / Saved / Refused — no rule lives in the app.</summary>
+    Task<FfiSalePriceSave> SubscriptionSalePriceSaveAsync(FfiTierItem tier, string priceHint, string askingPrice);
 
     /// <summary>Create a tier via the author orchestration
     /// (<c>SubscriptionsAuthor::create_tier</c>): encrypted mode records a fresh
@@ -3003,6 +3012,16 @@ internal interface INestRpcClient
     /// the actor has no book yet (no lazy provisioning on this read seam).
     /// </summary>
     Task<FfiAddressbookRow[]> CarddavListAddressbooksAsync();
+
+    /// <summary>
+    /// The typed address-book read the Address Book segment loads through —
+    /// <c>FfiCarddavClient.ReadAddressbooks</c>: <c>Unresolved</c> while the custody
+    /// read has not answered or custody holds no key yet (the first-connect mint in
+    /// flight — a wait, painted as loading, never an empty address book), else
+    /// <c>Loaded</c> with the books, possibly none (contacts.md § Errors &amp; edge
+    /// cases, the Address Book bullet; <see cref="FaunaApp.Core.Models.AddressBookRead"/>).
+    /// </summary>
+    Task<FfiAddressbooksRead> CarddavReadAddressbooksAsync();
 
     /// <summary>
     /// Query + decode every vCard in one address book via

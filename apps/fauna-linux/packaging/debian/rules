@@ -1,11 +1,11 @@
 #!/usr/bin/make -f
 
-# The pinned nightly toolchain (rust-toolchain.toml) comes from rustup, not
-# apt — Build-Depends deliberately omits cargo/rustc (an apt-installed system
-# Rust would be the wrong version and never actually get invoked: `cargo`
-# resolves via PATH to the rustup shim, which reads rust-toolchain.toml).
-# The build host needs rustup + the pinned toolchain already installed.
+# A packaging never compiles (installers/linux-desktop.md § What the release
+# publishes): it stages the two binaries `just linux-release <target>` built,
+# from the directory `just linux-deb` hands it as FAUNA_BIN_DIR. Run by hand,
+# it reads the host build of the workspace's target directory.
 CARGO_TARGET_DIR ?= target
+FAUNA_BIN_DIR ?= $(CARGO_TARGET_DIR)/release
 
 # dpkg-buildflags adds -flto=auto -ffat-lto-objects to CFLAGS; cargo builds the
 # C dependencies with them and links through `cc`, where gcc's lto1 hit an
@@ -17,15 +17,16 @@ export DEB_BUILD_MAINT_OPTIONS = optimize=-lto
 	dh $@
 
 override_dh_auto_build:
-	cargo build --release -p fauna-linux -p fauna-sync-agent
+	# No-op — the binaries were built by the release leg's cargo, under its
+	# `--locked` boundary and for its target; a packaging only stages them.
 
 override_dh_auto_test:
 	# No-op — this workspace's tests run elsewhere; a packaging build only
 	# stages the already-verified release binary.
 
 override_dh_auto_install:
-	install -Dm755 $(CARGO_TARGET_DIR)/release/fauna-desktop debian/fauna-desktop/usr/bin/fauna-desktop
-	install -Dm755 $(CARGO_TARGET_DIR)/release/fauna-sync-agent debian/fauna-desktop/usr/bin/fauna-sync-agent
+	install -Dm755 $(FAUNA_BIN_DIR)/fauna-desktop debian/fauna-desktop/usr/bin/fauna-desktop
+	install -Dm755 $(FAUNA_BIN_DIR)/fauna-sync-agent debian/fauna-desktop/usr/bin/fauna-sync-agent
 	install -Dm644 apps/fauna-linux/packaging/social.fauna.fauna.desktop debian/fauna-desktop/usr/share/applications/social.fauna.fauna.desktop
 	install -Dm644 apps/fauna-linux/fauna.svg debian/fauna-desktop/usr/share/icons/hicolor/scalable/apps/fauna.svg
 	# Fauna's two licence texts and the app's notices file (shipped-notices.md
@@ -38,7 +39,8 @@ override_dh_auto_install:
 
 override_dh_compress:
 	# The licence texts and the notices file stay uncompressed, under the
-	# names the notices file's header gives them ("beside this file") and
+	# plain names the notices file's header gives them (LICENSE-MIT,
+	# LICENSE-APACHE) and
 	# every other Linux packaging installs: debhelper would otherwise gzip
 	# each doc file over 4 KiB.
 	dh_compress -X LICENSE -X THIRD-PARTY-NOTICES

@@ -130,6 +130,34 @@ const PROXY_ADAPTERS: &[ProxyAdapter] = &[
             .to_string()
         },
     },
+    ProxyAdapter {
+        provider: ProviderId::Spaceship,
+        what: "dns",
+        direct_host: "https://spaceship.dev",
+        base_for: |env| {
+            fauna_provisioning::dns::spaceship::SpaceshipDns::new_for_env(
+                "k".into(),
+                "s".into(),
+                env,
+            )
+            .api_base()
+            .to_string()
+        },
+    },
+    ProxyAdapter {
+        provider: ProviderId::Spaceship,
+        what: "registrar",
+        direct_host: "https://spaceship.dev",
+        base_for: |env| {
+            fauna_provisioning::registrar::spaceship::SpaceshipRegistrar::new_for_env(
+                "k".into(),
+                "s".into(),
+                env,
+            )
+            .api_base()
+            .to_string()
+        },
+    },
 ];
 
 /// The `what` label a `Capability` must be wired under in [`PROXY_ADAPTERS`].
@@ -138,6 +166,8 @@ fn adapter_label(capability: Capability) -> &'static str {
         Capability::Dns => "dns",
         Capability::Vps => "vps",
         Capability::Registrar => "registrar",
+        // A field kind only — never in `capabilities`, so never asked.
+        Capability::Zone => "zone",
     }
 }
 

@@ -1072,6 +1072,39 @@ def test_an_unmarked_test_is_scanned_as_speaking_for_every_column(tmp_path):
     assert features_scan.scan_file(src, repo=tmp_path)[0].apps == ()
 
 
+def test_a_module_local_mark_helper_decorator_narrows_like_its_marks(tmp_path):
+    """A bare module-local decorator whose body applies app and `host_platform`
+    marks (`test_sign_out_tui.py`'s `_desktop`) narrows its tests exactly as the
+    literal marks would. Read as unmarked, both residue-retry desktop journeys
+    counted as `unrun` on web, windows and android, columns no run could stamp."""
+    import features_scan
+
+    src = tmp_path / "test_helper_marks.py"
+    src.write_text((
+        "import pytest\n\n\n"
+        "def _desktop(test):\n"
+        "    for mark in (\n"
+        "        pytest.mark.tui,\n"
+        "        pytest.mark.linux,\n"
+        "        pytest.mark.macos,\n"
+        "        pytest.mark.host_platform(\"linux\", \"macos\"),\n"
+        "    ):\n"
+        "        test = mark(test)\n"
+        "    return test\n\n\n"
+        "@_desktop\n"
+        "@pytest.mark.feature(\"account\")\n"
+        "def test_desk(app):\n    pass\n\n\n"
+        "@pytest.mark.web\n"
+        "def test_web(app):\n    pass\n"
+    ), encoding="utf-8")
+    facts = {f.node_id.split("::", 1)[1]: f
+             for f in features_scan.scan_file(src, repo=tmp_path)}
+    assert facts["test_desk"].apps == ("linux", "macos", "tui")
+    assert facts["test_desk"].platforms == ("linux", "macos")
+    assert facts["test_desk"].features == ("account",)
+    assert facts["test_web"].apps == ("web",)
+
+
 def _scan_apps(tmp_path, source: str) -> dict:
     import features_scan
 
@@ -1885,6 +1918,33 @@ def test_every_variant_the_ledger_collapsed_must_agree(tmp_path, second, state):
     })
     cell, _ = _linux_cell(features)
     assert cell.state == state
+
+
+def test_a_record_held_only_by_older_answering_keys_is_a_named_decline(tmp_path):
+    """2026-11-19: share-pump's tui record on macos stayed `failed` (2026-11-15)
+    four days after the same test's `[tui-tui]` and `[tui-ios]` keys went green.
+    Two other keys that answer the same record, `[tui-macos]` and `[macos-tui]`,
+    were last seen on 2026-11-10, so the every-answering-key rule kept the red.
+    `overlay_declines` names such a record and the keys holding it back, so the
+    tester can run those keys (delayed-testing.md § The background tester)."""
+    ledger = {"linux": {"feed-read": {"tests": {OWN: _ledger_rec("failed")}}}}
+    snapshot = {OWN + "[linux-eml]": _dir_rec("green"),
+                OWN + "[linux-mbox]": _dir_rec("green", time="2026-10-30T10:00:00+00:00")}
+    declines = fc.overlay_declines(ledger, "linux", snapshot,
+                                   ancestor=lambda older, newer: False)
+    assert declines == [{"app": "linux", "slug": "feed-read", "node": OWN,
+                         "outcome": "failed", "older": [OWN + "[linux-mbox]"],
+                         "newer": [OWN + "[linux-eml]"]}]
+    every_newer = {OWN + "[linux-eml]": _dir_rec("green"),
+                   OWN + "[linux-mbox]": _dir_rec("green")}
+    assert fc.overlay_declines(ledger, "linux", every_newer) == [], (
+        "every answering key newer: the overlay takes the record, nothing is declined")
+    every_older = {k: _dir_rec("green", time="2026-10-30T10:00:00+00:00")
+                   for k in every_newer}
+    assert fc.overlay_declines(ledger, "linux", every_older) == [], (
+        "no answering key newer: the ledger is simply the newest observation")
+    assert fc.overlay_declines(ledger, "macos", snapshot) == [], (
+        "another platform's record is not this snapshot's to judge")
 
 
 def test_a_dirty_directory_green_marks_the_cell_dirty(tmp_path):

@@ -25,6 +25,8 @@ _REPO = Path(__file__).resolve().parents[3]
 
 _INPUTS = ("viewer", "lib/share.rs")
 
+_TITLE = "Build, stage and verify the nest Docker image"
+
 _FAKE_GH = r'''
 import json, os, shutil, sys
 args = sys.argv[1:]
@@ -110,9 +112,11 @@ def fake_gh(tmp_path, monkeypatch):
 
     class Handle:
         def set_runs(self, runs_list):
+            """Each run is (id, headSha, createdAt[, displayTitle])."""
             runs.write_text(json.dumps([
-                {"databaseId": rid, "headSha": sha, "createdAt": at}
-                for rid, sha, at in runs_list
+                {"databaseId": r[0], "headSha": r[1], "createdAt": r[2],
+                 "displayTitle": r[3] if len(r) > 3 else _TITLE}
+                for r in runs_list
             ]))
 
         def add_tree(self, run_id, commit, *, viewer=True):
@@ -287,3 +291,81 @@ def test_a_tree_without_the_viewer_page_is_a_bad_download(repo, fake_gh, tmp_pat
     fake_gh.set_runs([(1, sha, "2026-10-01T00:00:00Z")])
     fake_gh.add_tree(1, sha, viewer=False)
     assert "share-viewer.html" in _reason(repo, tmp_path)
+
+
+# -- the ancestor tree (bound (d)): the run goes to the artifact's commit -----
+
+
+def test_a_dispatch_naming_a_commit_is_read_at_the_commit_it_built(repo, fake_gh, tmp_path):
+    # A dispatch with the `commit` input builds that commit while its head stays the
+    # branch tip; the run's title names the built commit (the workflow's run-name).
+    built = _commit(repo, {"viewer/a.ts": "1", "lib/share.rs": "1"}, "one")
+    tip = _commit(repo, {"viewer/a.ts": "2"}, "two")
+    fake_gh.set_runs([(7, tip, "2026-10-01T00:00:00Z", f"{_TITLE} at {built}")])
+    fake_gh.add_tree(7, built)
+    got = wta.ancestor_tree(repo, tmp_path / "cache", _INPUTS)
+    assert (got.run_id, got.commit) == (7, built)
+    assert got.stale_at_head == "viewer inputs moved since: viewer"
+    assert [c.commit for c in wta.candidates(repo)] == [built]
+
+
+def test_the_ancestor_tree_is_the_newest_ancestor_run_whatever_its_inputs(repo, fake_gh, tmp_path):
+    old = _commit(repo, {"viewer/a.ts": "1", "lib/share.rs": "1"}, "one")
+    mid = _commit(repo, {"unrelated.txt": "x"}, "two")
+    _commit(repo, {"viewer/a.ts": "2"}, "three")  # an input moved at the tip
+    fake_gh.set_runs([(1, old, "2026-10-01T00:00:00Z"), (2, mid, "2026-10-02T00:00:00Z")])
+    fake_gh.add_tree(1, old)
+    fake_gh.add_tree(2, mid)
+    got = wta.ancestor_tree(repo, tmp_path / "cache", _INPUTS)
+    assert (got.run_id, got.commit) == (2, mid)
+    assert got.path == tmp_path / "cache" / mid and (got.path / "share-viewer.html").is_file()
+    assert not got.current_at_head
+    assert got.stale_at_head == "viewer inputs moved since: viewer"
+    # ensure_tree, the gate at HEAD, is unchanged: both are stale for it.
+    with pytest.raises(WebTreeUnavailable, match="every candidate is stale"):
+        wta.ensure_tree(repo, tmp_path / "cache", _INPUTS)
+
+
+def test_the_ancestor_tree_says_when_the_gate_reads_it_current_at_head(repo, fake_gh, tmp_path):
+    sha = _commit(repo, {"viewer/a.ts": "1", "lib/share.rs": "1"}, "one")
+    _commit(repo, {"unrelated.txt": "x"}, "two")
+    fake_gh.set_runs([(5, sha, "2026-10-01T00:00:00Z")])
+    fake_gh.add_tree(5, sha)
+    got = wta.ancestor_tree(repo, tmp_path / "cache", _INPUTS)
+    assert got.current_at_head and got.stale_at_head is None
+
+
+def test_the_ancestor_tree_skips_a_run_off_the_ancestry_and_one_without_the_artifact(
+        repo, fake_gh, tmp_path):
+    base = _commit(repo, {"viewer/a.ts": "1", "lib/share.rs": "1"}, "one")
+    expired = _commit(repo, {"unrelated.txt": "x"}, "two")
+    _git(repo, "checkout", "-q", "-b", "side")
+    side = _commit(repo, {"side.txt": "s"}, "side")
+    _git(repo, "checkout", "-q", "main")
+    _commit(repo, {"viewer/a.ts": "2"}, "three")
+    fake_gh.set_runs([
+        (3, side, "2026-10-03T00:00:00Z"),
+        (2, expired, "2026-10-02T00:00:00Z"),
+        (1, base, "2026-10-01T00:00:00Z"),
+    ])
+    fake_gh.add_tree(3, side)
+    fake_gh.add_tree(1, base)  # run 2's artifact has expired
+    got = wta.ancestor_tree(repo, tmp_path / "cache", _INPUTS)
+    assert got.commit == base
+    assert fake_gh.downloads() == ["2", "1"], "the side run is never downloaded"
+
+
+def test_the_ancestor_tree_uses_a_verified_cache(repo, fake_gh, tmp_path):
+    sha = _commit(repo, {"viewer/a.ts": "1", "lib/share.rs": "1"}, "one")
+    fake_gh.set_runs([(7, sha, "2026-10-01T00:00:00Z")])
+    fake_gh.add_tree(7, sha)
+    wta.ancestor_tree(repo, tmp_path / "cache", _INPUTS)
+    wta.ancestor_tree(repo, tmp_path / "cache", _INPUTS)
+    assert fake_gh.downloads() == ["7"]
+
+
+def test_no_ancestor_artifact_is_a_named_reason(repo, fake_gh, tmp_path):
+    sha = _commit(repo, {"viewer/a.ts": "1"}, "one")
+    fake_gh.set_runs([(1, sha, "2026-10-01T00:00:00Z")])
+    with pytest.raises(WebTreeUnavailable, match="nothing in retention: no green .* at an ancestor"):
+        wta.ancestor_tree(repo, tmp_path / "cache", _INPUTS)

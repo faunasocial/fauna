@@ -199,6 +199,16 @@ pub struct FolderRehomeSigned<'a> {
     pub signature: RowSignature<'a>,
 }
 
+/// The receipt [`CacheDb::materialize_folder_custody`] writes when its page
+/// leaves nothing owed: the set's name, the copy's anchor
+/// ([`super::materialize_receipts::folder_copy_anchor`]) and the commit time.
+#[derive(Debug, Clone, Copy)]
+pub struct FolderReceipt<'a> {
+    pub set_name: &'a str,
+    pub anchor: [u8; 32],
+    pub now: i64,
+}
+
 /// What [`CacheDb::materialize_folder_custody`] found at the target.
 #[derive(Debug)]
 pub enum FolderMaterializeOutcome {
@@ -806,6 +816,16 @@ pub enum StorageQuotaError {
     NegativeSize { size_bytes: i64 },
     /// An underlying database error — treat as internal.
     Db(anyhow::Error),
+}
+
+/// A metered record's answer: the seq it was assigned (the existing row's on a
+/// content-identical replay) and the newest row of the same set below it, 0
+/// when none ([`CacheDb::prev_set_seq_in_conn`]) — the record reply's two
+/// numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordedSeq {
+    pub seq: i64,
+    pub prev_set_seq: i64,
 }
 
 /// One file captured into a snapshot, carrying both halves of the path: the
@@ -2287,12 +2307,17 @@ impl CacheDb {
             None,
         )
         .await
+        .map(|recorded| recorded.seq)
     }
 
     /// [`Self::record_sync_change_metered`] carrying the writer's signature
     /// (`mls-group-key-material.md` § M2 → *Writer-signed change records*) —
     /// the caller has already verified it (`record_change_core`); this stores
     /// it on the row verbatim.
+    ///
+    /// Answers the seq with the set's `prev_set_seq` beside it
+    /// ([`RecordedSeq`]), read under the same connection lock the insert ran
+    /// under, so no row of the set can land between the two reads.
     #[allow(clippy::too_many_arguments)]
     pub async fn record_sync_change_metered_signed(
         &self,
@@ -2313,9 +2338,9 @@ impl CacheDb {
         is_resolution: Option<bool>,
         max_storage_bytes: i64,
         signature: Option<RowSignature<'_>>,
-    ) -> Result<i64, StorageQuotaError> {
+    ) -> Result<RecordedSeq, StorageQuotaError> {
         let conn = self.conn.lock().await;
-        Self::record_sync_change_in_conn(
+        let seq = Self::record_sync_change_in_conn(
             &conn,
             recorder,
             owner,
@@ -2334,7 +2359,37 @@ impl CacheDb {
             is_resolution,
             max_storage_bytes,
             signature,
-        )
+        )?;
+        let prev_set_seq = Self::prev_set_seq_in_conn(&conn, folder_id, seq)?;
+        Ok(RecordedSeq { seq, prev_set_seq })
+    }
+
+    /// The seq of the newest `sync_changes` row of `folder_id` below `seq`, 0
+    /// when there is none — the record reply's `prev_set_seq`
+    /// (`docs/goal/behavior/conflicts.md` § the causal watermark, *An edit
+    /// stamp reaches across the writer's own acknowledged run*).
+    ///
+    /// The predicate is the set alone: wider than the change listing's (which
+    /// also drops superseded and state-entry rows), and wider is the safe
+    /// direction — a larger answer only stops the writer's run sooner, while a
+    /// narrower one could let the writer's claim cover a row it never pulled.
+    /// Walks the seq key down from `seq`, so its cost is the rows of other
+    /// sets interleaved above the set's previous row, not the set's size.
+    pub(crate) fn prev_set_seq_in_conn(
+        conn: &rusqlite::Connection,
+        folder_id: i64,
+        seq: i64,
+    ) -> Result<i64, StorageQuotaError> {
+        Ok(conn
+            .query_row(
+                "SELECT seq FROM sync_changes WHERE seq < ?2 AND folder_id = ?1
+                 ORDER BY seq DESC LIMIT 1",
+                rusqlite::params![folder_id, seq],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
+            .context("query the set's previous seq")?
+            .unwrap_or(0))
     }
 
     /// [`Self::record_sync_change_metered`]'s whole body, over a **caller-held**
@@ -6035,6 +6090,7 @@ impl CacheDb {
         intended: &[FolderRehomeRow],
         page: &[FolderRehomeSigned<'_>],
         max_storage_bytes: i64,
+        receipt: FolderReceipt<'_>,
     ) -> Result<FolderMaterializeOutcome, StorageQuotaError> {
         let owner = *owner;
         let device_id = *device_id;
@@ -6187,6 +6243,23 @@ impl CacheDb {
             rehomed += 1;
         }
         let remaining = (intended_by_path.len() as u64).saturating_sub(resumed + rehomed);
+        if remaining == 0 {
+            // The page that leaves nothing owed made the set live: its
+            // receipt commits with it (`backup-destinations.md` § Third
+            // destination kind → *A lived-in segment set is completed by
+            // record in the same gesture*, rule (2)).
+            super::materialize_receipts::receipt_put_in_tx(
+                &tx,
+                &owner,
+                receipt.set_name,
+                &super::materialize_receipts::MaterializeReceipt {
+                    ledger_generation: 0,
+                    manifest_anchor: receipt.anchor,
+                    materialized_at: receipt.now,
+                },
+            )
+            .map_err(StorageQuotaError::Db)?;
+        }
 
         tx.commit()
             .context("commit the folder materialize transaction")
@@ -6990,13 +7063,15 @@ impl CacheDb {
         .context("delete folder members for device")?;
         let members_removed = tx.changes() as i64;
 
-        // A removed device can never re-send or retry its skipped catch-up
-        // changes, so its unresolved `catchup_failed` reports leave the review
-        // list in this same transaction (`conflicts.md` § Skipped catch-up
-        // changes reach the review list → Lifecycle).
+        // A removed device can never re-send, retry or cure what it filed
+        // about itself — its skipped catch-up changes and its refused uploads —
+        // so those unresolved reports leave the review list in this same
+        // transaction (`conflicts.md` § Skipped catch-up changes reach the
+        // review list → Lifecycle; § Refused uploads reach the review list).
         tx.execute(
             "UPDATE sync_conflicts SET resolved_at = ?3
-             WHERE device_id = ?1 AND conflict_type = 'catchup_failed'
+             WHERE device_id = ?1
+               AND conflict_type IN ('catchup_failed', 'too_large_for_nest')
                AND resolved_at IS NULL
                AND folder_id IN (SELECT id FROM folders WHERE actor_id = ?2)",
             rusqlite::params![device_id, actor_id, now_epoch_secs()],
@@ -7486,17 +7561,20 @@ impl CacheDb {
             None
         };
         // Idempotent at the nest end (`conflicts.md` § Skipped catch-up changes
-        // reach the review list): the one report whose reporter re-sends by
-        // design answers the id already on record for the same (set, device,
-        // path) while that row is unresolved, and inserts nothing.
-        if conflict_type == "catchup_failed" && resolution.is_none() {
+        // reach the review list; § Refused uploads reach the review list): the
+        // reports whose reporter re-sends by design — the device-reported
+        // types — answer the id already on record for the same (set, device,
+        // path, type) while that row is unresolved, and insert nothing.
+        if fauna_protocol::folders::DEVICE_REPORTED_CONFLICT_TYPES.contains(&conflict_type.as_str())
+            && resolution.is_none()
+        {
             let existing: Option<i64> = tx
                 .query_row(
                     "SELECT id FROM sync_conflicts
                      WHERE folder_id = ?1 AND device_id = ?2 AND path_hash = ?3
-                       AND conflict_type = 'catchup_failed' AND resolved_at IS NULL
+                       AND conflict_type = ?4 AND resolved_at IS NULL
                      ORDER BY id LIMIT 1",
-                    rusqlite::params![folder_id, device_id, path_hash.as_slice()],
+                    rusqlite::params![folder_id, device_id, path_hash.as_slice(), conflict_type],
                     |row| row.get(0),
                 )
                 .optional()
@@ -12350,6 +12428,16 @@ mod tests {
         // Once resolved, a fresh report is a new row.
         assert!(db.resolve_conflict(&owner, first).await.unwrap());
         assert_ne!(report(dev_a, "a.txt", "catchup_failed").await, first);
+
+        // The refused upload is device-reported too (`conflicts.md` § Refused
+        // uploads reach the review list): deduped per (set, device, path), and
+        // never folded into a `catchup_failed` row on the same path.
+        let refused = report(dev_a, "big.img", "too_large_for_nest").await;
+        assert_eq!(
+            report(dev_a, "big.img", "too_large_for_nest").await,
+            refused
+        );
+        assert_ne!(report(dev_a, "big.img", "catchup_failed").await, refused);
     }
 
     /// Removing a device resolves its unresolved `catchup_failed` rows in the
@@ -12365,6 +12453,7 @@ mod tests {
         for (device, path, kind) in [
             (gone, "a.txt", "catchup_failed"),
             (gone, "b.txt", "modify-modify"),
+            (gone, "big.img", "too_large_for_nest"),
             (kept, "a.txt", "catchup_failed"),
         ] {
             db.report_conflict(
@@ -12387,7 +12476,7 @@ mod tests {
                 .await
                 .unwrap()
                 .len(),
-            3
+            4
         );
 
         db.delete_device(&gone, &owner).await.unwrap();
@@ -12396,14 +12485,14 @@ mod tests {
         assert_eq!(
             open.len(),
             2,
-            "only the deleted device's catchup_failed row resolves"
+            "only the deleted device's device-reported rows resolve"
         );
         assert_eq!(
             db.list_conflicts_for_actor(&owner, true)
                 .await
                 .unwrap()
                 .len(),
-            3
+            4
         );
     }
 
@@ -13299,5 +13388,94 @@ impl CacheDb {
             .await
             .execute("UPDATE folders SET name = '' WHERE id = ?1", [folder_id])
             .expect("blank folder name");
+    }
+}
+
+/// The record reply's `prev_set_seq` (`docs/goal/behavior/conflicts.md` § the
+/// causal watermark, *An edit stamp reaches across the writer's own
+/// acknowledged run*): the newest row of the SAME set below the assigned seq.
+/// The nest's one seq counter spans every set, so the answer must skip a
+/// foreign set's rows interleaved between — that is the whole reason the
+/// writer cannot work it out from the numbers itself.
+#[cfg(test)]
+mod prev_set_seq_tests {
+    use super::RecordedSeq;
+    use crate::db::CacheDb;
+
+    async fn record(db: &CacheDb, owner: &[u8; 32], folder_id: i64, path: &str) -> RecordedSeq {
+        let path_hash = *blake3::hash(path.as_bytes()).as_bytes();
+        let manifest = *blake3::hash(format!("m:{path}:{folder_id}").as_bytes()).as_bytes();
+        db.record_sync_change_metered_signed(
+            owner,
+            owner,
+            None,
+            &path_hash,
+            Some(&manifest),
+            10,
+            "create",
+            folder_id,
+            &[0xD1u8; 32],
+            None,
+            None,
+            None,
+            Some(b"seal"),
+            None,
+            None,
+            i64::MAX,
+            None,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_first_row_of_a_set_answers_zero_and_a_foreign_sets_rows_are_skipped() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let owner = [0x52u8; 32];
+        db.create_user(&owner, "free", "owner").await.unwrap();
+        let mine = db.create_folder("mine", &owner).await.unwrap();
+        let other = db.create_folder("other", &owner).await.unwrap();
+
+        let first = record(&db, &owner, mine, "a.txt").await;
+        assert_eq!(
+            first.prev_set_seq, 0,
+            "the set's first row has none below it"
+        );
+
+        let second = record(&db, &owner, mine, "b.txt").await;
+        assert_eq!(
+            second.prev_set_seq, first.seq,
+            "an unbroken run answers its own predecessor"
+        );
+
+        let foreign = record(&db, &owner, other, "x.txt").await;
+        assert_eq!(
+            foreign.prev_set_seq, 0,
+            "the other set's first row answers 0, not mine's"
+        );
+
+        let third = record(&db, &owner, mine, "c.txt").await;
+        assert!(third.seq > foreign.seq, "one counter across every set");
+        assert_eq!(
+            third.prev_set_seq, second.seq,
+            "the foreign row between is skipped: the answer is this set's newest below"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_content_identical_replay_answers_the_existing_rows_predecessor() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let owner = [0x53u8; 32];
+        db.create_user(&owner, "free", "owner").await.unwrap();
+        let mine = db.create_folder("mine", &owner).await.unwrap();
+
+        let first = record(&db, &owner, mine, "a.txt").await;
+        let second = record(&db, &owner, mine, "b.txt").await;
+        let replay = record(&db, &owner, mine, "b.txt").await;
+        assert_eq!(
+            replay, second,
+            "a replay answers the same seq and the same predecessor"
+        );
+        assert_eq!(replay.prev_set_seq, first.seq);
     }
 }

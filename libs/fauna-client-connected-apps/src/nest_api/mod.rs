@@ -39,6 +39,16 @@ fauna_core::declare_api_error!(
         Unavailable,
         /// Transport fault / 5xx / any other refusal — retryable.
         Transient,
+        /// The account store this read crosses has not listed the account yet
+        /// — the transient state right after sign-in, or a sibling device must
+        /// act first (`fauna_client_config::StoreError::is_not_ready`). The
+        /// detail is the user-voice reason key the store seam names for it
+        /// (`common.needs_nest` / `common.needs_other_device`,
+        /// `StoreError::not_ready_reason`), never the store's raw text: the
+        /// page shows nothing while it waits the state out, and that reason
+        /// only if the state outlasts the wait (`account-client-lifecycle.md`
+        /// § The client-side lifecycle → *The first listing*, clause (4)).
+        NotReady,
     }
 );
 

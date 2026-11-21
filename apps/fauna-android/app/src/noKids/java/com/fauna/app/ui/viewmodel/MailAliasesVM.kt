@@ -106,7 +106,12 @@ class MailAliasesVM @Inject constructor(
     fun hideAudit() = dispatch(MailAliasesAction.HideAudit)
 
     private fun dispatch(action: MailAliasesAction) {
-        val m = machine ?: return
+        // Rule 7 (ui/README.md § Offer only what is possible): a gesture whose
+        // machine was never built says so on `error-message`, never silently.
+        val m = machine ?: run {
+            errorMessage.value = api.mailUnbuiltRefusal()
+            return
+        }
         viewModelScope.launch {
             try {
                 m.dispatch(action)

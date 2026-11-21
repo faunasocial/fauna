@@ -102,6 +102,29 @@ impl Registrar for PorkbunRegistrar {
         Ok(())
     }
 
+    /// `POST /domain/updateNs/{domain}` with the `ns` list (registry.md
+    /// § Delegation doors). Porkbun answers a refusal `status: "ERROR"`.
+    async fn set_nameservers(
+        &self,
+        client: &reqwest::Client,
+        domain: &str,
+        nameservers: &[String],
+    ) -> Result<(), ProvisionError> {
+        let mut body = self.auth_body();
+        body["ns"] = serde_json::json!(nameservers);
+        let resp = client
+            .post(format!("{}/domain/updateNs/{domain}", self.api_base))
+            .json(&body)
+            .send()
+            .await?;
+        let status = resp.status();
+        let parsed: PingResponse = resp.json().await.map_err(ProvisionError::parse)?;
+        if parsed.status != "SUCCESS" {
+            return Err(ProvisionError::provider(status.as_u16(), parsed.message));
+        }
+        Ok(())
+    }
+
     async fn check(
         &self,
         client: &reqwest::Client,

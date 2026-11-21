@@ -16,3 +16,17 @@ fun currentClipboardText(): String? {
         .getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     return cm.primaryClip?.getItemAt(0)?.text?.toString()
 }
+
+/**
+ * A Compose clipboard whose every write throws [message] — provided as
+ * `LocalClipboardManager` around a page so a test can drive the
+ * `common.copy_failed` path a real clipboard never takes under Robolectric.
+ */
+class FailingClipboard(private val message: String = "clipboard unavailable") :
+    androidx.compose.ui.platform.ClipboardManager {
+    override fun getText(): androidx.compose.ui.text.AnnotatedString? = null
+
+    override fun setText(annotatedString: androidx.compose.ui.text.AnnotatedString) {
+        throw IllegalStateException(message)
+    }
+}

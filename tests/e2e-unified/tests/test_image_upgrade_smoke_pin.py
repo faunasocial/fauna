@@ -48,7 +48,24 @@ case "$*" in
         esac
         echo "sha256:0123abcd"
         ;;
-    *"pull"*|*"run"*)
+    *"pull"*)
+        # `STUB_PULL` picks the registry's answer to the pull: `flaky` → a
+        # not-found the first time, then the image; `gone` → not-found every
+        # time; anything else → the smoke must never get this far.
+        case "$STUB_PULL" in
+            flaky)
+                if [ ! -e "$STUB_LOG.pulled" ]; then
+                    touch "$STUB_LOG.pulled"
+                    echo "Error response from daemon: failed to resolve reference x: not found" >&2
+                    exit 1
+                fi
+                exit 0 ;;
+            gone) echo "Error response from daemon: failed to resolve reference x: not found" >&2; exit 1 ;;
+        esac
+        echo "stub: unexpected $1" >&2
+        exit 9
+        ;;
+    *"run"*)
         # The smoke must never get this far in these cases.
         echo "stub: unexpected $1" >&2
         exit 9
@@ -59,7 +76,7 @@ exit 0
 
 
 def _run(
-    tmp_path: Path, inspect: str, previous_image: str | None = None
+    tmp_path: Path, inspect: str, previous_image: str | None = None, pull: str = ""
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -77,6 +94,7 @@ def _run(
     env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
     env["STUB_LOG"] = str(log)
     env["STUB_INSPECT"] = inspect
+    env["STUB_PULL"] = pull
     source = ["--previous-image", previous_image] if previous_image else ["--pin-file", str(pin)]
     proc = subprocess.run(
         ["bash", str(_SMOKE), "ghcr.io/faunasocial/nest:sha-1-amd64", *source],
@@ -124,3 +142,22 @@ def test_the_previous_image_boots_by_the_digest_it_resolved_to(tmp_path):
     assert "is ghcr.io/faunasocial/nest@sha256:0123abcd" in proc.stdout, proc.stdout
     assert "pull --platform linux/amd64 ghcr.io/faunasocial/nest@sha256:0123abcd" in docker_log, docker_log
     assert "expected-incompatible" not in proc.stdout + proc.stderr
+
+
+def test_a_pull_the_registry_answers_not_found_once_is_retried(tmp_path):
+    """GHCR answered the pull of a pinned build `not found` 0.7 s after
+    `imagetools inspect` had resolved the same tag, and the tag pulled again
+    later: a resolved image's pull is retried, so one registry miss never reds
+    the image leg."""
+    proc, docker_log = _run(tmp_path, "exists", "ghcr.io/faunasocial/nest:latest", pull="flaky")
+    assert docker_log.count("pull ") == 2, docker_log
+    assert "retrying" in proc.stderr, proc.stderr
+    # Past the pull: the boot ran (the stub refuses it, so the run stops there).
+    assert "run -d" in docker_log, docker_log
+
+
+def test_a_pull_that_never_resolves_still_fails_the_smoke(tmp_path):
+    proc, docker_log = _run(tmp_path, "exists", "ghcr.io/faunasocial/nest:latest", pull="gone")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert docker_log.count("pull ") >= 2, docker_log
+    assert "run -d" not in docker_log, docker_log

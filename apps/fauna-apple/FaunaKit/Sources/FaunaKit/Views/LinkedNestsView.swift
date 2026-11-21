@@ -124,12 +124,10 @@ public struct LinkedNestsView: View {
                 .onSubmit { submit() }
             HStack {
                 Button(L.nests.addSubmit) { submit() }
-                    .disabled(addInput.trimmingCharacters(in: .whitespaces).isEmpty)
                     .accessibilityIdentifier(Ids.nestsAddSubmitButton)
-                    .automationActivate(
-                        Ids.nestsAddSubmitButton,
-                        isEnabled: { !addInput.trimmingCharacters(in: .whitespaces).isEmpty }
-                    ) { submit() }
+                    .automationActivate(Ids.nestsAddSubmitButton) { submit() }
+                    // The shared draft answer (`nests.md` § Errors & edge cases).
+                    .faunaPossible(linkInputPossibility(raw: addInput))
                     // `LinkedNestsAction::Link` → `fauna.pair.add`. Arming is
                     // local: `nests-add-button` reveals this form and stays
                     // live, as do the input and the cancel beside it.
@@ -141,6 +139,7 @@ public struct LinkedNestsView: View {
                 .automationActivate(Ids.nestsAddCancelButton) { showingAddForm = false }
             }
             .controlSize(.small)
+            FaunaPossibilityReason(linkInputPossibility(raw: addInput))
         }
     }
 
@@ -176,8 +175,9 @@ public struct LinkedNestsView: View {
     }
 
     private func submit() {
+        // The press asks what the paint asked (rule 7).
+        if refusePress(linkInputPossibility(raw: addInput), errorMessage: &vm.errorMessage) { return }
         let raw = addInput.trimmingCharacters(in: .whitespaces)
-        guard !raw.isEmpty else { return }
         Task {
             await vm.submitLink(raw)
             // Close the form only when the link succeeded (no error came back),
@@ -562,17 +562,12 @@ private struct TrustGrantItemView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             // REQUIRED honest-bound copy (nests.md § Honest bound) — never
-            // over-promise past the honest bound. A bounded (content-sealing-epochs)
-            // mail grant gets the stronger, crypto-bounded wording WITH the honest
-            // INFO-A caveat; every other kind/regime keeps the standing
-            // trust-until-revoke wording (flip-checklist line 6). Never re-derive
-            // the (class, kind, tier) check here — the shared predicate is the
-            // single source of truth (priority #2).
+            // over-promise. The regime (materialization, bounded mail,
+            // standing) is picked by the shared `grant_bound_note`, never
+            // re-derived here (priority #2).
             automationText(
                 Ids.nestTrustGrantBoundNote,
-                trustScopeIsBoundedMailGrant(scope: grant.scope)
-                    ? L.nests.boundNoteBoundedMail
-                    : L.nests.boundNoteStanding
+                renderLocalizedText(FaunaFFISwift.grantBoundNote(scope: grant.scope))
             )
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -843,15 +838,41 @@ struct MintFlowView: View {
     /// label — unique per row (Mail/Calendar are singletons, PaywalledPosts is
     /// one per held tier), so it doubles as a stable selection key.
     @State private var selectedOptionLabel = ""
-    @State private var selectedHolderIndex = 0
-    /// "" = the row's default (`mintDefaultDuration`: standard on a blessed
-    /// nest, one-off otherwise) until the user picks; else the option's label.
+    /// The holder select's pick, `nil` until one is made — a use several
+    /// services can hold stays blocked until then (`nests.md` § Errors & edge
+    /// cases).
+    @State private var selectedHolderIndex: Int?
+    /// "" = the picked option's default (the shared
+    /// `mint_option_default_duration` over the row's `mintDefaultDuration`:
+    /// standard on a blessed nest, one-off otherwise) until the user picks a
+    /// duration; else that duration's label. A new scope pick resets it, so
+    /// every pick pre-selects its own option's default.
     @State private var selectedDurationLabel = ""
 
     private var durationOptions: [TrustGrantDuration] { mintDurationOptions() }
 
+    private var defaultDuration: TrustGrantDuration {
+        selectedOption.map {
+            FaunaFFISwift.mintOptionDefaultDuration(o: $0, rowDefault: row.mintDefaultDuration)
+        } ?? row.mintDefaultDuration
+    }
+
     private var selectedDuration: TrustGrantDuration {
-        Self.duration(picked: selectedDurationLabel, default: row.mintDefaultDuration)
+        Self.duration(picked: selectedDurationLabel, default: defaultDuration)
+    }
+
+    /// The picked option's mint-time note (the shared `mint_option_note` —
+    /// the materialization options' honesty copy, `capability-grants.md`
+    /// § Capability tiering → *The materialization grant*); nil (the note
+    /// absent) for an option that carries none. No per-kind branch here.
+    private var selectedOptionNote: String? {
+        selectedOption.flatMap(FaunaFFISwift.mintOptionNote(o:)).map(renderLocalizedText)
+    }
+
+    private func pickOption(_ label: String) {
+        selectedOptionLabel = label
+        selectedHolderIndex = nil
+        selectedDurationLabel = ""
     }
 
     /// The duration a mint sends: the option the user picked (by its rendered
@@ -872,7 +893,10 @@ struct MintFlowView: View {
                 .automationActivate(Ids.nestTrustGrantMintButton) { showForm = true }
 
             if showForm {
-                Picker(L.nests.mintScopePlaceholder, selection: $selectedOptionLabel) {
+                Picker(L.nests.mintScopePlaceholder, selection: Binding(
+                    get: { selectedOptionLabel },
+                    set: { pickOption($0) }
+                )) {
                     Text(L.nests.mintScopePlaceholder).tag("")
                     ForEach(row.mintOptions, id: \.self) { option in
                         Text(mintOptionLabel(option)).tag(mintOptionLabel(option))
@@ -890,21 +914,21 @@ struct MintFlowView: View {
                     Ids.nestTrustMintScopeSelect, value: { selectedOptionLabel },
                     options: { [L.nests.mintScopePlaceholder] + row.mintOptions.map(mintOptionLabel) }
                 ) { newValue in
-                    selectedOptionLabel = newValue
-                    selectedHolderIndex = 0
+                    pickOption(newValue)
                 }
 
                 if let option = selectedOption, option.holderCandidates.count > 1 {
                     Picker(L.nests.mintHolderPlaceholder, selection: $selectedHolderIndex) {
+                        Text(L.nests.mintHolderPlaceholder).tag(Int?.none)
                         ForEach(Array(option.holderCandidates.enumerated()), id: \.offset) { idx, candidate in
-                            Text(candidate).tag(idx)
+                            Text(candidate).tag(Int?.some(idx))
                         }
                     }
                     .labelsHidden()
                     .pickerStyle(.menu)
                     .accessibilityIdentifier(Ids.nestTrustMintHolderSelect)
                     .automationSelect(
-                        Ids.nestTrustMintHolderSelect, value: { String(selectedHolderIndex) }
+                        Ids.nestTrustMintHolderSelect, value: { selectedHolderIndex.map(String.init) ?? "" }
                     ) { newValue in
                         if let idx = Int(newValue) { selectedHolderIndex = idx }
                     }
@@ -931,17 +955,29 @@ struct MintFlowView: View {
                     selectedDurationLabel = newValue
                 }
 
+                // Read BEFORE the confirm: present exactly while the picked
+                // option carries a note (`nests.md` § Mint → *The
+                // materialization option*).
+                if let note = selectedOptionNote {
+                    automationText(Ids.nestTrustMintMaterializeNote, note)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 Button(L.nests.mintConfirm) { confirmMint() }
                     .controlSize(.small)
-                    .disabled(selectedOption == nil)
                     .accessibilityIdentifier(Ids.nestTrustMintConfirmButton)
-                    .automationActivate(
-                        Ids.nestTrustMintConfirmButton, isEnabled: { selectedOption != nil }
-                    ) { confirmMint() }
+                    .automationActivate(Ids.nestTrustMintConfirmButton) { confirmMint() }
+                    // The shared draft answer: blocked until a use — and, for a
+                    // use several services can hold, its holder — is picked
+                    // (`nests.md` § Errors & edge cases).
+                    .faunaPossible(mintAnswer)
                     // Arming is local: `nest-trust-grant-mint-button` reveals
                     // this form and the two scope/holder pickers are buffer —
                     // only the confirm deposits the sealed grant.
                     .faunaGate("fauna.capabilities.mint")
+                FaunaPossibilityReason(mintAnswer)
             }
         }
         .padding(.top, 2)
@@ -950,19 +986,35 @@ struct MintFlowView: View {
     /// Derived holder: the single candidate; ambiguity → the holder select's
     /// pick (visible iff >1 candidate). Resets the form on dispatch — the
     /// machine re-render supplies the fresh grant list.
+    /// The holder select's pick as the shared `mint_holder` reads it.
+    private var pickedHolder: String? {
+        guard let option = selectedOption, let idx = selectedHolderIndex,
+              option.holderCandidates.indices.contains(idx) else { return nil }
+        return option.holderCandidates[idx]
+    }
+
+    /// `nest-trust-mint-confirm-button`'s shared draft answer.
+    private var mintAnswer: Possibility {
+        mintDraftPossibility(option: selectedOption, pickedHolder: pickedHolder)
+    }
+
+    /// The press asks the shared answer, the holder resolved by the shared
+    /// `mint_holder` (the single candidate, else the select's pick); the form
+    /// closes only once the mint went through — a refused or failed mint keeps
+    /// it open with what was picked, the failure on `error-message`.
     private func confirmMint() {
-        guard let option = selectedOption else { return }
-        let holderBridgeId = option.holderCandidates.count > 1
-            ? option.holderCandidates[selectedHolderIndex]
-            : option.holderCandidates[0]
+        if refusePress(mintAnswer, errorMessage: &vm.errorMessage) { return }
+        guard let option = selectedOption,
+              let holderBridgeId = mintHolder(option: option, picked: pickedHolder) else { return }
         let duration = selectedDuration
         Task {
             await vm.dispatch(.mint(nestId: row.nestId, holderBridgeId: holderBridgeId, scope: option.scope, duration: duration))
+            guard vm.errorMessage == nil else { return }
+            showForm = false
+            selectedDurationLabel = ""
+            selectedOptionLabel = ""
+            selectedHolderIndex = nil
         }
-        showForm = false
-        selectedDurationLabel = ""
-        selectedOptionLabel = ""
-        selectedHolderIndex = 0
     }
 }
 

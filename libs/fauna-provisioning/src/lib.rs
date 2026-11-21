@@ -8,6 +8,7 @@ pub mod cloud_init;
 pub mod dispatch;
 pub mod dkim;
 pub mod dns;
+pub mod dns_plan;
 pub mod error;
 mod money;
 pub mod namecheap_api;
@@ -27,6 +28,7 @@ pub mod registrar;
 /// The DNS-cleanup plan for retiring a box (`behavior/nest-retirement.md`
 /// § DNS cleanup) — the inverse of `orchestrator::build_records`.
 pub mod retire_dns;
+pub mod spaceship_api;
 /// The SSH door's admin-device half: the door key and its `~/.ssh` install
 /// (`installers/vps.md` § The SSH door → *The key*).
 pub mod ssh_door;

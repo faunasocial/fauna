@@ -31,6 +31,13 @@
 //! `connect` answer and once on stderr ([`UNATTENDED_CUSTODY`];
 //! `apps/cli.md` § The device shell → *Credentials*). The sealed passphrase
 //! arm is tui's: this process has no surface to ask for one.
+//!
+//! **What it lists.** Each account's granted scope — the token answer's
+//! `scope` — rests in its slot beside its keys, so [`Host::reach`] answers
+//! what the held connections reach from the first `tools/list` after a
+//! relaunch; every slot change wakes [`Host::reach_changed`], and the stdio
+//! transport announces the listing's change (`apps/cli.md` § A tool that
+//! cannot run, rule 2).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -39,13 +46,15 @@ use fauna_anon_client::PrincipalNestClient;
 use fauna_cli::catalog::consent_scope;
 use fauna_cli::device::{DeviceClient, DeviceStart, DpopKey, HolderKey, Issuer, Poll, Tokens};
 use fauna_cli::door::DoorIdentity;
-use fauna_cli::tools::{ConnectStarted, ConversationOp, ToolData, UNATTENDED_CUSTODY};
-use fauna_cli::{Host, SessionUnavailable, ToolError};
+use fauna_cli::tools::{
+    ADMIN_CONSENT_EXPIRED, ConnectStarted, ConversationOp, ToolData, UNATTENDED_CUSTODY,
+};
+use fauna_cli::{Host, Reach, SessionUnavailable, ToolError};
 use fauna_client_accounts::SecretStore as _;
 use fauna_credential_store::{CredentialStore, MAX_ITEM_VALUE_BYTES};
 use fauna_protocol::discovery::{SetupStatusReply, SetupStatusRequest};
 use fauna_protocol::principals::CLI_CLIENT_ID;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 /// This app's credential namespace. tui used this name before its 2026-07-12
 /// rename, so a box that dogfooded tui then may still hold that era's keys
@@ -61,6 +70,8 @@ const LEAF_CLIENT_ID: &str = "client_id";
 const LEAF_DPOP: &str = "dpop";
 const LEAF_HOLDER: &str = "holder";
 const LEAF_REFRESH: &str = "refresh";
+/// The granted scope, space-separated, as the last token answer named it.
+const LEAF_SCOPE: &str = "scope";
 
 /// The store key of one account's slot item.
 fn slot_key(account: &str, leaf: &str) -> String {
@@ -97,6 +108,8 @@ struct Connected {
     /// on every grant and rotation; what the shell names itself by at the
     /// conversations door.
     principal_id: Option<String>,
+    /// The granted scope the token answer named; `None` when it named none.
+    scope: Option<Vec<String>>,
 }
 
 enum Slot {
@@ -104,6 +117,8 @@ enum Slot {
     Stored,
     Pending {
         user_code: String,
+        /// The consent asked for the admin arms.
+        admin: bool,
     },
     Connected(Connected),
     Failed(String),
@@ -120,7 +135,24 @@ struct Held {
     /// possession proof opens under it. Read from the slot on first use after
     /// a relaunch.
     holder: Option<Arc<HolderKey>>,
+    /// The granted scope the slot rests with — what a [`Slot::Stored`]
+    /// account reaches before it is dialled, and a connected one whose last
+    /// token answer named none.
+    stored_scope: Option<Vec<String>>,
     slot: Slot,
+}
+
+impl Held {
+    /// The granted scope this account reaches with, while it holds a
+    /// connection; `Some(None)` for a held connection whose scope is unknown,
+    /// `None` for one pending or failed, which reaches nothing yet.
+    fn reach(&self) -> Option<Option<Vec<String>>> {
+        match &self.slot {
+            Slot::Stored => Some(self.stored_scope.clone()),
+            Slot::Connected(c) => Some(c.scope.clone().or_else(|| self.stored_scope.clone())),
+            Slot::Pending { .. } | Slot::Failed(_) => None,
+        }
+    }
 }
 
 /// One index line's two fields.
@@ -179,6 +211,8 @@ pub struct DeviceHost {
     http: reqwest::Client,
     store: Option<Arc<CredentialStore>>,
     held: Arc<Mutex<Vec<Held>>>,
+    /// Woken on every slot change — what [`Host::reach_changed`] awaits.
+    changed: Arc<Notify>,
 }
 
 fn config_dir() -> Option<std::path::PathBuf> {
@@ -212,6 +246,10 @@ impl DeviceHost {
             .unwrap_or_default()
             .into_iter()
             .map(|e| Held {
+                stored_scope: store
+                    .as_ref()
+                    .and_then(|store| store.get(&slot_key(&e.account, LEAF_SCOPE)))
+                    .map(|scope| fauna_cli::reach::parse_scope(&scope)),
                 handle: e.handle,
                 account: Some(e.account),
                 holder: None,
@@ -222,6 +260,7 @@ impl DeviceHost {
             http: reqwest::Client::new(),
             store,
             held: Arc::new(Mutex::new(held)),
+            changed: Arc::new(Notify::new()),
         }
     }
 
@@ -262,6 +301,7 @@ impl DeviceHost {
     /// `held`'s live session, resuming or rotating it first when it needs it.
     async fn ready(&self, held: &mut Held) -> Result<Arc<PrincipalNestClient>, SessionUnavailable> {
         if matches!(held.slot, Slot::Stored) {
+            self.changed.notify_one();
             let account = held.account.clone().unwrap_or_default();
             held.slot = match self.resume(&account).await {
                 Ok(connected) => Slot::Connected(connected),
@@ -276,8 +316,14 @@ impl DeviceHost {
         }
         match &mut held.slot {
             Slot::Stored => unreachable!("resumed above"),
-            Slot::Pending { user_code } => Err(SessionUnavailable::Pending {
-                user_code: user_code.clone(),
+            Slot::Pending { user_code, admin } => Err(if *admin {
+                SessionUnavailable::PendingAdmin {
+                    user_code: user_code.clone(),
+                }
+            } else {
+                SessionUnavailable::Pending {
+                    user_code: user_code.clone(),
+                }
             }),
             Slot::Failed(why) => Err(SessionUnavailable::Failed(why.clone())),
             Slot::Connected(connected) => {
@@ -293,6 +339,7 @@ impl DeviceHost {
                     Ok(tokens) => dial(device, tokens, self.store.clone()).await,
                     Err(why) => Err(why),
                 };
+                self.changed.notify_one();
                 match renewed {
                     Ok(fresh) => {
                         let session = fresh.session.clone();
@@ -396,6 +443,10 @@ async fn dial(
     if let (Some(refresh), Some(account)) = (&tokens.refresh_token, &tokens.sub) {
         persist(&store, &slot_key(account, LEAF_REFRESH), refresh);
     }
+    if let (Some(scope), Some(account)) = (&tokens.scope, &tokens.sub) {
+        persist(&store, &slot_key(account, LEAF_SCOPE), scope);
+    }
+    let scope = tokens.granted();
     Ok(Connected {
         device,
         session: Arc::new(session),
@@ -405,15 +456,20 @@ async fn dial(
             .expires_in
             .map(|s| Instant::now() + Duration::from_secs(s)),
         principal_id: tokens.principal_id,
+        scope,
     })
 }
 
 /// Poll the typed-code start until it ends, then dial; the account id the
 /// token answer named rides along.
+///
+/// `admin` is whether the consent asked for the admin arms: its expiry then
+/// names the way out, since a member's approval of it resolves nothing.
 async fn await_approval(
     device: Arc<DeviceClient>,
     start: DeviceStart,
     store: Option<Arc<CredentialStore>>,
+    admin: bool,
 ) -> Result<(Connected, Option<String>), String> {
     let deadline = Instant::now() + Duration::from_secs(start.expires_in);
     let mut interval = Duration::from_secs(start.interval.max(1));
@@ -421,23 +477,47 @@ async fn await_approval(
         // The interval is the protocol's own pacing (RFC 8628 §3.5), the nest's
         // number — polling faster earns `slow_down`.
         tokio::time::sleep(interval).await;
-        if Instant::now() >= deadline {
-            return Err("the code expired before it was approved — call connect again".into());
-        }
+        // At the deadline the code is polled once more before it is called
+        // expired: an approval that landed since the last poll still connects,
+        // so the expiry never tells an admin who approved late that their
+        // account administers nothing.
+        let last = Instant::now() >= deadline;
         match device.poll(&start.device_code).await? {
-            Poll::Pending => {}
-            Poll::SlowDown => interval += Duration::from_secs(5),
             Poll::Tokens(tokens) => {
                 let account = tokens.sub.clone();
                 return Ok((dial(device, tokens, store).await?, account));
             }
+            _ if last => return Err(expired(admin)),
+            Poll::Pending => {}
+            Poll::SlowDown => interval += Duration::from_secs(5),
             Poll::Refused(why) => return Err(format!("the connection was not approved: {why}")),
         }
     }
 }
 
+/// What a consent whose code expired before approval answers.
+fn expired(admin: bool) -> String {
+    if admin {
+        ADMIN_CONSENT_EXPIRED.into()
+    } else {
+        "the code expired before it was approved — call connect again".into()
+    }
+}
+
 impl Host for DeviceHost {
     type Rpc = Arc<PrincipalNestClient>;
+
+    async fn reach(&self) -> Reach {
+        Reach::of(self.held.lock().await.iter().filter_map(Held::reach))
+    }
+
+    async fn reach_changed(&self) {
+        self.changed.notified().await
+    }
+
+    fn conversations_door(&self) -> bool {
+        true
+    }
 
     async fn session(&self, account: Option<&str>) -> Result<Self::Rpc, SessionUnavailable> {
         let mut held = self.held.lock().await;
@@ -621,6 +701,7 @@ impl Host for DeviceHost {
             let mut held = self.held.lock().await;
             let pending = Slot::Pending {
                 user_code: start.user_code.clone(),
+                admin,
             };
             match held
                 .iter_mut()
@@ -634,21 +715,25 @@ impl Host for DeviceHost {
                     handle: handle.clone(),
                     account: None,
                     holder: Some(holder),
+                    stored_scope: None,
                     slot: pending,
                 }),
             }
+            self.changed.notify_one();
         }
         let held = self.held.clone();
         let store = self.store.clone();
+        let changed = self.changed.clone();
         let own_code = start.user_code.clone();
         tokio::spawn(async move {
-            let outcome = await_approval(device, start, store.clone()).await;
+            let outcome = await_approval(device, start, store.clone(), admin).await;
             let mut held = held.lock().await;
+            changed.notify_one();
             // Only this start's own pending entry is this poll's to settle: a
             // later `connect` for the same handle replaced it, and an earlier
             // code expiring must not turn the newer connection into a failure.
             let Some(i) = held.iter().position(
-                |h| matches!(&h.slot, Slot::Pending { user_code } if *user_code == own_code),
+                |h| matches!(&h.slot, Slot::Pending { user_code, .. } if *user_code == own_code),
             ) else {
                 return;
             };
@@ -682,11 +767,22 @@ impl Host for DeviceHost {
 mod tests {
     use super::*;
 
+    /// An admin consent's expiry names the way out; a member's keeps its own.
+    #[test]
+    fn an_admin_consent_that_expires_names_connect_without_admin() {
+        let admin = expired(true);
+        assert!(admin.starts_with("The code expired before the connection was approved. "));
+        assert!(admin.contains("without admin: true"), "{admin}");
+        assert!(admin.contains("does not administer its server"), "{admin}");
+        assert!(!expired(false).contains("admin"));
+    }
+
     fn held(handle: &str, account: Option<&str>) -> Held {
         Held {
             handle: handle.into(),
             account: account.map(str::to_owned),
             holder: None,
+            stored_scope: None,
             slot: Slot::Stored,
         }
     }

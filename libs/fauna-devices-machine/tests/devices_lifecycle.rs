@@ -1079,6 +1079,94 @@ async fn rename_device_to_the_same_name_is_a_no_op_and_a_reserved_name_is_refuse
     );
 }
 
+/// `rename_possibility` is the save's draft answer (`ui/README.md` § Offer
+/// only what is possible, rule 4): every refusal `rename_device` makes at
+/// submit is the same answer before it, with the same reason; and
+/// `save_device_name` says whether the editor may close.
+#[tokio::test]
+async fn rename_possibility_answers_before_the_save_and_the_save_says_if_it_went() {
+    use fauna_core::localized::LocalizedText;
+    use fauna_core::possibility::Possibility;
+    let (m, nest, _) = setup();
+    nest.set_devices(vec![device("aa", "fauna-tui")]);
+    m.refresh().await;
+    let laptop = "aa".repeat(32);
+    let blocked = |key: &str| Possibility::blocked(LocalizedText::key(key));
+
+    assert_eq!(
+        m.rename_possibility(&"cc".repeat(32), "desk"),
+        Possibility::Absent
+    );
+    assert_eq!(
+        m.rename_possibility(&laptop, "desk"),
+        blocked("devices.error_rename_needs_key"),
+        "no owner key: nothing could be sealed"
+    );
+    assert!(!m.save_device_name(laptop.clone(), "desk".into()).await);
+
+    m.set_label_custody(fauna_core::label_custody::LabelCustody::owner_only(
+        fauna_core::crypto::BackupKey::from_bytes([7u8; 32]),
+    ));
+    assert_eq!(
+        m.rename_possibility(&laptop, "  "),
+        blocked("devices.rename_blank")
+    );
+    assert!(!m.save_device_name(laptop.clone(), "  ".into()).await);
+    assert_eq!(
+        m.snapshot().error.expect("a blank save says why").key,
+        "devices.rename_blank"
+    );
+    assert_eq!(
+        m.rename_possibility(&laptop, "fauna-ios"),
+        blocked("devices.error_rename_reserved_name")
+    );
+    assert_eq!(
+        m.rename_possibility(&laptop, " fauna-tui "),
+        Possibility::Possible
+    );
+    assert!(
+        m.save_device_name(laptop.clone(), "fauna-tui".into()).await,
+        "the unchanged name sends nothing and closes the editor"
+    );
+    assert_eq!(m.rename_possibility(&laptop, "desk"), Possibility::Possible);
+    assert!(m.save_device_name(laptop, "desk".into()).await);
+    assert_eq!(nest.calls().len(), 1);
+}
+
+/// The nest's WebDAV pseudo-device row is never the user's to name — the nest
+/// refuses its rename (`devices.md` § Device names) — so no rename is offered
+/// on it at all (`ui/README.md` § Offer only what is possible: what this person
+/// can never do here is not shown): `rename_possibility` answers Absent for it
+/// whatever the draft, and the save sends nothing.
+#[tokio::test]
+async fn the_webdav_pseudo_device_row_offers_no_rename() {
+    use fauna_core::possibility::Possibility;
+    let (m, nest, _) = setup();
+    m.set_label_custody(fauna_core::label_custody::LabelCustody::owner_only(
+        fauna_core::crypto::BackupKey::from_bytes([7u8; 32]),
+    ));
+    nest.set_devices(vec![
+        device("aa", "fauna-tui"),
+        device("dd", fauna_core::label_custody::WEBDAV_PSEUDO_DEVICE_LABEL),
+    ]);
+    m.refresh().await;
+    let webdav = "dd".repeat(32);
+
+    assert_eq!(m.rename_possibility(&webdav, "WebDAV"), Possibility::Absent);
+    assert_eq!(m.rename_possibility(&webdav, "desk"), Possibility::Absent);
+    assert!(!m.save_device_name(webdav, "desk".into()).await);
+    assert_eq!(
+        nest.calls(),
+        vec![],
+        "nothing is sent for the pseudo-device"
+    );
+    assert_eq!(
+        m.rename_possibility(&"aa".repeat(32), "fauna-tui"),
+        Possibility::Possible,
+        "an app-default name on a real device stays renameable"
+    );
+}
+
 /// The fleet-scope removal leg (`devices.md` § Removing a Device): the target
 /// is whatever the door RESOLVES from client-held truth for the chosen row —
 /// never the principal the nest put on that row. Here the nest pairs the

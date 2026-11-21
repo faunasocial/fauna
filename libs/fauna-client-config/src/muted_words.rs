@@ -75,3 +75,41 @@ impl MutedWordsSnapshot {
         self.keywords.iter().map(|k| k.keyword.clone()).collect()
     }
 }
+
+/// The reason `muted-word-add-button` gives over a blank term.
+pub const MUTED_WORD_TERM_REQUIRED: &str = "muted_words.term_required";
+
+/// `muted-word-add-button`'s answer (`docs/goal/ui/README.md` § Offer only
+/// what is possible, rule 4; the ruling is `docs/goal/ui/settings.md`
+/// § Errors & edge cases): a term to mute, and no earlier change still on its
+/// way. The press asks it again and refuses with the same reason.
+pub fn muted_word_add_possibility(term: &str, busy: bool) -> fauna_core::possibility::Possibility {
+    use fauna_core::localized::LocalizedText;
+    use fauna_core::possibility::Possibility;
+    if term.trim().is_empty() {
+        return Possibility::blocked(LocalizedText::key(MUTED_WORD_TERM_REQUIRED));
+    }
+    if busy {
+        return Possibility::blocked(LocalizedText::key("common.in_flight"));
+    }
+    Possibility::Possible
+}
+
+#[cfg(test)]
+mod add_possibility_tests {
+    use super::*;
+
+    #[test]
+    fn adding_needs_a_term_and_no_change_in_flight() {
+        let key = |p: fauna_core::possibility::Possibility| p.reason().map(|r| r.key.clone());
+        assert_eq!(
+            key(muted_word_add_possibility("  ", false)),
+            Some(MUTED_WORD_TERM_REQUIRED.into())
+        );
+        assert_eq!(
+            key(muted_word_add_possibility("spoiler", true)),
+            Some("common.in_flight".into())
+        );
+        assert!(muted_word_add_possibility(" spoiler ", false).is_possible());
+    }
+}

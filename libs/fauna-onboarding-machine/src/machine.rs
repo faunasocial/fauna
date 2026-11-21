@@ -289,6 +289,40 @@ struct MintedSshDoor {
 }
 
 impl OnboardingMachine {
+    /// An app's handling of a machine call's result, so no refusal is ever
+    /// dropped (`docs/goal/ui/README.md` § Offer only what is possible, rule
+    /// 7). The machine puts its own refusals on the shared `error_message`
+    /// that `error-message` paints ([`Self::refuse_with`]); an `Err` that
+    /// arrives without one is put there, so no refusal of any kind is
+    /// silent. Returns the value on success. Every Rust app routes a
+    /// gesture's call through this instead of `let _ =` (generic, so it lives
+    /// in a plain `impl` block outside every FFI export).
+    pub fn surface<T, E: std::fmt::Display>(&self, result: Result<T, E>) -> Option<T> {
+        match result {
+            Ok(v) => Some(v),
+            Err(e) => {
+                if self.error_message().is_none() {
+                    self.set_error_message(e.to_string());
+                }
+                None
+            }
+        }
+    }
+
+    /// A refusal that is never silent (`docs/goal/ui/README.md` § Offer only
+    /// what is possible, rule 7): `why`, resolved through the generated string
+    /// table, goes on the shared `error_message` every app's `error-message`
+    /// reads — so an app that drops the returned `Err` still shows the reason
+    /// — and the same sentence is the error's reason.
+    pub(crate) fn refuse_with(&self, from: &str, why: LocalizedText) -> OnboardingError {
+        let line = why.resolve_nested(fauna_i18n::strings::lookup);
+        self.mutate(|s| s.set_error(line.clone()));
+        OnboardingError::InvalidTransition {
+            from: from.into(),
+            reason: line,
+        }
+    }
+
     /// The door for a run on `domain`: `None` with the toggle off; else the key
     /// this wizard already minted for `domain` (a retried run must render the
     /// key the box may already carry), or a fresh one — written to the
@@ -408,6 +442,9 @@ pub struct OnboardingMachine {
     /// `with_nest_api(observer, Arc<FakeNestApi>)`.
     pub(crate) nest_api: Arc<dyn crate::nest_api::NestApi>,
     handle_check: Mutex<HandleCheckSnapshot>,
+    /// The `nest_provisioning` page's DNS plan (onboarding-provisioning.md § 6
+    /// *The DNS plan*), filled by [`Self::refresh_dns_plan`].
+    dns_plan: Mutex<crate::snapshots::DnsPlanSnapshot>,
     /// The registered-probe's `VerifyReply::first_sign_in`, beside
     /// `handle_check` rather than on `HandleCheckOutcome::AlreadyOnNest` — the
     /// snapshot's outcome is matched exhaustively by the app shells. Written
@@ -553,10 +590,11 @@ pub struct OnboardingMachine {
     /// Never in the snapshot.
     ssh_door: Mutex<Option<MintedSshDoor>>,
     /// `hosted-auth` sign-ins in flight between [`Self::hosted_auth_begin`]
-    /// and [`Self::hosted_auth_wait`], keyed by (form, field id). The RFC 8628
-    /// `device_code` is a bearer-like secret the app never needs, so it lives
-    /// here and never in the snapshot.
-    hosted_auth_pending: Mutex<HashMap<(CredentialForm, String), PendingDeviceAuth>>,
+    /// and [`Self::hosted_auth_wait`] (or their provider-dialog twins), keyed
+    /// by (credential bag, field id). The RFC 8628 `device_code` is a
+    /// bearer-like secret the app never needs, so it lives here and never in
+    /// the snapshot.
+    hosted_auth_pending: Mutex<HashMap<(HostedAuthSlot, String), PendingDeviceAuth>>,
     /// The app's age claim for the admission ahead (`family-safety.md` § The
     /// account age band) — rides the invite-request submit and the register
     /// bodies verbatim. Set by the mobile apps from their store age signal
@@ -709,6 +747,16 @@ impl OnboardingMachine {
     /// Start [`Self::probe_channel_availability`] in the background on entering
     /// `vps_config` ([`fauna_sleep::spawn_background`]: the machine's own
     /// runtime, whatever the caller's).
+    /// Read the zone and plan the DNS records in the background — run by the
+    /// machine itself whenever it enters `nest_provisioning`, so no app owes a
+    /// page-entry hook (onboarding-provisioning.md § 6 *The DNS plan*).
+    pub(crate) fn spawn_dns_plan_refresh(&self) {
+        let Some(me) = self.self_ref.upgrade() else {
+            return;
+        };
+        fauna_sleep::spawn_background(async move { me.refresh_dns_plan().await });
+    }
+
     pub(crate) fn spawn_channel_probe(&self) {
         let Some(me) = self.self_ref.upgrade() else {
             return;
@@ -825,6 +873,7 @@ impl OnboardingMachine {
         let listed = vps_dispatch
             .list_server_types(&self.http, &curated_offers_for(&pid), &location)
             .await;
+        let mail = self.provision_mail_mode_enabled();
         self.mutate(|s| {
             let current = s.vps.selected_provider_id.as_deref() == Some(pid.as_str())
                 && s.vps.selected_location_id.as_deref() == Some(location.as_str());
@@ -840,7 +889,13 @@ impl OnboardingMachine {
                         .as_ref()
                         .is_none_or(|sel| s.vps.server_types.iter().any(|t| &t.id == sel));
                     if !kept {
-                        s.vps.selected_server_type_id = None;
+                        // Reached from the choose-providers page, a dropped
+                        // type is re-chosen by the default rule (§ 3d).
+                        s.vps.selected_server_type_id = if s.providers.provisioning_from_providers {
+                            crate::provider_choice::default_server_type(&s.vps.server_types, mail)
+                        } else {
+                            None
+                        };
                     }
                     self.vps_offers_listing.lock().unwrap().listed_for = Some(location.clone());
                 }
@@ -853,6 +908,14 @@ impl OnboardingMachine {
     /// `provider_base_urls["vps"]` E2E override so verify and the offer
     /// listing hit the fake instead of the live cloud API (mirrors
     /// `run_provisioning_inner`; `None` in production).
+    /// Record that the server offers held in `vps` state were listed for
+    /// `location`, so a later [`Self::select_vps_location`] of that location
+    /// lists nothing again — `continue_from_providers` writes offers its
+    /// connect already listed.
+    pub(crate) fn note_vps_offers_listed_for(&self, location: Option<String>) {
+        self.vps_offers_listing.lock().unwrap().listed_for = location;
+    }
+
     fn vps_dispatch_for(
         &self,
         pid: &str,
@@ -1014,6 +1077,7 @@ impl OnboardingMachine {
             nest_api,
             nest_resolve_override,
             handle_check: Mutex::new(HandleCheckSnapshot::idle()),
+            dns_plan: Mutex::new(crate::snapshots::DnsPlanSnapshot::hidden()),
             handle_check_first_sign_in: std::sync::atomic::AtomicBool::new(false),
             kids: std::sync::atomic::AtomicBool::new(cfg!(feature = "kids")),
             invite_request: Mutex::new(InviteRequestSnapshot::idle()),
@@ -1237,9 +1301,11 @@ impl OnboardingMachine {
             // clears the user's PROGRESS, never what the app is capable of.
             let renders_recovery_kit = guard.renders_recovery_kit;
             let renders_trust_prompt = guard.renders_trust_prompt;
+            let renders_provider_choice = guard.renders_provider_choice;
             *guard = State::new();
             guard.renders_recovery_kit = renders_recovery_kit;
             guard.renders_trust_prompt = renders_trust_prompt;
+            guard.renders_provider_choice = renders_provider_choice;
         }
         // The wizard OUTCOME is progress, and a factory reset clears progress.
         // It lives outside `State`, so the wholesale `State::new()` above cannot
@@ -1658,6 +1724,17 @@ impl OnboardingMachine {
         self.mutate(|s| s.renders_recovery_kit = renders);
     }
 
+    /// App capability declaration: this app has the `provider_choice` page
+    /// built (`onboarding-provisioning.md` § 3d). Call once at wizard
+    /// construction; the handle check's Continue then lands on
+    /// [`OnboardingStep::ProviderChoice`] instead of `DnsConfig`. Apps that
+    /// never call it keep the `dns_config` → `vps_config` path — the
+    /// batched-trickle-down parity gap. Survives [`Self::reset`] as
+    /// [`Self::set_renders_recovery_kit`] does.
+    pub fn set_renders_provider_choice(&self, renders: bool) {
+        self.mutate(|s| s.renders_provider_choice = renders);
+    }
+
     /// The minted-but-unregistered RecoveryKey root the `recovery_kit` screen
     /// displays (64-hex + QR). `None` outside the kit screen's lifetime.
     /// Hands out a plain `String` at the render boundary (the foreign string
@@ -1765,29 +1842,17 @@ impl OnboardingMachine {
         // be readable as this one's answer while the ceremony is in flight.
         self.clear_error();
 
-        let Ok(kit) = fauna_client_recovery::parse_kit(&kit_input) else {
-            return self.fail_recovery_entry(RecoveryEntryOutcome::InvalidKit);
-        };
-
-        // The typed field wins over the payload: a user who names an account
-        // is correcting or supplying what the phrase could not say.
-        let typed = self.current_handle();
-        let typed = typed.trim();
-        let account = if typed.is_empty() {
-            kit.handle.clone()
-        } else {
-            Some(typed.to_string())
-        };
-        let Some(account) = account else {
-            return self.fail_recovery_entry(RecoveryEntryOutcome::AccountNeeded);
-        };
-        // Only a handle's `@domain` can locate a nest, and the ceremony is
-        // pre-identity — there is no session to ask. A bare local part is
-        // therefore not enough here, unlike at `handle_entry` where a local
-        // nest may already be in hand.
-        let Some(domain) = parse_handle_domain(&account) else {
-            return self.fail_recovery_entry(RecoveryEntryOutcome::AccountMalformed);
-        };
+        // The draft's local checks — the very function the page's
+        // `recovery_entry_possibility` answers from, so the submit refuses
+        // exactly what the page shows blocked (`ui/README.md` § Offer only
+        // what is possible, rule 4's form case). A bare local part is not
+        // enough here, unlike at `handle_entry` where a local nest may
+        // already be in hand: the ceremony is pre-identity.
+        let (kit, account, domain) =
+            match crate::drafts::recovery_entry_draft(&kit_input, &self.current_handle()) {
+                Ok(draft) => draft,
+                Err(outcome) => return self.fail_recovery_entry(outcome),
+            };
 
         let base_url = self.resolve_restore_target(&domain).await;
         let actor_hex = kit.actor_id.map(|a| hex::encode(a.0));
@@ -1897,25 +1962,16 @@ impl OnboardingMachine {
     ) -> EmergencyLockoutOutcome {
         self.clear_error();
 
-        if confirm_word != fauna_client_recovery::ceremony::LOCKOUT_CONFIRM_WORD {
-            return self.fail_emergency_lockout(EmergencyLockoutOutcome::WrongConfirmWord);
-        }
-        let Some(imported) = fauna_core::identity_qr::parse_import_input(&secret_input) else {
-            return self.fail_emergency_lockout(EmergencyLockoutOutcome::InvalidSecret);
-        };
-
-        let typed = self.current_handle();
-        let typed = typed.trim();
-        let account = if typed.is_empty() {
-            imported.handle.clone()
-        } else {
-            Some(typed.to_string())
-        };
-        let Some(account) = account else {
-            return self.fail_emergency_lockout(EmergencyLockoutOutcome::AccountNeeded);
-        };
-        let Some(domain) = parse_handle_domain(&account) else {
-            return self.fail_emergency_lockout(EmergencyLockoutOutcome::AccountMalformed);
+        // The draft's local checks, in the form's field order — the function
+        // the page's `emergency_lockout_possibility` answers from, so the lock
+        // refuses exactly what the page shows blocked.
+        let (imported, _account, domain) = match crate::drafts::emergency_lockout_draft(
+            &secret_input,
+            &self.current_handle(),
+            &confirm_word,
+        ) {
+            Ok(draft) => draft,
+            Err(outcome) => return self.fail_emergency_lockout(outcome),
         };
 
         let base_url = self.resolve_restore_target(&domain).await;
@@ -2117,7 +2173,18 @@ impl OnboardingMachine {
         self.with_state(|s| s.dns.clone())
     }
 
+    /// `dns-buy-domain-checkbox`. Ticking it is refused unless the handle
+    /// check found the domain unregistered ([`Self::can_offer_buy_domain`]):
+    /// a registered domain cannot be bought (`onboarding-provisioning.md`
+    /// § 3d).
     pub fn toggle_buy_domain(&self, on: bool) {
+        if on && !self.can_offer_buy_domain() {
+            return;
+        }
+        // A domain this wizard registered stays bought (§ 3d, the memory).
+        if !on && self.with_state(|s| crate::provider_choice::registered_registrar(s).is_some()) {
+            return;
+        }
         self.mutate(|s| {
             s.dns.buy_domain = on;
             // Deselect provider if it can't satisfy the new constraints.
@@ -2233,18 +2300,34 @@ impl OnboardingMachine {
         })
     }
 
+    /// [`Self::verify_dns_possibility`] as the bare flag; kept public for the
+    /// apps that still read it until their trickle-down lands.
     pub fn can_verify_dns(&self) -> bool {
+        self.verify_dns_possibility().is_possible()
+    }
+
+    /// `dns-verify-button`'s answer (`ui/README.md` § Offer only what is
+    /// possible, rules 2 and 6): a provider picked, no verify already on its
+    /// way (`dns.verifying`, which [`Self::verify_dns`] sets up front), every
+    /// required visible field filled — each blocked state naming the act that
+    /// revives the button. [`Self::verify_dns`] asks it first.
+    pub fn verify_dns_possibility(&self) -> fauna_core::possibility::Possibility {
+        use crate::credential_gate::{CHECKING, FILL_REQUIRED, first_blocked, required_filled};
         let visible = self.visible_dns_fields();
         self.with_state(|s| {
-            !s.dns.verifying
-                && visible.iter().all(|f| {
-                    !f.required
-                        || s.dns
-                            .creds
-                            .get(&f.id)
-                            .map(|v| !v.is_empty())
-                            .unwrap_or(false)
-                })
+            first_blocked(&[
+                (
+                    s.dns.selected_provider_id.is_none(),
+                    "onboarding.dns_config.status_pick_provider",
+                ),
+                (s.dns.verifying, CHECKING),
+                (
+                    !required_filled(&visible, |id| {
+                        s.dns.creds.get(id).is_some_and(|v| !v.is_empty())
+                    }),
+                    FILL_REQUIRED,
+                ),
+            ])
         })
     }
 
@@ -2253,6 +2336,16 @@ impl OnboardingMachine {
         use fauna_provisioning::dns::DnsProvider;
         use fauna_provisioning::probe::DomainStatus;
         use fauna_provisioning::registrar::Registrar;
+
+        // The action asks the predicate the button paints from (rule 6), so
+        // a press the page would not offer — a second verify while one runs
+        // included — is refused with the same reason.
+        if let Some(reason) = self.verify_dns_possibility().reason() {
+            return Err(OnboardingError::InvalidTransition {
+                from: "dns_config".into(),
+                reason: reason.key.clone(),
+            });
+        }
 
         // Mark verifying up front so `can_verify_dns()` returns false from
         // here on; clients gate their verify-button on that predicate so
@@ -2468,10 +2561,64 @@ impl OnboardingMachine {
         }
     }
 
+    /// `dns-config-continue-button`'s answer in the shared possibility type
+    /// (`docs/goal/ui/README.md` § Offer only what is possible, rule 6):
+    /// [`Self::can_continue_dns`] paired with the status line that explains
+    /// it ([`Self::dns_status_text_key`] — pick a provider, verify, tick the
+    /// confirm box, transfer first), so an app paints one value and never
+    /// pairs the two getters itself. [`Self::continue_from_dns`] asks it.
+    pub fn dns_continue_possibility(&self) -> fauna_core::possibility::Possibility {
+        if self.can_continue_dns() {
+            fauna_core::possibility::Possibility::Possible
+        } else {
+            fauna_core::possibility::Possibility::blocked(self.dns_status_text_key())
+        }
+    }
+
+    /// `handle-entry-continue-button`'s answer — the handle snapshot's
+    /// [`crate::snapshots::HandleCheckSnapshot::continue_possibility`], as a
+    /// door every app family can call.
+    pub fn handle_continue_possibility(&self) -> fauna_core::possibility::Possibility {
+        self.handle_check_snapshot().continue_possibility()
+    }
+
+    /// `invite-request-continue-button`'s answer — the invite snapshot's
+    /// [`crate::snapshots::InviteRequestSnapshot::continue_possibility`];
+    /// [`Self::redeem_invite`] asks it first.
+    pub fn invite_continue_possibility(&self) -> fauna_core::possibility::Possibility {
+        self.invite_request_snapshot().continue_possibility()
+    }
+
+    /// `invite-request-submit-button`'s answer: blocked `common.in_flight`
+    /// while any wizard call is on its way, so a second press never chases
+    /// the first. Replaces an app reading `is_loading()` itself.
+    pub fn invite_submit_possibility(&self) -> fauna_core::possibility::Possibility {
+        fauna_core::possibility::Possibility::for_write(
+            fauna_core::possibility::ReadState::Resolved,
+            !self.is_loading(),
+        )
+    }
+
+    /// `nat-mode-confirm-button`'s answer — the NAT snapshot's
+    /// [`crate::snapshots::NatModeSnapshot::submit_possibility`], the wizard
+    /// twin of the admin page's `save_possibility`;
+    /// [`Self::submit_nat_mode_choice`] asks it first.
+    pub fn nat_mode_submit_possibility(&self) -> fauna_core::possibility::Possibility {
+        self.nat_mode_snapshot().submit_possibility()
+    }
+
     /// Sync transition. The actual buy / register happens in
     /// `start_provisioning()` so the user can still back out before
     /// committing money.
     pub fn continue_from_dns(&self) -> Result<(), OnboardingError> {
+        // Continue's own answer first (`ui/README.md` § Offer only what is
+        // possible, rule 6): a press the page would not offer — no verified
+        // provider, the price unagreed, a domain registered elsewhere — is
+        // refused with the same status line, never carried to the VPS page.
+        if let Some(why) = self.dns_continue_possibility().reason().cloned() {
+            return Err(self.refuse_with("dns_config", why));
+        }
+        let mut mirrored = false;
         let entered = self.mutate(|s| {
             // Mirror creds to VPS when same_provider_for_vps and the
             // provider supports VPS.
@@ -2485,13 +2632,41 @@ impl OnboardingMachine {
                 // A hosted sign-in done on the DNS form is done for the VPS
                 // form too — same token, same provider.
                 s.vps.hosted_auth = s.dns.hosted_auth.clone();
-                s.vps.verified = true;
+                // The token is held, not yet checked for the server side: the
+                // check below lists the locations and offers, so the page
+                // opens checking and then ready — never on an empty field
+                // asking for the token again (onboarding-provisioning.md
+                // § 3d → *Why one provider's token was asked for twice*).
+                s.vps.verified = false;
+                s.vps.verifying = true;
+                s.vps.locations.clear();
+                s.vps.selected_location_id = None;
+                s.vps.server_types.clear();
+                s.vps.selected_server_type_id = None;
+                mirrored = true;
             }
             s.step = OnboardingStep::VpsConfig;
             Ok(())
         });
+        if mirrored {
+            self.spawn_mirrored_vps_check();
+        }
         self.spawn_channel_probe();
         entered
+    }
+
+    /// Run [`Self::check_vps_credentials`] in the background for the
+    /// credential [`Self::continue_from_dns`] carried over, the way
+    /// [`Self::spawn_vps_offers_refresh`] starts its listing — so a UniFFI
+    /// shell's Continue, pressed on a UI thread with no runtime, checks too.
+    fn spawn_mirrored_vps_check(&self) {
+        let Some(me) = self.self_ref.upgrade() else {
+            self.mutate(|s| s.vps.verifying = false);
+            return;
+        };
+        fauna_sleep::spawn_background(async move {
+            let _ = me.check_vps_credentials().await;
+        });
     }
 
     // ── VPS config stage ────────────────────────────────────────────────
@@ -2570,6 +2745,13 @@ impl OnboardingMachine {
                 if !still_ok {
                     s.vps.selected_server_type_id = None;
                 }
+            }
+            // On the setting-things-up page reached from the choose-providers
+            // page a server type is always selected while offers exist: a
+            // dropped one is re-chosen by the default rule (§ 3d).
+            if s.providers.provisioning_from_providers && s.vps.selected_server_type_id.is_none() {
+                s.vps.selected_server_type_id =
+                    crate::provider_choice::default_server_type(&s.vps.server_types, enabled);
             }
         });
     }
@@ -2728,18 +2910,31 @@ impl OnboardingMachine {
         })
     }
 
+    /// [`Self::verify_vps_possibility`] as the bare flag; kept public for the
+    /// apps that still read it until their trickle-down lands.
     pub fn can_verify_vps(&self) -> bool {
+        self.verify_vps_possibility().is_possible()
+    }
+
+    /// `vps-verify-button`'s answer — [`Self::verify_dns_possibility`]'s three
+    /// checks over the VPS form. [`Self::verify_vps`] asks it first.
+    pub fn verify_vps_possibility(&self) -> fauna_core::possibility::Possibility {
+        use crate::credential_gate::{CHECKING, FILL_REQUIRED, first_blocked, required_filled};
         let visible = self.visible_vps_fields();
         self.with_state(|s| {
-            !s.vps.verifying
-                && visible.iter().all(|f| {
-                    !f.required
-                        || s.vps
-                            .creds
-                            .get(&f.id)
-                            .map(|v| !v.is_empty())
-                            .unwrap_or(false)
-                })
+            first_blocked(&[
+                (
+                    s.vps.selected_provider_id.is_none(),
+                    "onboarding.vps_config.status_pick_provider",
+                ),
+                (s.vps.verifying, CHECKING),
+                (
+                    !required_filled(&visible, |id| {
+                        s.vps.creds.get(id).is_some_and(|v| !v.is_empty())
+                    }),
+                    FILL_REQUIRED,
+                ),
+            ])
         })
     }
 
@@ -2767,12 +2962,13 @@ impl OnboardingMachine {
     /// precisely the bug that left `dns-status-text` painting an empty line in
     /// its gating state, and `None` makes that unrepresentable.
     ///
-    /// Four shortfalls, four messages, not one generic line (rule 5 Q2 — the
-    /// user's next act differs in each: pick, verify, choose where, choose how
-    /// big).
+    /// Five shortfalls, five messages, not one generic line (rule 5 Q2 — the
+    /// user's next act differs in each: pick, wait for the check, verify,
+    /// choose where, choose how big).
     pub fn vps_continue_blocked_reason(&self) -> Option<LocalizedText> {
         Some(LocalizedText::key(match self.vps_continue_shortfall()? {
             VpsShortfall::NoProvider => "onboarding.vps_config.status_pick_provider",
+            VpsShortfall::Checking => crate::credential_gate::CHECKING,
             VpsShortfall::Unverified => "onboarding.vps_config.status_verify_credentials",
             VpsShortfall::NoLocation => "onboarding.vps_config.status_pick_location",
             VpsShortfall::NoServerType => "onboarding.vps_config.status_pick_server_type",
@@ -2813,13 +3009,78 @@ impl OnboardingMachine {
             .continue_blocked_reason()
     }
 
+    /// `vps-config-continue-button`'s answer in the shared possibility type
+    /// (`docs/goal/ui/README.md` § Offer only what is possible, rule 6): the
+    /// same shortfall [`Self::vps_continue_blocked_reason`] names, as one
+    /// value, so a native app paints enabled-or-blocked-with-reason from a
+    /// single call and never pairs [`Self::can_continue_vps`] with the reason
+    /// getter itself. Never [`Possibility::Absent`]: every app shows the
+    /// button.
+    pub fn vps_continue_possibility(&self) -> fauna_core::possibility::Possibility {
+        fauna_core::possibility::Possibility::from_blocked_reason(
+            self.vps_continue_blocked_reason(),
+        )
+    }
+
+    /// `provisioning-continue-button`'s answer in the shared possibility type —
+    /// [`Self::provisioning_continue_blocked_reason`] as one value, so an app
+    /// stops re-deriving enabled from `overall != Succeeded` beside it.
+    pub fn provisioning_continue_possibility(&self) -> fauna_core::possibility::Possibility {
+        fauna_core::possibility::Possibility::from_blocked_reason(
+            self.provisioning_continue_blocked_reason(),
+        )
+    }
+
+    /// `claim-code-submit-button`'s answer (`ui/README.md` § Offer only what
+    /// is possible, rule 4's form case): the typed `code` is a draft
+    /// ([`crate::drafts::claim_code_draft_possibility`]) and a claim already
+    /// on its way blocks a second (`common.in_flight`). Replaces an app
+    /// pairing the snapshot's `submit_enabled` with its own emptiness check.
+    pub fn claim_code_submit_possibility(
+        &self,
+        code: String,
+    ) -> fauna_core::possibility::Possibility {
+        use fauna_core::possibility::Possibility;
+        crate::drafts::claim_code_draft_possibility(code).and(Possibility::for_write(
+            fauna_core::possibility::ReadState::Resolved,
+            self.claim_code_snapshot().submit_enabled,
+        ))
+    }
+
+    /// `handle-check-button`'s answer: a handle typed
+    /// ([`crate::drafts::handle_draft_possibility`]), and no check already
+    /// running (`common.in_flight`).
+    pub fn handle_check_possibility(&self, handle: String) -> fauna_core::possibility::Possibility {
+        use fauna_core::possibility::Possibility;
+        crate::drafts::handle_draft_possibility(handle).and(Possibility::for_write(
+            fauna_core::possibility::ReadState::Resolved,
+            !self.is_loading(),
+        ))
+    }
+
     pub async fn verify_vps(&self) -> Result<(), OnboardingError> {
-        use fauna_provisioning::vps::VpsProvider;
+        // Asks the button's own predicate first, as `verify_dns` does.
+        if let Some(reason) = self.verify_vps_possibility().reason() {
+            return Err(OnboardingError::InvalidTransition {
+                from: "vps_config".into(),
+                reason: reason.key.clone(),
+            });
+        }
 
         // See `verify_dns` for the cross-app rationale: gating
         // `can_verify_vps()` on the verifying flag keeps every app's
         // verify-button disabled while the probe is in flight.
         self.mutate(|s| s.vps.verifying = true);
+        self.check_vps_credentials().await
+    }
+
+    /// The body of [`Self::verify_vps`] past its button's predicate, entered
+    /// with `vps.verifying` already set: check the held credential, list the
+    /// locations and the default location's offers, and mark it verified — or
+    /// clear `verifying` and surface the provider's error. Also run for the
+    /// credential [`Self::continue_from_dns`] carries over.
+    async fn check_vps_credentials(&self) -> Result<(), OnboardingError> {
+        use fauna_provisioning::vps::VpsProvider;
         let clear_verifying = |m: &Self| m.mutate(|s| s.vps.verifying = false);
 
         let snap = self.snapshot();
@@ -2929,7 +3190,10 @@ impl OnboardingMachine {
         self.mutate(|s| {
             s.step = OnboardingStep::NestProvisioning;
             s.error_message = None;
+            // Chosen on this page (cloud recovery): no choices region.
+            s.providers.provisioning_from_providers = false;
         });
+        self.spawn_dns_plan_refresh();
         Ok(())
     }
 
@@ -2999,7 +3263,25 @@ impl OnboardingMachine {
         // `provider_status()` locks state itself, so compute it before
         // (not inside) the `with_state` call below — it's a separate,
         // sequential lock acquisition, not a nested one.
-        let buy_domain_price = if self.with_state(|s| s.dns.buy_domain)
+        //
+        // A run entered from the choose-providers page reads the registration
+        // cover's quote directly: whatever covers DNS — another provider, or
+        // the manual row, under which no DNS provider is selected and
+        // `provider_status()` reads `NotReady` — the run registers and the
+        // line is owed (`onboarding-provisioning.md` § 6 *Deferred-DNS path*).
+        let from_providers = self.with_state(|s| s.providers.provisioning_from_providers);
+        let buy_domain_price = if from_providers {
+            self.with_state(|s| match &s.dns.current_availability {
+                Some(fauna_provisioning::registrar::RegistrarAvailability::Buyable {
+                    price_cents,
+                    currency,
+                    ..
+                }) if crate::provider_choice::run_buys_domain(s) => {
+                    Some((*price_cents, currency.clone()))
+                }
+                _ => None,
+            })
+        } else if self.with_state(|s| s.dns.buy_domain)
             && let ProviderStatus::UnregisteredBuyable {
                 price_cents,
                 currency,
@@ -3105,8 +3387,8 @@ impl OnboardingMachine {
     /// tick rather than receiving the snapshot via callback.
     ///
     /// The clone is `enrich_display`-ed so every app reads the canonical
-    /// per-step visibility booleans (`shows_substep`/`shows_error`/
-    /// `shows_attempt_suffix`) instead of re-deriving the rule. Computed here on
+    /// per-step visibility booleans (`shows_substep`/`shows_error`) instead of
+    /// re-deriving the rule. Computed here on
     /// the outgoing clone — never on the live mutated state, which the
     /// `set_cancelled` path mutates outside `with_step` (see `recompute_display`).
     pub fn provisioning_snapshot(&self) -> ProvisioningSnapshot {
@@ -3150,6 +3432,9 @@ impl OnboardingMachine {
     /// Idempotent: safe to call after a partial prior run — the
     /// orchestrator's pre-flight checks short-circuit completed work.
     pub fn start_provisioning(self: Arc<Self>) {
+        if self.provisioning_start_refused() {
+            return;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         {
             tokio::spawn(self.run_provisioning());
@@ -3174,8 +3459,29 @@ impl OnboardingMachine {
     /// `run_provisioning_inner` resets the snapshot + cancel flag at entry, so
     /// it doubles as the retry/resume entry point.
     pub async fn run_provisioning(self: Arc<Self>) {
+        if self.provisioning_start_refused() {
+            return;
+        }
         let result = run_provisioning_inner(self.clone()).await;
         stash_provisioning_result(self, result);
+    }
+
+    /// *Buy and set up* is refused on a run entered from the choose-providers
+    /// page while [`Self::provisioning_start_blocked_reason`] names a reason
+    /// (the `vps_config` path enforced both conditions at its Continues).
+    fn provisioning_start_refused(&self) -> bool {
+        // The button's own answer, so what the page offers and what Start
+        // accepts cannot disagree (`ui/README.md` § Offer only what is
+        // possible, rule 6).
+        match self.provisioning_start_possibility().reason().cloned() {
+            Some(why) => {
+                // Never silent (ui/README.md § Offer only what is possible,
+                // rule 7): the reason reaches the page's `error-message`.
+                self.refuse_with("nest_provisioning", why);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Test-aware nest base URL: the override map wins
@@ -3271,6 +3577,8 @@ impl OnboardingMachine {
                     None => OnboardingStep::IdentityChoice,
                 },
                 OnboardingStep::DnsConfig => OnboardingStep::HandleEntry,
+                // provider-choice-back-button → the handle check (§ 3d).
+                OnboardingStep::ProviderChoice => OnboardingStep::HandleEntry,
                 // Recovery cloud path enters VpsConfig straight from NestRecovery
                 // (dns_config is skipped — the recovered box's domain + DNS creds
                 // come from the custody), so back returns to the box-selection hub.
@@ -3279,6 +3587,12 @@ impl OnboardingMachine {
                 OnboardingStep::DnsPostInstructions => OnboardingStep::VpsConfig,
                 OnboardingStep::InviteRequest => OnboardingStep::HandleEntry,
                 OnboardingStep::ClaimCode => OnboardingStep::HandleEntry,
+                // On the set-up path entered from the choose-providers page,
+                // provisioning-back-button returns there (§ 3d *Transitions*);
+                // cloud recovery and the old path return to vps_config.
+                OnboardingStep::NestProvisioning if s.providers.provisioning_from_providers => {
+                    OnboardingStep::ProviderChoice
+                }
                 OnboardingStep::NestProvisioning => OnboardingStep::VpsConfig,
                 // `recover-back-button` on nest_recovery (box-recovery.md §
                 // Recovery UI): came-from-identity returns to handle_entry (Q2-A
@@ -3446,21 +3760,32 @@ impl OnboardingMachine {
     pub fn recovery_selected_nest_id(&self) -> Option<String> {
         self.with_state(|s| s.recovery_selected_nest_id.clone())
     }
+
+    /// The answer of both `nest_recovery` method buttons
+    /// (`recover-method-cloud-button`, `recover-method-selfhosted-button`;
+    /// `ui/README.md` § Offer only what is possible, rule 6): blocked
+    /// `onboarding.recovery.method_blocked_pick_box` until a box is chosen —
+    /// each method re-provisions THAT box. [`Self::recover_via_cloud`] and
+    /// [`Self::recover_via_selfhosted`] ask it first.
+    pub fn recovery_method_possibility(&self) -> fauna_core::possibility::Possibility {
+        if self.with_state(|s| s.recovery_selected_nest_id.is_some()) {
+            fauna_core::possibility::Possibility::Possible
+        } else {
+            fauna_core::possibility::Possibility::blocked(LocalizedText::key(
+                "onboarding.recovery.method_blocked_pick_box",
+            ))
+        }
+    }
 }
 
 impl OnboardingMachine {
-    /// Guard for the recovery method buttons: a box must be selected first.
+    /// Guard for the recovery method buttons: their own answer
+    /// ([`Self::recovery_method_possibility`]) first, a refusal naming itself
+    /// on the page's `error-message`.
     fn require_selected_recovery_box(&self) -> Result<(), OnboardingError> {
-        if self.with_state(|s| s.recovery_selected_nest_id.is_some()) {
-            Ok(())
-        } else {
-            self.mutate(|s| {
-                s.set_error("Select a box to recover first".into());
-            });
-            Err(OnboardingError::InvalidTransition {
-                from: "nest_recovery".into(),
-                reason: "no recovery box selected".into(),
-            })
+        match self.recovery_method_possibility().reason().cloned() {
+            None => Ok(()),
+            Some(why) => Err(self.refuse_with("nest_recovery", why)),
         }
     }
 }
@@ -3771,6 +4096,13 @@ impl OnboardingMachine {
         use fauna_provisioning::progress::OverallStatus;
         let snap = self.provisioning.lock().unwrap().clone();
         if !matches!(snap.overall, OverallStatus::Succeeded) {
+            // A failed run already carries its own sentence on the channel;
+            // otherwise the refusal says why (rule 7, never silent).
+            if self.with_state(|s| s.error_message.is_none())
+                && let Some(why) = snap.overall.continue_blocked_reason()
+            {
+                self.refuse_with("nest_provisioning", why);
+            }
             return self.with_state(|s| s.step);
         }
         let deferred = self.with_state(|s| s.dns.set_up_later);
@@ -3782,6 +4114,12 @@ impl OnboardingMachine {
             return OnboardingStep::DnsPostInstructions;
         }
         if !self.with_state(|s| s.claim_completed) {
+            // Built but not claimed yet: the claim is the run's last part, so
+            // the running reason holds (rule 7, never silent).
+            self.refuse_with(
+                "nest_provisioning",
+                LocalizedText::key("onboarding.nest_provisioning.continue_blocked_running"),
+            );
             return self.with_state(|s| s.step);
         }
         let nest_url = self.with_state(|s| {
@@ -3897,6 +4235,33 @@ impl OnboardingMachine {
         crate::snapshots::awaiting_manual_dns::fallthrough_enabled(&state)
     }
 
+    /// `awaiting-dns-recheck-button`'s answer (`ui/README.md` § Offer only
+    /// what is possible, rule 6) — the snapshot's
+    /// [`AwaitingManualDnsSnapshot::recheck_possibility`], as a door every app
+    /// family can call; [`Self::recheck_manual_dns`] asks it first.
+    pub fn awaiting_dns_recheck_possibility(&self) -> fauna_core::possibility::Possibility {
+        self.awaiting_manual_dns
+            .lock()
+            .unwrap()
+            .recheck_possibility()
+    }
+
+    /// `awaiting-dns-copy-button`'s answer — the snapshot's
+    /// [`AwaitingManualDnsSnapshot::copy_possibility`].
+    pub fn awaiting_dns_copy_possibility(&self) -> fauna_core::possibility::Possibility {
+        self.awaiting_manual_dns.lock().unwrap().copy_possibility()
+    }
+
+    /// `awaiting-dns-fallthrough-button`'s answer — the snapshot's
+    /// [`AwaitingManualDnsSnapshot::fallthrough_possibility`];
+    /// [`Self::abandon_awaiting_manual_dns`] asks it first.
+    pub fn awaiting_dns_fallthrough_possibility(&self) -> fauna_core::possibility::Possibility {
+        self.awaiting_manual_dns
+            .lock()
+            .unwrap()
+            .fallthrough_possibility()
+    }
+
     /// The "Almost ready" surface's explicit exit — **"Use a different nest"**
     /// (`onboarding-provisioning.md` § "Almost ready" surface → *Exit*): the way
     /// out for a box that will never answer (a `create_server` that failed after
@@ -3927,7 +4292,7 @@ impl OnboardingMachine {
         if !matches!(
             self.wizard_outcome(),
             Some(WizardOutcome::AwaitingManualDns { .. })
-        ) || !self.awaiting_dns_fallthrough_enabled()
+        ) || !self.awaiting_dns_fallthrough_possibility().is_possible()
         {
             return;
         }
@@ -4220,6 +4585,9 @@ impl OnboardingMachine {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VpsShortfall {
     NoProvider,
+    /// The credential is being checked — typed and verified, or carried over
+    /// from the DNS step — so the person waits rather than re-enters it.
+    Checking,
     Unverified,
     NoLocation,
     NoServerType,
@@ -4254,6 +4622,8 @@ impl OnboardingMachine {
         self.with_state(|s| {
             if s.vps.selected_provider_id.is_none() {
                 Some(VpsShortfall::NoProvider)
+            } else if !s.vps.verified && s.vps.verifying {
+                Some(VpsShortfall::Checking)
             } else if !s.vps.verified {
                 Some(VpsShortfall::Unverified)
             } else if s.vps.selected_location_id.is_none() {
@@ -4277,7 +4647,7 @@ impl OnboardingMachine {
 /// trailing dot on either side is ignored. One rule for the two readers that
 /// must agree — which zone the wizard publishes into (`verify_dns`) and
 /// whether the page says the provider has the domain (`provider_status`).
-fn covering_zone<'a>(
+pub(crate) fn covering_zone<'a>(
     domain: &str,
     zones: &'a [fauna_provisioning::dns::DnsZone],
 ) -> Option<&'a fauna_provisioning::dns::DnsZone> {
@@ -4304,6 +4674,92 @@ fn ineligibility_key(no_registrar: bool, no_vps: bool) -> Option<&'static str> {
 
 #[cfg_attr(feature = "uniffi", fauna_uniffi_async::export)]
 impl OnboardingMachine {
+    /// The `nest_provisioning` page's DNS plan — `provisioning-dns-plan`
+    /// renders it, hidden while `visible` is false
+    /// (onboarding-provisioning.md § 6 *The DNS plan*).
+    pub fn dns_plan(&self) -> crate::snapshots::DnsPlanSnapshot {
+        self.dns_plan.lock().unwrap().clone()
+    }
+
+    /// Read the domain's zone with the connected DNS provider and plan what
+    /// the run will keep, add, change and remove. Called by every app when
+    /// `nest_provisioning` opens; ticks the observer at the loading line and
+    /// again at the result. Shown only on the provider path with an existing
+    /// zone — a bought domain's fresh zone and the manual path leave it hidden.
+    pub async fn refresh_dns_plan(&self) {
+        use crate::snapshots::DnsPlanSnapshot;
+        use fauna_provisioning::dispatch;
+        let snap = self.snapshot();
+        let domain = snap.handle_domain().unwrap_or_default();
+        let hidden = || {
+            *self.dns_plan.lock().unwrap() = DnsPlanSnapshot::hidden();
+            self.observer.on_changed();
+        };
+        if domain.is_empty() || snap.dns.buy_domain {
+            return hidden();
+        }
+        let (Some(pid), Some(zone_id)) = (
+            snap.dns.selected_provider_id.clone(),
+            snap.dns.zone_id.clone(),
+        ) else {
+            return hidden();
+        };
+        let Some(dns) = dispatch_provider_id(&pid).and_then(|id| {
+            dispatch::dns_provider(
+                id,
+                dispatch::Credentials::from_map(snap.dns.creds.clone()),
+                self.provider_base_url("dns".into()),
+            )
+        }) else {
+            return hidden();
+        };
+        *self.dns_plan.lock().unwrap() = DnsPlanSnapshot::loading(&domain);
+        self.observer.on_changed();
+        let zone_name = snap
+            .dns
+            .current_zones
+            .iter()
+            .find(|z| z.id == zone_id)
+            .map(|z| z.name.clone());
+        let records = fauna_provisioning::orchestrator::planned_records(
+            &dns,
+            &domain,
+            &zone_id,
+            zone_name.as_deref(),
+            None,
+        );
+        let next = match fauna_provisioning::orchestrator::read_current_records(
+            &self.http, &dns, &zone_id, &records,
+        )
+        .await
+        {
+            Ok(current) => {
+                let rows = fauna_provisioning::dns_plan::plan(&records, |n, t| {
+                    current
+                        .iter()
+                        .filter(|r| r.name == n && r.record_type == t)
+                        .cloned()
+                        .collect()
+                });
+                // One form whatever the provider: zone-relative, against the
+                // zone's name (or the domain itself, a zone apex, when the
+                // zone list did not carry it) — onboarding-provisioning.md § 6.
+                let rows = fauna_provisioning::dns_plan::named_in_zone(
+                    rows,
+                    zone_name.as_deref().unwrap_or(&domain),
+                );
+                DnsPlanSnapshot::ready(
+                    &domain,
+                    &rows,
+                    fauna_i18n::strings::onboarding::nest_provisioning::DNS_PLAN_NEW_SERVER,
+                )
+            }
+            Err(e) => DnsPlanSnapshot::read_failed(&domain, &e.to_string()),
+        };
+        *self.dns_plan.lock().unwrap() = next;
+        self.observer.on_changed();
+    }
+
     pub async fn start_handle_check(&self, handle: String) {
         self.cancel.raise(); // cancel any in-flight
         self.cancel.reset();
@@ -4312,6 +4768,11 @@ impl OnboardingMachine {
         *self.handle_check.lock().unwrap() = HandleCheckSnapshot::idle();
         self.state.lock().unwrap().handle_enclosing_zone = None;
         self.observer.on_changed();
+        // The draft predicate the page paints Check from, asked again: a blank
+        // handle is never probed, and the idle line just set is its reason.
+        if !crate::drafts::handle_draft_possibility(handle.clone()).is_possible() {
+            return;
+        }
         self.run_handle_check_phases(handle).await;
     }
 
@@ -4367,7 +4828,10 @@ impl OnboardingMachine {
             }
             let (dns, enclosing_zone, in_zone_address) =
                 match fauna_provisioning::probe::dns_ns_probe(&self.http, &domain).await {
-                    Ok(p) => (p.lookup, p.enclosing_zone, p.in_zone_address),
+                    Ok(p) => {
+                        self.state.lock().unwrap().handle_delegation = p.nameservers;
+                        (p.lookup, p.enclosing_zone, p.in_zone_address)
+                    }
                     Err(e) => {
                         return self.complete_probe_error(
                             HandleCheckPhase::DnsLookup,
@@ -4523,7 +4987,7 @@ impl OnboardingMachine {
             // DNS for `localhost`, a LAN IP or a `.local` name. Say no nest is
             // running there, with no control checkbox and so no DNS-config
             // route (onboarding.md § 2, Local / self-hosted targets).
-            NestHealthState::ConnectionRefused if self.is_kids() => {
+            NestHealthState::ConnectionRefused | NestHealthState::Timeout if self.is_kids() => {
                 return self.complete_kids_no_joinable_nest(&domain);
             }
             NestHealthState::ConnectionRefused if !target.is_public_dns_name => {
@@ -4543,7 +5007,15 @@ impl OnboardingMachine {
                 self.observer.on_changed();
                 return;
             }
-            NestHealthState::ConnectionRefused => {
+            // A public domain whose address refuses the connection or answers
+            // nothing within the probe's window: the domain is theirs and no
+            // nest runs there — most often a server deleted while its records
+            // stayed. Onboarding goes on from what exists (onboarding.md § 2,
+            // *A public domain whose address answers nothing*); the DNS plan
+            // brings the records to the new box.
+            NestHealthState::ConnectionRefused | NestHealthState::Timeout
+                if target.is_public_dns_name =>
+            {
                 let mut snap = HandleCheckSnapshot::idle();
                 snap.phase = HandleCheckPhase::Complete;
                 snap.outcome = HandleCheckOutcome::RegisteredNoNest;
@@ -4551,18 +5023,31 @@ impl OnboardingMachine {
                     key: "onboarding.handle_check.outcome.registered_no_nest".into(),
                     args: HashMap::from([("domain".to_string(), domain.clone())]),
                 };
-                snap.continue_enabled = false; // user must check the checkbox
-                snap.control_checkbox_visible = true;
-                snap.control_checkbox_checked = false;
+                snap.continue_enabled = true;
                 *self.handle_check.lock().unwrap() = snap;
                 self.observer.on_changed();
                 return;
             }
-            NestHealthState::Misbehaving { .. } | NestHealthState::Timeout => {
-                return self.complete_probe_error(
+            // A refused connection at a local target, with the kids build
+            // excised above, was answered by `local_no_nest`; one that answers
+            // nothing names the address instead of a generic "Temporary
+            // error" (ui/README.md § Copy comprehensibility rule 2).
+            NestHealthState::ConnectionRefused | NestHealthState::Timeout => {
+                return self.complete_probe_error_with(
                     HandleCheckPhase::NestProbe,
-                    true,
                     "nest unreachable".into(),
+                    "onboarding.handle_check.error.nest_unreachable",
+                    &domain,
+                );
+            }
+            // A server error: something is serving there, and replacing it on
+            // a guess is not the app's to offer.
+            NestHealthState::Misbehaving { status } => {
+                return self.complete_probe_error_with(
+                    HandleCheckPhase::NestProbe,
+                    format!("nest answered HTTP {status}"),
+                    "onboarding.handle_check.error.nest_misbehaving",
+                    &domain,
                 );
             }
             NestHealthState::MalformedBody => {
@@ -4853,13 +5338,7 @@ impl OnboardingMachine {
             let domain = args.get("domain").cloned().unwrap_or_default();
             return self.complete_kids_no_joinable_nest(&domain);
         }
-        let continue_enabled = matches!(
-            outcome,
-            HandleCheckOutcome::DomainAvailable { .. }
-                | HandleCheckOutcome::AlreadyOnNest { .. }
-                | HandleCheckOutcome::NestRunningUserUnregistered
-                | HandleCheckOutcome::UnregisteredUnclaimedNest
-        );
+        let continue_enabled = crate::snapshots::handle_check::continue_enabled_for(&outcome);
         // The two outcomes whose page shows the nest's rules: `AlreadyOnNest`
         // (`handle_entry` while Continue signs in) and the claimed nest the
         // user is not on (Continue → `invite_request`).
@@ -4884,6 +5363,32 @@ impl OnboardingMachine {
         } else {
             self.clear_joining_rules();
         }
+        self.observer.on_changed();
+    }
+
+    /// A transient nest-probe failure whose copy names the domain (`msg_key`
+    /// takes `{domain}`), the cause kept on the outcome for logs and routing.
+    fn complete_probe_error_with(
+        &self,
+        phase: crate::snapshots::HandleCheckPhase,
+        cause: String,
+        msg_key: &str,
+        domain: &str,
+    ) {
+        use crate::snapshots::HandleCheckOutcome;
+        let mut snap = self.handle_check.lock().unwrap();
+        snap.phase = crate::snapshots::HandleCheckPhase::Complete;
+        snap.outcome = HandleCheckOutcome::ProbeError {
+            phase,
+            transient: true,
+            cause,
+        };
+        snap.message = LocalizedText {
+            key: msg_key.into(),
+            args: HashMap::from([("domain".to_string(), domain.to_string())]),
+        };
+        snap.continue_enabled = false;
+        drop(snap);
         self.observer.on_changed();
     }
 
@@ -4930,20 +5435,18 @@ impl OnboardingMachine {
         self.observer.on_changed();
     }
 
-    pub fn set_control_checkbox(&self, checked: bool) {
-        let mut snap = self.handle_check.lock().unwrap();
-        if !snap.control_checkbox_visible {
-            return;
-        }
-        snap.control_checkbox_checked = checked;
-        snap.continue_enabled = checked;
-        drop(snap);
-        self.observer.on_changed();
-    }
-
     pub async fn submit_handle_check_continue(&self) -> OnboardingStep {
         use crate::snapshots::HandleCheckOutcome;
         let snap = self.handle_check.lock().unwrap().clone();
+        // Continue's own answer first (`ui/README.md` § Offer only what is
+        // possible, rule 6): before a check found an outcome Continue can act
+        // on, the press is refused with the line the page already paints. The
+        // recovery arm (`AlreadyOnNest`) and `RegisteredNoNest` both set
+        // `continue_enabled`, so neither is cut off.
+        if let Some(why) = snap.continue_possibility().reason().cloned() {
+            self.refuse_with("handle_entry", why);
+            return self.with_state(|s| s.step);
+        }
         // Recovery mode (Q2-A, box-recovery.md § Recovery UI (step 4)): the
         // admin typed the handle/@domain of ANOTHER box they own, to reach a
         // surviving nest and read its synced deployment-seed map. Reachability
@@ -4976,9 +5479,9 @@ impl OnboardingMachine {
                 // domain_status() derives Unregistered from this same
                 // DomainAvailable outcome (onboarding.md §4) — nothing to
                 // persist here beyond buy_domain.
-                OnboardingStep::DnsConfig
+                setup_path_first_step(&s)
             }
-            HandleCheckOutcome::RegisteredNoNest if snap.control_checkbox_checked => {
+            HandleCheckOutcome::RegisteredNoNest => {
                 let mut s = self.state.lock().unwrap();
                 s.dns.buy_domain = false;
                 // The user owns the domain (registered, no nest) and isn't
@@ -4987,7 +5490,7 @@ impl OnboardingMachine {
                 // RegisteredElsewhere and the buy-domain checkbox stays
                 // disabled (per onboarding.md §4 / ui.yaml) with nothing
                 // further to persist here.
-                OnboardingStep::DnsConfig
+                setup_path_first_step(&s)
             }
             HandleCheckOutcome::AlreadyOnNest { current_handle, .. } => {
                 // Derive the nest base URL from the handle the USER TYPED — it
@@ -5488,6 +5991,14 @@ impl OnboardingMachine {
 
     pub async fn verify_oob_invite_code(&self, code: String) {
         use crate::snapshots::OobCodeState;
+        // The draft predicate the page paints Check from, asked again: a blank
+        // code is never sent. The row stays on its idle line, which is the
+        // predicate's own reason.
+        if !crate::drafts::invite_code_draft_possibility(code.clone()).is_possible() {
+            self.invite_request.lock().unwrap().out_of_band_code_state = OobCodeState::Idle;
+            self.observer.on_changed();
+            return;
+        }
         self.invite_request.lock().unwrap().out_of_band_code_state = OobCodeState::Verifying;
         *self.oob_age_band.lock().unwrap() = None;
         self.observer.on_changed();
@@ -5545,6 +6056,13 @@ impl OnboardingMachine {
         // and no live nest ever served `Approved` to reach it anyway. Approval
         // is handled by the recheck's registered-probe instead, so redeem is
         // now the out-of-band code path and nothing else.
+        // Continue's own answer first (`ui/README.md` § Offer only what is
+        // possible, rule 6); a refusal names itself on the page's
+        // `error-message` (rule 7) instead of returning silently.
+        if let Some(why) = snap.continue_possibility().reason().cloned() {
+            self.refuse_with("invite_request", why);
+            return self.with_state(|s| s.step);
+        }
         let oob_invite_code = match &snap.out_of_band_code_state {
             OobCodeState::Valid { invite_id, .. } => Some(invite_id.clone()),
             _ => return self.state.lock().unwrap().step, // nothing to do
@@ -5886,6 +6404,21 @@ impl OnboardingMachine {
         use crate::nest_api::ClaimAdminError;
         use crate::snapshots::ClaimCodeState;
 
+        // The draft predicate the page paints Claim from, asked again: a blank
+        // code is answered on the status row with the same line, never sent.
+        if let fauna_core::possibility::Possibility::Blocked { reason } =
+            crate::drafts::claim_code_draft_possibility(code.clone())
+        {
+            {
+                let mut snap = self.claim_code.lock().unwrap();
+                snap.state = ClaimCodeState::Idle;
+                snap.message = reason;
+                snap.submit_enabled = true;
+            }
+            self.observer.on_changed();
+            return self.step();
+        }
+
         // Move snapshot to Submitting and fire an observer tick.
         {
             let mut snap = self.claim_code.lock().unwrap();
@@ -6078,6 +6611,12 @@ impl OnboardingMachine {
             Some(WizardOutcome::AwaitingManualDns { claim_code, .. }) => claim_code,
             _ => return self.with_state(|s| s.step),
         };
+        // The recheck button's own answer (`ui/README.md` § Offer only what is
+        // possible, rule 6): a press, or a poll tick, while a probe or claim
+        // is already on its way stacks nothing — that one will land.
+        if !self.awaiting_dns_recheck_possibility().is_possible() {
+            return self.with_state(|s| s.step);
+        }
 
         let nest_url = self.effective_nest_url();
         // The surface's rendering of the shared core's two phases.
@@ -6788,6 +7327,13 @@ impl OnboardingMachine {
     /// `docs/goal/behavior/onboarding.md` § 3b-bis.
     pub async fn submit_nat_mode_choice(&self) -> OnboardingStep {
         use crate::nest_api::NatModeError;
+
+        // The confirm button's own answer first (`ui/README.md` § Offer only
+        // what is possible, rule 6): a second press while a commit is on its
+        // way, or after it is done, is refused rather than sent twice.
+        if !self.nat_mode_submit_possibility().is_possible() {
+            return self.with_state(|s| s.step);
+        }
 
         // Snapshot the selected mode and transition to Submitting.
         let selected_mode = {
@@ -7862,10 +8408,21 @@ impl OnboardingMachine {
         self.kids.store(kids, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Test-only: hold the wizard's in-flight flag ([`Self::is_loading`]) as
+    /// a call on its way would, so a button whose answer blocks while one is
+    /// (`invite_submit_possibility`) can be painted blocked without a call.
+    pub fn set_loading_for_test(&self, loading: bool) {
+        self.mutate(|s| s.is_loading = loading);
+    }
+
     pub fn set_handle_check_outcome_for_test(&self, outcome: crate::snapshots::HandleCheckOutcome) {
         let mut snap = self.handle_check.lock().unwrap();
         self.handle_check_first_sign_in
             .store(false, std::sync::atomic::Ordering::SeqCst);
+        // The check is complete and Continue live exactly as the probe would
+        // leave them for this outcome — Continue asks that answer first.
+        snap.phase = crate::snapshots::HandleCheckPhase::Complete;
+        snap.continue_enabled = crate::snapshots::handle_check::continue_enabled_for(&outcome);
         snap.outcome = outcome;
     }
 
@@ -7878,6 +8435,13 @@ impl OnboardingMachine {
                 .map(|(k, v)| (k, SecretString::from(v)))
                 .collect();
         });
+    }
+
+    /// Test-only: inject a DNS plan, so an app's rendering of
+    /// `provisioning-dns-plan` is testable without a DNS provider.
+    pub fn set_dns_plan_for_test(&self, plan: crate::snapshots::DnsPlanSnapshot) {
+        *self.dns_plan.lock().unwrap() = plan;
+        self.observer.on_changed();
     }
 
     /// Test-only: inject a pre-built HandleCheckSnapshot so tests can
@@ -7982,6 +8546,10 @@ impl OnboardingMachine {
         // Machine-free arms (the nest-identity pin seed/read) live in the free
         // dispatcher so "machine-free" has one definition every app shares.
         if let FreeMethodOutcome::Handled(_) = call_machine_free_method(&name, &json_arg) {
+            return;
+        }
+        // The choose-providers page's arms (`provider_choice.rs`).
+        if self.provider_choice_bridge(&name, &json_arg).is_some() {
             return;
         }
         match name.as_str() {
@@ -8390,11 +8958,17 @@ impl OnboardingMachine {
         if let FreeMethodOutcome::Handled(v) = call_machine_free_method(&name, &json_arg) {
             return v;
         }
+        if let Some(v) = self.provider_choice_bridge(&name, &json_arg) {
+            return v;
+        }
         match name.as_str() {
             // Reader: the live provisioning snapshot, so the test can poll the
             // orchestrator's progress (e.g. "Online step is Running").
             "provisioning_snapshot" => serde_json::to_string(&self.provisioning_snapshot()).ok(),
             "ssh_door_readout" => serde_json::to_string(&self.ssh_door_readout()).ok(),
+            // Reader: the `nest_provisioning` page's DNS plan, so a test that
+            // waits on a plan row can name what the machine read when it fails.
+            "dns_plan" => serde_json::to_string(&self.dns_plan()).ok(),
             // Reader: confirm a `set_provider_base_urls` override actually
             // applied (the test asserts this before driving a real run, so the
             // orchestrator can't escape to the live internet). `json_arg` is the
@@ -8826,6 +9400,9 @@ impl OnboardingMachine {
             serde_json::to_string(&step).ok()
         }
 
+        if let Some(v) = self.provider_choice_bridge_async(&name, &json_arg).await {
+            return v;
+        }
         match name.as_str() {
             // Commands: no reader value, but the ack must wait for the effect.
             "verify_dns" => {
@@ -9385,7 +9962,139 @@ async fn run_provisioning_inner(
             )
         }
     };
-    let result: Result<NextStep, OnboardingError> = if snapshot.dns.set_up_later {
+    // The run's registration (`onboarding-provisioning.md` § 3d, § 6): the
+    // registrar the choose-providers page's registration goal named — not the
+    // DNS cover when DNS runs at another provider or on the manual row — else,
+    // on the `dns_config` path, the DNS provider itself. The wizard-life memory
+    // says whether this wizard already registered it, and the run tells the
+    // memory what it did the moment it does it.
+    let run_registrar: Option<String> = if !snapshot.dns.buy_domain {
+        None
+    } else if snapshot.providers.provisioning_from_providers {
+        snapshot.providers.run_registrar.clone()
+    } else {
+        snapshot.dns.selected_provider_id.clone()
+    };
+    let registrar_creds = run_registrar
+        .as_deref()
+        .and_then(|r| snapshot.providers.providers.get(r))
+        .filter(|_| snapshot.providers.provisioning_from_providers)
+        .map(|c| c.creds.clone())
+        .unwrap_or_else(|| snapshot.dns.creds.clone());
+    let already_registered = crate::provider_choice::registered_registrar(&snapshot).is_some();
+    let on_domain_event = {
+        let machine = machine.clone();
+        let domain = domain.clone();
+        let registrar = run_registrar.clone().unwrap_or_default();
+        let dns_pid = snapshot.dns.selected_provider_id.clone();
+        move |e: fauna_provisioning::orchestrator::DomainEvent| {
+            use fauna_provisioning::orchestrator::DomainEvent;
+            machine.mutate(|s| match e {
+                DomainEvent::Registered => {
+                    s.providers.registered = Some(crate::state::RegisteredDomain {
+                        domain: domain.clone(),
+                        registrar: registrar.clone(),
+                    });
+                }
+                DomainEvent::Pointed => s.providers.pointed_at = dns_pid.clone(),
+            });
+        }
+    };
+    // The price the person agreed for a registration this run still makes;
+    // a remembered registration buys nothing.
+    let agreed_cents = if already_registered {
+        Some(0)
+    } else {
+        match snapshot.dns.current_availability.as_ref() {
+            Some(fauna_provisioning::registrar::RegistrarAvailability::Buyable {
+                price_cents,
+                ..
+            }) => Some(*price_cents),
+            _ => None,
+        }
+    };
+    if run_registrar.is_some() && !already_registered && !snapshot.dns.price_agreed {
+        // Refuse to advance if the user hasn't explicitly agreed to the
+        // displayed price — the registrar is never charged without consent.
+        machine.mutate(|s| s.is_loading = false);
+        return Err(OnboardingError::InvalidTransition {
+            from: "vps_config".into(),
+            reason: "buy-domain flow requires confirm_price() first".into(),
+        });
+    }
+    let registrar_impl = match run_registrar.as_deref() {
+        None => None,
+        Some(r) => {
+            let Some(agreed) = agreed_cents else {
+                machine.mutate(|s| s.is_loading = false);
+                return Err(OnboardingError::InvalidTransition {
+                    from: "vps_config".into(),
+                    reason: "buy-domain flow requires a buyable availability".into(),
+                });
+            };
+            let rid = dispatch_provider_id(r).ok_or_else(|| OnboardingError::Other {
+                detail: format!("unknown provider id: {r}"),
+            })?;
+            let reg = dispatch::registrar(
+                rid,
+                dispatch::Credentials::from_map(registrar_creds.clone()),
+            )
+            .ok_or_else(|| OnboardingError::Other {
+                detail: format!("provider {r} doesn't support registrar"),
+            })?;
+            Some((reg, agreed))
+        }
+    };
+
+    let result: Result<NextStep, OnboardingError> = if snapshot.dns.set_up_later
+        && let Some((registrar, agreed_cents)) = registrar_impl.as_ref()
+    {
+        // Path 1b: the manual DNS cover for a bought domain — register it,
+        // build the box, publish nothing (steps 3, 4 Skipped).
+        let purchase = fauna_provisioning::orchestrator::DomainPurchase {
+            registrar,
+            years: 1,
+            agreed_price_cents: *agreed_cents,
+            contact: snapshot.dns.contact.as_ref(),
+            already_registered,
+            delegate: false,
+            on_event: &on_domain_event,
+        };
+        match fauna_provisioning::orchestrator::provision_registered_no_dns(
+            &http,
+            registry.as_ref(),
+            &vps,
+            &purchase,
+            &domain,
+            &server_name,
+            &region,
+            &st.id,
+            &params,
+            &provision_labels,
+            &machine.provisioning,
+            notify,
+            on_server_ready,
+            &machine.provisioning_cancel,
+        )
+        .await
+        {
+            Ok(deferred) => {
+                let records = deferred
+                    .records
+                    .iter()
+                    .map(DnsRecordPlain::from)
+                    .collect::<Vec<_>>();
+                machine.mutate(|s| {
+                    s.dns_records = records;
+                });
+                Ok(NextStep::DnsPostInstructions)
+            }
+            Err(e) => Err(OnboardingError::ProvisioningFailed {
+                step: "register+create_server".into(),
+                detail: e.to_string(),
+            }),
+        }
+    } else if snapshot.dns.set_up_later {
         // Path 1: provision_nest_no_dns (deferred-DNS — steps 1, 3, 4 Skipped).
         match fauna_provisioning::orchestrator::provision_nest_no_dns(
             &http,
@@ -9420,30 +10129,10 @@ async fn run_provisioning_inner(
                 detail: e.to_string(),
             }),
         }
-    } else if snapshot.dns.buy_domain {
-        // Path 2: provision_with_registration. Refuse to advance if the
-        // user hasn't explicitly agreed to the displayed price — this
-        // prevents the registrar from being charged without consent.
-        if !snapshot.dns.price_agreed {
-            machine.mutate(|s| s.is_loading = false);
-            return Err(OnboardingError::InvalidTransition {
-                from: "vps_config".into(),
-                reason: "buy-domain flow requires confirm_price() first".into(),
-            });
-        }
-        let agreed_cents = match snapshot.dns.current_availability.as_ref() {
-            Some(fauna_provisioning::registrar::RegistrarAvailability::Buyable {
-                price_cents,
-                ..
-            }) => *price_cents,
-            _ => {
-                machine.mutate(|s| s.is_loading = false);
-                return Err(OnboardingError::InvalidTransition {
-                    from: "vps_config".into(),
-                    reason: "buy-domain flow requires a buyable availability".into(),
-                });
-            }
-        };
+    } else if let Some((registrar, agreed_cents)) = registrar_impl.as_ref() {
+        // Path 2: a bought domain — registered (unless this wizard already
+        // did), its DNS at the registrar or, when the DNS cover is another
+        // provider, in a zone created there that the domain is pointed at.
         let dns_pid = snapshot.dns.selected_provider_id.clone().ok_or_else(|| {
             OnboardingError::InvalidTransition {
                 from: "vps_config".into(),
@@ -9461,13 +10150,15 @@ async fn run_provisioning_inner(
         .ok_or_else(|| OnboardingError::Other {
             detail: format!("provider {dns_pid} doesn't support DNS"),
         })?;
-        let registrar = dispatch::registrar(
-            dns_id,
-            dispatch::Credentials::from_map(snapshot.dns.creds.clone()),
-        )
-        .ok_or_else(|| OnboardingError::Other {
-            detail: format!("provider {dns_pid} doesn't support registrar"),
-        })?;
+        let purchase = fauna_provisioning::orchestrator::DomainPurchase {
+            registrar,
+            years: 1,
+            agreed_price_cents: *agreed_cents,
+            contact: snapshot.dns.contact.as_ref(),
+            already_registered,
+            delegate: run_registrar.as_deref() != Some(dns_pid.as_str()),
+            on_event: &on_domain_event,
+        };
 
         let observer_for_notify2 = machine.observer.clone();
         let notify2 = move || observer_for_notify2.on_changed();
@@ -9477,18 +10168,15 @@ async fn run_provisioning_inner(
             .unwrap_or_else(|| format!("https://{domain}"));
         let probe_host = domain.clone();
         let probe_for_ip = move |ipv4: &str| nest_probe_client_resolving(&probe_host, ipv4);
-        match fauna_provisioning::orchestrator::provision_with_registration_snapshot(
+        match fauna_provisioning::orchestrator::provision_with_purchase_snapshot(
             &http,
             probe_for_ip,
             registry.as_ref(),
             &vps,
             &dns,
-            &registrar,
+            &purchase,
             &domain,
             &nest_url,
-            1,
-            agreed_cents,
-            snapshot.dns.contact.as_ref(),
             &server_name,
             &region,
             &st.id,
@@ -9618,7 +10306,7 @@ fn curated_offers_for(pid: &str) -> Vec<&'static str> {
         .to_vec()
 }
 
-fn dispatch_provider_id(s: &str) -> Option<fauna_provisioning::ProviderId> {
+pub(crate) fn dispatch_provider_id(s: &str) -> Option<fauna_provisioning::ProviderId> {
     fauna_provisioning::ProviderId::from_str(s)
 }
 
@@ -9816,34 +10504,8 @@ impl OnboardingMachine {
         form: CredentialForm,
         field_id: String,
     ) -> Result<HostedAuthPrompt, OnboardingError> {
-        match crate::hosted_auth::begin(&self.http, self.hosted_auth_base_url(form)).await {
-            Ok((prompt, pending)) => {
-                self.hosted_auth_pending
-                    .lock()
-                    .unwrap()
-                    .insert((form, field_id.clone()), pending);
-                self.set_hosted_auth_state(
-                    form,
-                    &field_id,
-                    HostedAuthState::Pending {
-                        user_code: prompt.user_code.clone(),
-                        verification_url: prompt.verification_url.clone(),
-                    },
-                );
-                Ok(prompt)
-            }
-            Err(e) => {
-                let message = e.to_string();
-                self.set_hosted_auth_state(
-                    form,
-                    &field_id,
-                    HostedAuthState::Failed {
-                        message: message.clone(),
-                    },
-                );
-                Err(OnboardingError::Other { detail: message })
-            }
-        }
+        self.slot_hosted_auth_begin(HostedAuthSlot::Form(form), field_id)
+            .await
     }
 
     /// Step 2: poll the token endpoint at the server's interval until the user
@@ -9856,32 +10518,85 @@ impl OnboardingMachine {
         form: CredentialForm,
         field_id: String,
     ) -> Result<(), OnboardingError> {
+        self.slot_hosted_auth_wait(HostedAuthSlot::Form(form), field_id)
+            .await
+    }
+}
+
+impl OnboardingMachine {
+    pub(crate) async fn slot_hosted_auth_begin(
+        &self,
+        form: HostedAuthSlot,
+        field_id: String,
+    ) -> Result<HostedAuthPrompt, OnboardingError> {
+        match crate::hosted_auth::begin(&self.http, self.hosted_auth_base_url(&form)).await {
+            Ok((prompt, pending)) => {
+                self.hosted_auth_pending
+                    .lock()
+                    .unwrap()
+                    .insert((form.clone(), field_id.clone()), pending);
+                self.set_hosted_auth_state(
+                    &form,
+                    &field_id,
+                    HostedAuthState::Pending {
+                        user_code: prompt.user_code.clone(),
+                        verification_url: prompt.verification_url.clone(),
+                    },
+                );
+                Ok(prompt)
+            }
+            Err(e) => {
+                let message = e.to_string();
+                self.set_hosted_auth_state(
+                    &form,
+                    &field_id,
+                    HostedAuthState::Failed {
+                        message: message.clone(),
+                    },
+                );
+                Err(OnboardingError::Other { detail: message })
+            }
+        }
+    }
+
+    pub(crate) async fn slot_hosted_auth_wait(
+        &self,
+        form: HostedAuthSlot,
+        field_id: String,
+    ) -> Result<(), OnboardingError> {
         let pending = self
             .hosted_auth_pending
             .lock()
             .unwrap()
-            .remove(&(form, field_id.clone()));
+            .remove(&(form.clone(), field_id.clone()));
         let Some(pending) = pending else {
             return Err(OnboardingError::Other {
                 detail: "no sign-in in progress for this field".into(),
             });
         };
-        let label = format!("{form:?}/{field_id}");
+        let label = match &form {
+            HostedAuthSlot::Form(f) => format!("{f:?}/{field_id}"),
+            HostedAuthSlot::Provider(pid) => format!("{pid}/{field_id}"),
+        };
         match crate::hosted_auth::wait(&self.http, pending, &label).await {
             Ok(token) => {
                 let id = field_id.clone();
                 self.mutate(|s| {
-                    let (creds, states, verified) = match form {
-                        CredentialForm::Dns => (
+                    let (creds, states, verified) = match &form {
+                        HostedAuthSlot::Form(CredentialForm::Dns) => (
                             &mut s.dns.creds,
                             &mut s.dns.hosted_auth,
                             &mut s.dns.verified,
                         ),
-                        CredentialForm::Vps => (
+                        HostedAuthSlot::Form(CredentialForm::Vps) => (
                             &mut s.vps.creds,
                             &mut s.vps.hosted_auth,
                             &mut s.vps.verified,
                         ),
+                        HostedAuthSlot::Provider(pid) => {
+                            let c = s.providers.providers.entry(pid.clone()).or_default();
+                            (&mut c.creds, &mut c.hosted_auth, &mut c.connected)
+                        }
                     };
                     // Same discipline as `set_dns_cred`: wrap at the input
                     // boundary, and a new credential un-verifies the form.
@@ -9893,7 +10608,7 @@ impl OnboardingMachine {
             }
             Err(message) => {
                 self.set_hosted_auth_state(
-                    form,
+                    &form,
                     &field_id,
                     HostedAuthState::Failed {
                         message: message.clone(),
@@ -9910,27 +10625,24 @@ impl OnboardingMachine {
     /// Where a `hosted-auth` field's sign-in stands — the app's button label
     /// source (`onboarding.md` § 4). `Idle` for a field never started.
     pub fn hosted_auth_state(&self, form: CredentialForm, field_id: String) -> HostedAuthState {
-        self.with_state(|s| {
-            let states = match form {
-                CredentialForm::Dns => &s.dns.hosted_auth,
-                CredentialForm::Vps => &s.vps.hosted_auth,
-            };
-            states
-                .get(&field_id)
-                .cloned()
-                .unwrap_or(HostedAuthState::Idle)
-        })
+        self.slot_hosted_auth_state(&HostedAuthSlot::Form(form), &field_id)
     }
 
     /// Whether the sign-in button is pressable: the form's `base-url` is
     /// filled in and no attempt on this field is mid-flight. Owned here so no
     /// app re-derives "which sibling field is the address" (priority #2).
     pub fn hosted_auth_can_begin(&self, form: CredentialForm, field_id: String) -> bool {
-        self.hosted_auth_base_url(form).is_some()
-            && !matches!(
-                self.hosted_auth_state(form, field_id),
-                HostedAuthState::Pending { .. }
-            )
+        self.slot_hosted_auth_can_begin(&HostedAuthSlot::Form(form), &field_id)
+    }
+
+    /// The sign-in button's answer for one field of a built form
+    /// ([`Self::hosted_auth_can_begin`] with its reason).
+    pub fn hosted_auth_possibility(
+        &self,
+        form: CredentialForm,
+        field_id: String,
+    ) -> fauna_core::possibility::Possibility {
+        self.slot_hosted_auth_possibility(&HostedAuthSlot::Form(form), &field_id)
     }
 
     /// The `hosted-auth` button's label for one field, derived purely from
@@ -9947,26 +10659,88 @@ impl OnboardingMachine {
     }
 }
 
+/// Which credential bag a `hosted-auth` sign-in lands its token in: one of the
+/// two built forms, or a provider's dialog on the choose-providers page.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum HostedAuthSlot {
+    Form(CredentialForm),
+    Provider(String),
+}
+
 impl OnboardingMachine {
-    fn hosted_auth_base_url(&self, form: CredentialForm) -> Option<String> {
+    pub(crate) fn slot_hosted_auth_state(
+        &self,
+        form: &HostedAuthSlot,
+        field_id: &str,
+    ) -> HostedAuthState {
+        self.with_state(|s| {
+            let states = match form {
+                HostedAuthSlot::Form(CredentialForm::Dns) => Some(&s.dns.hosted_auth),
+                HostedAuthSlot::Form(CredentialForm::Vps) => Some(&s.vps.hosted_auth),
+                HostedAuthSlot::Provider(pid) => {
+                    s.providers.providers.get(pid).map(|c| &c.hosted_auth)
+                }
+            };
+            states
+                .and_then(|m| m.get(field_id))
+                .cloned()
+                .unwrap_or(HostedAuthState::Idle)
+        })
+    }
+
+    pub(crate) fn slot_hosted_auth_can_begin(&self, form: &HostedAuthSlot, field_id: &str) -> bool {
+        self.slot_hosted_auth_possibility(form, field_id)
+            .is_possible()
+    }
+
+    /// A `hosted-auth` sign-in button's answer: the provider's address typed,
+    /// and no sign-in of this field already waiting on the browser.
+    pub(crate) fn slot_hosted_auth_possibility(
+        &self,
+        form: &HostedAuthSlot,
+        field_id: &str,
+    ) -> fauna_core::possibility::Possibility {
+        use crate::credential_gate::{BASE_URL_FIRST, FINISH_FIRST, first_blocked};
+        first_blocked(&[
+            (self.hosted_auth_base_url(form).is_none(), BASE_URL_FIRST),
+            (
+                matches!(
+                    self.slot_hosted_auth_state(form, field_id),
+                    HostedAuthState::Pending { .. }
+                ),
+                FINISH_FIRST,
+            ),
+        ])
+    }
+
+    fn hosted_auth_base_url(&self, form: &HostedAuthSlot) -> Option<String> {
         self.with_state(|s| {
             let creds = match form {
-                CredentialForm::Dns => &s.dns.creds,
-                CredentialForm::Vps => &s.vps.creds,
+                HostedAuthSlot::Form(CredentialForm::Dns) => Some(&s.dns.creds),
+                HostedAuthSlot::Form(CredentialForm::Vps) => Some(&s.vps.creds),
+                HostedAuthSlot::Provider(pid) => s.providers.providers.get(pid).map(|c| &c.creds),
             };
-            creds
+            creds?
                 .get(crate::hosted_auth::BASE_URL_FIELD)
                 .map(|v| v.as_str().trim().to_string())
                 .filter(|v| !v.is_empty())
         })
     }
 
-    fn set_hosted_auth_state(&self, form: CredentialForm, field_id: &str, state: HostedAuthState) {
+    fn set_hosted_auth_state(&self, form: &HostedAuthSlot, field_id: &str, state: HostedAuthState) {
         let id = field_id.to_string();
         self.mutate(|s| {
             let states = match form {
-                CredentialForm::Dns => &mut s.dns.hosted_auth,
-                CredentialForm::Vps => &mut s.vps.hosted_auth,
+                HostedAuthSlot::Form(CredentialForm::Dns) => &mut s.dns.hosted_auth,
+                HostedAuthSlot::Form(CredentialForm::Vps) => &mut s.vps.hosted_auth,
+                HostedAuthSlot::Provider(pid) => {
+                    &mut s
+                        .providers
+                        .providers
+                        .entry(pid.clone())
+                        .or_default()
+                        .hosted_auth
+                }
             };
             states.insert(id, state);
         });
@@ -10068,7 +10842,20 @@ mod hosted_auth_tests {
             "base-url + token filled → the verify button lights up"
         );
         // And the VPS form inherits both the token and the Connected state.
+        // Continue is offered only once the DNS step is done — the token
+        // verified and the handle's zone found on it — so that is seeded
+        // (the verify is not what this test is about).
         m.toggle_same_provider_for_vps(true);
+        m.set_current_handle("admin@example.com".into());
+        m.set_dns_state_for_test(|d| {
+            d.verified = true;
+            d.buy_domain = false;
+            d.current_zones = vec![fauna_provisioning::dns::DnsZone {
+                id: "z".into(),
+                name: "example.com".into(),
+                nameservers: Vec::new(),
+            }];
+        });
         m.continue_from_dns().unwrap();
         assert_eq!(
             m.hosted_auth_state(CredentialForm::Vps, "api-token".into()),
@@ -10331,6 +11118,205 @@ mod tests {
     use super::*;
     use crate::observer::CountingObserver;
     use fauna_test_tracing::capture_tracing_at_info;
+
+    /// `surface` never drops a refusal (rule 7): an `Err` with nothing on the
+    /// shared error line puts its own text there; the machine's own refusal,
+    /// already there, is kept rather than overwritten; `Ok` passes through.
+    #[test]
+    fn surface_puts_an_unreported_err_on_the_error_line_and_keeps_the_machines_own() {
+        let m = OnboardingMachine::new(CountingObserver::new());
+        assert_eq!(m.surface::<u8, String>(Ok(7)), Some(7));
+        assert_eq!(m.error_message(), None);
+
+        assert_eq!(m.surface::<(), _>(Err("the call failed")), None);
+        assert_eq!(m.error_message().as_deref(), Some("the call failed"));
+
+        m.set_error_message("the machine's own reason".into());
+        assert_eq!(m.surface::<(), _>(Err("a second text")), None);
+        assert_eq!(
+            m.error_message().as_deref(),
+            Some("the machine's own reason")
+        );
+    }
+
+    /// `continue_from_dns` asks `dns_continue_possibility` first: unverified,
+    /// the press is refused with the status line the page paints, the step
+    /// stays on `dns_config`, and nothing is mirrored to the VPS form.
+    #[test]
+    fn continue_from_dns_refuses_what_the_page_does_not_offer() {
+        let m = OnboardingMachine::new(CountingObserver::new());
+        m.set_step_for_test(OnboardingStep::DnsConfig);
+        m.set_current_handle("admin@example.com".into());
+        m.select_dns_provider("hetzner".into());
+        m.set_dns_cred("api-token".into(), "tok".into());
+        let why = m
+            .dns_continue_possibility()
+            .reason()
+            .cloned()
+            .expect("unverified → blocked");
+        assert!(m.continue_from_dns().is_err());
+        assert_eq!(m.step(), OnboardingStep::DnsConfig);
+        assert_eq!(
+            m.vps_config().selected_provider_id,
+            None,
+            "nothing mirrored"
+        );
+        assert_eq!(
+            m.error_message(),
+            Some(why.resolve_nested(fauna_i18n::strings::lookup)),
+            "the refusal names itself with the page's own line"
+        );
+
+        m.set_dns_state_for_test(|d| {
+            d.verified = true;
+            d.buy_domain = false;
+            d.current_zones = vec![fauna_provisioning::dns::DnsZone {
+                id: "z".into(),
+                name: "example.com".into(),
+                nameservers: Vec::new(),
+            }];
+        });
+        assert!(m.dns_continue_possibility().is_possible());
+        m.continue_from_dns().unwrap();
+        assert_eq!(m.step(), OnboardingStep::VpsConfig);
+    }
+
+    /// `submit_handle_check_continue` asks `handle_continue_possibility`
+    /// first: before a check found an outcome, the press stays on handle
+    /// entry with the snapshot's message as the error; once the check found
+    /// `RegisteredNoNest` it goes on.
+    #[tokio::test]
+    async fn handle_continue_refuses_before_a_check_found_an_outcome() {
+        let m = OnboardingMachine::new(CountingObserver::new());
+        m.set_step_for_test(OnboardingStep::HandleEntry);
+        let idle = HandleCheckSnapshot::idle();
+        let why = m
+            .handle_continue_possibility()
+            .reason()
+            .cloned()
+            .expect("idle → blocked");
+        assert_eq!(why, idle.message);
+        assert_eq!(
+            m.submit_handle_check_continue().await,
+            OnboardingStep::HandleEntry
+        );
+        assert_eq!(
+            m.error_message(),
+            Some(why.resolve_nested(fauna_i18n::strings::lookup))
+        );
+
+        m.set_current_handle("admin@example.com".into());
+        m.set_handle_check_snapshot_for_test(HandleCheckSnapshot {
+            phase: crate::snapshots::HandleCheckPhase::Complete,
+            outcome: crate::snapshots::HandleCheckOutcome::RegisteredNoNest,
+            message: LocalizedText::key("onboarding.handle_check.outcome.registered_no_nest"),
+            continue_enabled: true,
+            terms_notice_visible: false,
+        });
+        assert!(m.handle_continue_possibility().is_possible());
+        assert_ne!(
+            m.submit_handle_check_continue().await,
+            OnboardingStep::HandleEntry,
+            "a registered domain with no nest goes on to set-up"
+        );
+    }
+
+    /// Both recovery methods answer one predicate: blocked with its own
+    /// reason until a box is chosen, and the actions ask it.
+    #[test]
+    fn the_recovery_methods_wait_on_a_chosen_box() {
+        use fauna_core::possibility::Possibility;
+        let m = OnboardingMachine::new(CountingObserver::new());
+        m.set_step_for_test(OnboardingStep::NestRecovery);
+        assert_eq!(
+            m.recovery_method_possibility(),
+            Possibility::blocked(LocalizedText::key(
+                "onboarding.recovery.method_blocked_pick_box"
+            ))
+        );
+        assert!(m.recover_via_cloud().is_err());
+        assert!(m.recover_via_selfhosted().is_err());
+        assert_eq!(m.step(), OnboardingStep::NestRecovery);
+        assert!(m.error_message().is_some(), "the refusal names itself");
+
+        m.select_recovery_box("aa".repeat(32));
+        assert_eq!(m.recovery_method_possibility(), Possibility::Possible);
+        m.recover_via_selfhosted().unwrap();
+        assert_eq!(m.step(), OnboardingStep::RecoverSelfhostedInstructions);
+    }
+
+    /// The "Almost ready" doors answer from the snapshot: the recheck and the
+    /// exit blocked under a claim, the copy blocked with no records.
+    #[test]
+    fn the_almost_ready_doors_answer_from_the_snapshot() {
+        let m = OnboardingMachine::new(CountingObserver::new());
+        m.set_awaiting_manual_dns_snapshot_for_test(AwaitingManualDnsSnapshot {
+            state: AwaitingDnsState::Claiming,
+            dns_records: Vec::new(),
+            message: LocalizedText::key("onboarding.awaiting_dns.claiming"),
+        });
+        assert!(!m.awaiting_dns_recheck_possibility().is_possible());
+        assert!(!m.awaiting_dns_fallthrough_possibility().is_possible());
+        assert_eq!(
+            m.awaiting_dns_copy_possibility()
+                .reason()
+                .map(|r| r.key.clone()),
+            Some("onboarding.awaiting_dns.server_starting".into())
+        );
+        m.set_awaiting_manual_dns_snapshot_for_test(AwaitingManualDnsSnapshot::idle());
+        assert!(m.awaiting_dns_recheck_possibility().is_possible());
+        assert!(m.awaiting_dns_fallthrough_possibility().is_possible());
+    }
+
+    /// The possibility getters say exactly what the older bool/reason pairs
+    /// say, in every shortfall: enabled iff the old predicate was true, and
+    /// the blocked reason is the old reason getter's.
+    #[test]
+    fn the_continue_possibilities_agree_with_the_bool_and_reason_pairs() {
+        use fauna_core::possibility::Possibility;
+        use fauna_provisioning::progress::{OverallStatus, ProvisioningSnapshot};
+        let m = OnboardingMachine::new(CountingObserver::new());
+        let check_vps = |m: &OnboardingMachine| {
+            let p = m.vps_continue_possibility();
+            assert_eq!(p.is_possible(), m.can_continue_vps());
+            assert_eq!(p.reason().cloned(), m.vps_continue_blocked_reason());
+            assert_ne!(p, Possibility::Absent);
+        };
+        check_vps(&m);
+        m.mutate(|s| s.vps.selected_provider_id = Some("hetzner".into()));
+        check_vps(&m);
+        m.mutate(|s| s.vps.verified = true);
+        check_vps(&m);
+        m.mutate(|s| s.vps.selected_location_id = Some("fsn1".into()));
+        check_vps(&m);
+        m.mutate(|s| s.vps.selected_server_type_id = Some("cx22".into()));
+        check_vps(&m);
+        assert_eq!(m.vps_continue_possibility(), Possibility::Possible);
+
+        for overall in [
+            OverallStatus::Idle,
+            OverallStatus::Running,
+            OverallStatus::Failed,
+            OverallStatus::Cancelled,
+            OverallStatus::Succeeded,
+        ] {
+            m.set_provisioning_snapshot_for_test(ProvisioningSnapshot {
+                overall,
+                ..Default::default()
+            });
+            let p = m.provisioning_continue_possibility();
+            assert_eq!(
+                p.is_possible(),
+                m.can_continue_provisioning(),
+                "{overall:?}"
+            );
+            assert_eq!(
+                p.reason().cloned(),
+                m.provisioning_continue_blocked_reason(),
+                "{overall:?}"
+            );
+        }
+    }
 
     /// Regression guard for the question a live windows provisioning run could not answer: was the poll reaching the
     /// box via its captured-IP DNS override, or had it silently fallen back to
@@ -11047,6 +12033,7 @@ mod tests {
         let zone = |id: &str, name: &str| DnsZone {
             id: id.into(),
             name: name.into(),
+            nameservers: Vec::new(),
         };
         let m: Arc<OnboardingMachine> = OnboardingMachine::new(CountingObserver::new());
         m.set_current_handle("admin@box.example.com".into());
@@ -11093,6 +12080,7 @@ mod tests {
         .map(|(id, name)| DnsZone {
             id: id.into(),
             name: name.into(),
+            nameservers: Vec::new(),
         })
         .collect();
         let id = |d: &str| covering_zone(d, &zones).map(|z| z.id.as_str());
@@ -12411,6 +13399,19 @@ mod tests {
         machine.call_machine_method("toggle_same_provider_for_vps".into(), "true".into());
         machine.call_machine_method("select_dns_provider".into(), "\"hetzner\"".into());
         machine.call_machine_method("set_dns_cred".into(), r#"["api-token","MOCK"]"#.into());
+        // The bridge's caller verifies the token before Continue (the async
+        // `verify_dns` above); that verify is seeded here, since Continue
+        // refuses an unverified step.
+        machine.set_current_handle("admin@example.com".into());
+        machine.set_dns_state_for_test(|d| {
+            d.verified = true;
+            d.buy_domain = false;
+            d.current_zones = vec![fauna_provisioning::dns::DnsZone {
+                id: "z".into(),
+                name: "example.com".into(),
+                nameservers: Vec::new(),
+            }];
+        });
 
         let dns = machine.dns_config();
         assert_eq!(dns.selected_provider_id.as_deref(), Some("hetzner"));
@@ -12431,7 +13432,9 @@ mod tests {
             "continue_from_dns mirrored the provider onto VPS"
         );
         assert_eq!(snap.vps.creds.len(), 1, "creds mirrored onto VPS");
-        assert!(snap.vps.verified);
+        // The mirrored token is being checked and listed in the background
+        // (`tests/dns_to_vps_mirror_lists.rs` pins the outcome against a fake).
+        assert!(snap.vps.verifying && !snap.vps.verified);
     }
 
     /// The `provisioning_snapshot` reader returns a JSON snapshot the driver
@@ -13384,5 +14387,15 @@ impl VpsOffersListing {
         }
         self.in_flight = Some(location.to_string());
         true
+    }
+}
+
+/// The set-up path's first page after the handle check: the
+/// choose-providers page on an app that renders it, else `dns_config`.
+fn setup_path_first_step(s: &State) -> OnboardingStep {
+    if s.renders_provider_choice {
+        OnboardingStep::ProviderChoice
+    } else {
+        OnboardingStep::DnsConfig
     }
 }

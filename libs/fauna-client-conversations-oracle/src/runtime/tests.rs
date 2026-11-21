@@ -196,6 +196,8 @@ fn principal(holder: [u8; 32]) -> AdmittedPrincipal {
 fn custodian(account: RuntimeAccount) -> ConversationsCustodian<RuntimeAccount> {
     let manager = ConversationsManager::new();
     manager.register_backend(Arc::new(MockRailBackend::new(Rail::FaunaMls)));
+    // The page has read its rooms, as a receive loop's first sweep marks it.
+    manager.mark_rooms_loaded(manager.identity_epoch());
     ConversationsCustodian::new(account, manager)
 }
 

@@ -29,7 +29,11 @@ import com.fauna.app.ui.components.naiveMarkdownWrap
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.viewmodel.ConversationsVM
 import kotlinx.coroutines.launch
+import com.fauna.app.ui.util.answerRefusal
+import com.fauna.app.ui.util.resolveLocalized
 import uniffi.fauna_conversations.ComposeState
+import uniffi.fauna_conversations.NewThreadControl
+import uniffi.fauna_conversations.newThreadControlPossibility
 import uniffi.fauna_conversations.RoomClass
 import uniffi.fauna_conversations.SendState
 // The room model's class mapping — the shared `fauna_conversations::room`
@@ -40,6 +44,7 @@ import uniffi.fauna_conversations.roomProspectiveClass
 import uniffi.fauna_conversations.TypedAddress
 import uniffi.fauna_conversations.typedAddressDisplayWithBridges
 import uniffi.fauna_core.LocalizedText
+import uniffi.fauna_core.Possibility
 import social.fauna.generated.Ids
 
 /**
@@ -72,6 +77,21 @@ fun NewThreadComposeScreen(
     val manager = vm.conversationsManager
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    // A refusal or failure no draft carries — a press on a blocked control, a
+    // send error the manager could not stamp — said on `error-message`, never
+    // only the log (`ui/README.md` § Offer only what is possible, rule 7).
+    var pageError by remember { mutableStateOf<String?>(null) }
+    // Send, attach and topic answer the shared new-thread predicate over the
+    // live draft (`ui/conversations.md` § Errors & edge cases → *The new-thread
+    // composer offers only what it can send*); the paint and every handler ask
+    // this one answer (rule 6).
+    fun answer(control: NewThreadControl): Possibility =
+        newThreadControlPossibility(manager.snapshot().newThreadCompose, control)
+    fun allowed(control: NewThreadControl): Boolean {
+        val refusal = answerRefusal(context, answer(control)) ?: return true.also { pageError = null }
+        pageError = refusal.reason
+        return false
+    }
 
     // `attachment-button` before a thread exists (conversations.md § Attachments):
     // same contentResolver + `ExifStripper` idiom as ConversationDetailScreen's
@@ -150,16 +170,31 @@ fun NewThreadComposeScreen(
         onTopicToggle = {
             // No per-thread id for new-thread compose; toggle subject_draft
             // directly (linux detail.rs new-thread topic-toggle).
-            val hasSubject = manager.snapshot().newThreadCompose?.subjectDraft != null
-            manager.setNewThreadSubject(if (hasSubject) null else "")
+            if (allowed(NewThreadControl.TOPIC)) {
+                val hasSubject = manager.snapshot().newThreadCompose?.subjectDraft != null
+                manager.setNewThreadSubject(if (hasSubject) null else "")
+            }
         },
         onSend = {
-            scope.launch {
+            if (allowed(NewThreadControl.SEND)) scope.launch {
                 // A refused send throws AFTER materializing + selecting the
-                // thread, so navigate on either outcome. Empty
-                // recipient → send_new_thread no-ops (Ok(None)), selected stays
-                // null → we remain on the compose screen.
-                runCatching { manager.sendNewThread() }
+                // thread, so navigate on either outcome; with no one to send to
+                // the manager refuses on the draft's `send_state` and we stay.
+                // The error is never dropped: one the manager did not stamp on
+                // a draft reaches `error-message` from its own detail (tui's
+                // `Outcome::NewThreadSent(Option<String>)`).
+                runCatching { manager.sendNewThread() }.exceptionOrNull()?.let { e ->
+                    val stamped = manager.snapshot().newThreadCompose?.sendState is SendState.Failed
+                    if (!stamped) {
+                        pageError = resolveLocalized(
+                            context,
+                            LocalizedText(
+                                key = "conversations.unified.error_send",
+                                args = mapOf("message" to (e.message ?: e.toString())),
+                            ),
+                        )
+                    }
+                }
                 manager.snapshot().selectedThreadId?.let { tid ->
                     navController.navigate("conversation/$tid") {
                         popUpTo("conversations")
@@ -167,7 +202,9 @@ fun NewThreadComposeScreen(
                 }
             }
         },
-        onAttach = { attachmentPickerLauncher.launch("*/*") },
+        onAttach = { if (allowed(NewThreadControl.ATTACH)) attachmentPickerLauncher.launch("*/*") },
+        newThreadAnswer = ::answer,
+        pageError = pageError,
         onReplyCancel = { /* new-thread compose has no reply context */ },
         // Unstage a staged attachment on the single-slot new-thread draft —
         // mirrors ConversationDetailScreen's onRemoveAttachment.
@@ -214,6 +251,13 @@ fun NewThreadComposeContent(
     // Byte-size label for a staged-attachment chip — same FFI-free-injection
     // shape as [displayAddress]; default calls the real shared FFI.
     byteSize: (kotlin.ULong) -> LocalizedText = { com.fauna.ffi.byteSize(it) },
+    // The shared new-thread answer for Send, attach and topic
+    // (`new_thread_control_possibility`), injected like [displayAddress] so this
+    // Content stays FFI-free; the default offers all three.
+    newThreadAnswer: (NewThreadControl) -> Possibility = { Possibility.Possible },
+    // A refusal or failure no draft carries (a press on a blocked control, an
+    // unstamped send error) — shown on `error-message` under the draft's own.
+    pageError: String? = null,
 ) {
     // System back gesture is a plain dismiss too: route it through onBack so the
     // composer view deactivates while the draft is preserved (conversations.md
@@ -258,9 +302,9 @@ fun NewThreadComposeContent(
             // ComposeState the manager stamps (no client-side state machine).
             // `reason` is a shared LocalizedText, resolved through the app's
             // string table (rule #3: never hardcode English).
-            (compose?.sendState as? SendState.Failed)?.let { failed ->
+            ((compose?.sendState as? SendState.Failed)?.let { localized(it.reason).orEmpty() } ?: pageError)?.let { text ->
                 Text(
-                    localized(failed.reason).orEmpty(),
+                    text,
                     color = MaterialTheme.colorScheme.error,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -377,6 +421,7 @@ fun NewThreadComposeContent(
                 displayAddress = displayAddress,
                 byteSize = byteSize,
                 foundsRoom = foundsRoom,
+                newThreadAnswer = newThreadAnswer,
             )
         }
     }

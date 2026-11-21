@@ -50,6 +50,14 @@ public final class AdminDnsVM {
     public var errorMessage: String?
     public private(set) var isLoading = false
 
+    /// Whether each machine's first read has answered — the `Possibility`
+    /// answers below read a snapshot only once it has (`docs/goal/ui/README.md`
+    /// § Offer only what is possible, rule 5: a read that has not resolved is
+    /// never possible; `dns-management.md` § Errors & edge cases, *Loading is
+    /// not empty*). A thrown first read leaves it unresolved.
+    private var dnsRead = false
+    private var localRead = false
+
     private var api: APIClient?
     private var dnsMachine: DnsManagementMachine?
     private var localMachine: LocalDomainMachine?
@@ -98,6 +106,23 @@ public final class AdminDnsVM {
     /// `admin-dns-rename-banner` + the per-row `admin-dns-domain-rename-state`
     /// (`mail-primary-domain-rename.md` § UX surface).
     public var activeRename: PrimaryDomainRenameView? { local?.activeRename }
+
+    /// `admin-dns-cert-delegate-button`'s answer — the shared
+    /// `delegate_possibility` over the held credentials' zones
+    /// (`dns-management.md` § Errors & edge cases, *Renewal delegation and the
+    /// rename banner answer too*): blocked until a credential covers a zone.
+    public var delegatePossibility: Possibility {
+        dnsDelegatePossibility(credentialZones: credZones)
+    }
+
+    /// The rename banner's `action` answer — the shared
+    /// `PrimaryDomainRenameView::{complete,extend,abort}_possibility`: possible
+    /// in the states that take it, absent outside them (and absent with no
+    /// rename in flight).
+    public func renamePossibility(_ action: FfiPrimaryDomainRenameAction) -> Possibility {
+        guard let rename = activeRename else { return .absent }
+        return primaryDomainRenameActionPossibility(view: rename, action: action)
+    }
     /// Whether "Rename primary domain" is offerable — a primary plus at least
     /// one active non-primary domain to promote (the two-step rule). A UX hint
     /// only; the nest re-validates every dispatch.
@@ -135,6 +160,72 @@ public final class AdminDnsVM {
             return adminPickerOption(user: a)
         }
         return L.admin.actorIdFallbackLabel(short: hexFull(bytes: id))
+    }
+
+    // MARK: - Possibility answers (`dns-management.md` § Errors & edge cases)
+    //
+    // Every gated control on the page is painted from one shared answer
+    // (`fauna_client_dns::affordances`, `fauna_client_mail_settings::domain_forms`,
+    // over their UniFFI faces in `fauna-ffi`'s `mail_admin`), and its action
+    // asks the SAME answer first, refusing with its reason on `error-message`
+    // (`refused(_:)`) — tui's `refuse_dns`. Nothing is re-derived here.
+
+    /// The DNS snapshot once its first read answered; `nil` before (never possible).
+    public var resolvedDns: DnsSnapshot? { dnsRead ? dns : nil }
+    /// The domains snapshot once its first read answered; `nil` before (the page
+    /// says it is loading, never "No domains yet").
+    public var resolvedLocal: LocalDomainsSnapshot? { localRead ? local : nil }
+    /// The active domain names the master switch's answer reads (`nil` until
+    /// the domains read resolved).
+    private var resolvedActiveNames: [String]? { resolvedLocal?.active.map(\.domain) }
+
+    /// `admin-dns-domain-mode` on `domain`, for the flip to `managed`: opting
+    /// in needs a held credential covering the domain; opting out always may.
+    public func setModeAnswer(domain: String, managed: Bool) -> Possibility {
+        dnsSetModePossibility(dns: resolvedDns, domain: domain, managed: managed)
+    }
+    /// `admin-dns-manage-all-toggle`, for the flip to `managed`: both reads
+    /// resolved, a domain, and every domain covered for "on".
+    public func manageAllAnswer(managed: Bool) -> Possibility {
+        dnsManageAllPossibility(dns: resolvedDns, activeDomains: resolvedActiveNames, managed: managed)
+    }
+    /// `admin-dns-cert-issue-button` on `domain`: not while its manual order waits.
+    public func certIssueAnswer(domain: String) -> Possibility {
+        dnsCertIssuePossibility(pending: dns?.pendingCert, domain: domain)
+    }
+    /// `admin-dns-domain-remove-button` on `domain` (the primary is renamed
+    /// away, never removed). A row the domains read does not hold yet is loading.
+    public func removeAnswer(domain: String) -> Possibility {
+        guard let row = localDomain(domain) else { return readPossibility(read: .pending) }
+        return localDomainRemovePossibility(row: row)
+    }
+    /// `admin-dns-domain-rename-button` (the primary row).
+    public var renameAnswer: Possibility {
+        guard let ld = resolvedLocal else { return readPossibility(read: .pending) }
+        return localDomainRenamePossibility(domains: ld)
+    }
+    /// `admin-dns-domain-promote-button` (a non-primary row).
+    public var promoteAnswer: Possibility {
+        guard let ld = resolvedLocal else { return readPossibility(read: .pending) }
+        return localDomainPromotePossibility(domains: ld)
+    }
+    /// `admin-dns-add-domain-submit-button` over the typed draft.
+    public func addDomainAnswer(draft: String) -> Possibility {
+        localDomainAddPossibility(domains: resolvedLocal, draft: draft)
+    }
+    /// `admin-dns-rename-submit-button` over the picked target and grace draft.
+    public func renameDraftAnswer(target: String, graceDays: String) -> Possibility {
+        localDomainRenameDraftPossibility(domains: resolvedLocal, target: target, graceDays: graceDays)
+    }
+
+    /// Refuse a page action with the reason of the answer its control was
+    /// painted from, on `error-message`; nothing is dispatched. Returns whether
+    /// it refused, so a caller reads `guard !vm.refused(answer) else { return }`.
+    @discardableResult
+    public func refused(_ answer: Possibility) -> Bool {
+        guard let refusal = answer.refusal else { return false }
+        if !refusal.isEmpty { errorMessage = refusal }
+        return true
     }
 
     // MARK: - Lifecycle (pull-based; machines built once, hydrate on every appear)
@@ -196,6 +287,7 @@ public final class AdminDnsVM {
     /// error (a missing covering credential, or a failed publish after the
     /// committed opt-in) on screen: a trailing verify would clear it.
     public func setMode(domain: String, managed: Bool) async {
+        guard !refused(setModeAnswer(domain: domain, managed: managed)) else { return }
         await dnsDispatch(.refresh)
         guard await dnsDispatch(.setMode(domain: domain, managed: managed)) else { return }
         await dnsDispatch(.verifyRecords(domain: nil))
@@ -207,6 +299,7 @@ public final class AdminDnsVM {
     /// re-verifies. Same guard as `setMode` — an unguarded chain would wipe the
     /// rejection (domains already switched keep their new mode).
     public func setAllManaged(_ managed: Bool) async {
+        guard !refused(manageAllAnswer(managed: managed)) else { return }
         await dnsDispatch(.refresh)
         var errored = false
         for name in activeDomainNames {
@@ -219,7 +312,10 @@ public final class AdminDnsVM {
         }
     }
 
-    public func putCredentials(providerId: String, fields: [DnsCredentialField], label: String) async {
+    /// Verify and seal a provider credential. Returns whether it was stored:
+    /// the write-only form closes only then, and a rejection keeps what was typed.
+    @discardableResult
+    public func putCredentials(providerId: String, fields: [DnsCredentialField], label: String) async -> Bool {
         await dnsDispatch(.putCredentials(providerId: providerId, fields: fields, label: label))
     }
     public func clearCredentials(index: UInt32) async {
@@ -231,6 +327,7 @@ public final class AdminDnsVM {
     /// Single "Get / Renew" button: managed/delegated → one-step `IssueCert`;
     /// manual → two-phase `BeginManualIssueCert` (populates `pending_cert`).
     public func issueCert(domain: String, managedOrDelegated: Bool) async {
+        guard !refused(certIssueAnswer(domain: domain)) else { return }
         guard let nestId = await resolveTargetNestId() else { return }
         if managedOrDelegated {
             await dnsDispatch(.issueCert(domain: domain, targetNestId: nestId))
@@ -245,6 +342,7 @@ public final class AdminDnsVM {
     }
     public func cancelManualIssue() async { await dnsDispatch(.cancelManualIssueCert) }
     public func delegateRenewal(domain: String, zone: String) async {
+        if refused(delegatePossibility) { return }
         await dnsDispatch(.delegateRenewal(domain: domain, targetZone: zone))
     }
     public func removeDelegation(domain: String) async {
@@ -256,11 +354,18 @@ public final class AdminDnsVM {
 
     // MARK: - Local-domain (CRUD + catch-all + role-address) actions
 
-    public func addDomain(_ domain: String) async {
+    /// Add the typed domain. Refuses with the draft's own reason first (the
+    /// domains read resolved, a well-formed name, not already active); returns
+    /// whether the nest added it — the form closes only then, and a failed save
+    /// keeps what was typed.
+    @discardableResult
+    public func addDomain(_ draft: String) async -> Bool {
+        guard !refused(addDomainAnswer(draft: draft)) else { return false }
+        let domain = draft.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         // The default mirrors `local_domains.rs` DEFAULT_CERT_MODE. The MTA-STS
         // policy mode is not sent: the nest sets and advances it.
-        await localDispatch(.addDomain(domain: domain,
-                                       mtaStsCertMode: "expand_primary"))
+        return await localDispatch(.addDomain(domain: domain,
+                                              mtaStsCertMode: "expand_primary"))
     }
     /// The domain whose remove confirm is open, or `nil` — the shared
     /// `LocalDomainsSnapshot.remove_confirm_domain` (`mail-multidomain.md`
@@ -269,6 +374,7 @@ public final class AdminDnsVM {
     /// `admin-dns-domain-remove-button` — arms the shared confirm. Synchronous
     /// and reaches no nest; only `confirmRemoveDomain` removes.
     public func armRemoveDomain(_ domain: String) {
+        guard !refused(removeAnswer(domain: domain)) else { return }
         guard let localMachine else { return }
         localMachine.armRemoveDomain(domain: domain)
         local = localMachine.snapshot()
@@ -309,23 +415,28 @@ public final class AdminDnsVM {
 
     /// `admin-dns-rename-submit-button` — begin renaming the primary to an
     /// existing active additional. `graceDays` is `nil` for the nest default (7).
-    public func startPrimaryRename(newPrimaryDomainId: Data, graceDays: Int64?) async {
+    /// Returns whether the nest started it — the sheet closes only then.
+    @discardableResult
+    public func startPrimaryRename(newPrimaryDomainId: Data, graceDays: Int64?) async -> Bool {
         await localDispatch(.startPrimaryRename(newPrimaryDomainId: newPrimaryDomainId, graceDays: graceDays))
     }
     /// `admin-dns-rename-complete-confirm-button` — `force` is the caller's
     /// `canForceComplete` read (early-complete from `grace`, accepting the
     /// cache-flush risk); a plain complete from `readyToComplete` otherwise.
     public func completePrimaryRename(renameId: Data, force: Bool) async {
+        if refused(renamePossibility(.complete)) { return }
         await localDispatch(.completePrimaryRename(renameId: renameId, force: force))
     }
     /// `admin-dns-rename-extend-button` — push the grace window out by
     /// `additionalDays`. Only the watched deadline moves, so no matrix re-check.
     public func extendPrimaryRenameGrace(renameId: Data, additionalDays: Int64) async {
+        if refused(renamePossibility(.extend)) { return }
         await localDispatch(.extendPrimaryRenameGrace(renameId: renameId, additionalDays: additionalDays))
     }
     /// `admin-dns-rename-abort-confirm-button` — unwind the in-flight rename
     /// (the cheap pre-flip path, or the expensive post-flip inverse re-flip).
     public func abortPrimaryRename(renameId: Data, reason: String?) async {
+        if refused(renamePossibility(.abort)) { return }
         await localDispatch(.abortPrimaryRename(renameId: renameId, reason: reason))
     }
 
@@ -342,8 +453,10 @@ public final class AdminDnsVM {
     private func dnsDispatch(_ action: DnsAction) async -> Bool {
         guard let dnsMachine else { return false }
         var ok = true
-        do { try await dnsMachine.dispatch(action: action) }
-        catch { errorMessage = DisplayError.message(error); ok = false }
+        do {
+            try await dnsMachine.dispatch(action: action)
+            if case .refresh = action { dnsRead = true }
+        } catch { errorMessage = DisplayError.message(error); ok = false }
         let snap = dnsMachine.snapshot()
         dns = snap
         if let e = snap.error { errorMessage = e; ok = false }
@@ -355,24 +468,31 @@ public final class AdminDnsVM {
     /// either snapshot publishes, so an added domain appears with its records
     /// and their status (`mail-multidomain.md` § Wizard steps, step 8). A thrown
     /// dispatch skips the re-check.
-    private func localDispatch(_ action: LocalDomainAction) async {
-        guard let localMachine else { return }
+    ///
+    /// Returns whether the action itself COMMITTED (no throw, no snapshot
+    /// error) — a form's save closes the form there and nowhere else.
+    @discardableResult
+    private func localDispatch(_ action: LocalDomainAction) async -> Bool {
+        guard let localMachine else { return false }
+        var ok = true
         do {
             try await localMachine.dispatch(action: action)
+            localRead = true
             if localDomainActionMovesRecordMatrix(action: action), let dnsMachine {
                 await dnsMachine.recheckMatrix()
                 dns = dnsMachine.snapshot()
             }
-        } catch { errorMessage = DisplayError.message(error) }
+        } catch { errorMessage = DisplayError.message(error); ok = false }
         let snap = localMachine.snapshot()
         local = snap
-        if let e = snap.error { errorMessage = e }
+        if let e = snap.error { errorMessage = e; ok = false }
         else if let e = dns?.error { errorMessage = e }
+        return ok
     }
 
     private func localRefresh() async {
         guard let localMachine else { return }
-        do { try await localMachine.hydrate() }
+        do { try await localMachine.hydrate(); localRead = true }
         catch { errorMessage = DisplayError.message(error) }
         local = localMachine.snapshot()
     }

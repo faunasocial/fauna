@@ -71,6 +71,8 @@ public struct PersonalizationView: View {
     @State private var publishMarkedExamples: UInt32 = 0
     @State private var publishName = ""
     @State private var publishGeneration = 0
+    /// A publish round trip is in flight — folded into the submit's answer.
+    @State private var publishBusy = false
 
     /// Layer-B opt-in state (engagement-cues.md § Layer B) — read/written
     /// directly over the live `FfiFeedManager` (the "Clear activity data"
@@ -83,6 +85,22 @@ public struct PersonalizationView: View {
     /// exactly what a peer nest sees. Empty until hydrated or before any
     /// content clears the k floor.
     @State private var signalSharePublished: [FfiReportShareEntry] = []
+    /// Where the `signal_share.status` read stands — the toggle is not
+    /// possible until it resolved (an unread `false` flipped is a guessed
+    /// `true`; engagement-cues.md § Layer B). Re-read per manager generation.
+    @State private var signalShareRead = PageRead()
+
+    /// `personalization-share-signals-toggle`'s answer: the shared
+    /// `share_signals_possibility` over the live feed manager and the read.
+    private var shareSignalsAnswer: Possibility {
+        shareSignalsPossibility(managerReady: feedVM.manager != nil, read: signalShareRead.state)
+    }
+
+    /// `personalization-clear-engagement-data-button`'s answer: the shared
+    /// `clear_engagement_possibility` over the live feed manager.
+    private var clearEngagementAnswer: Possibility {
+        clearEngagementPossibility(managerReady: feedVM.manager != nil)
+    }
 
     let onNavigateFeed: () -> Void
     let onNavigateMutedWords: () -> Void
@@ -168,6 +186,7 @@ public struct PersonalizationView: View {
                         .textFieldStyle(.roundedBorder)
                         .accessibilityIdentifier(Ids.personalizationTrainedFactorNameInput)
                         .automationField(Ids.personalizationTrainedFactorNameInput, text: $trainedTopicName)
+                        .onSubmit { Task { await submitTrainedTopic() } }
 
                     Button(renamingTrainedFactorId == nil
                            ? L.personalization.trainedFactorCreate
@@ -178,7 +197,9 @@ public struct PersonalizationView: View {
                     .automationActivate(Ids.personalizationTrainedFactorCreateButton) {
                         Task { await submitTrainedTopic() }
                     }
+                    .faunaPossible(trainedTopicsVM.nameAnswer(trainedTopicName))
                 }
+                FaunaPossibilityReason(trainedTopicsVM.nameAnswer(trainedTopicName))
 
                 Button(L.personalization.clearEngagementData) {
                     Task { await clearEngagementData() }
@@ -187,6 +208,8 @@ public struct PersonalizationView: View {
                 .automationActivate(Ids.personalizationClearEngagementDataButton) {
                     Task { await clearEngagementData() }
                 }
+                .faunaPossible(clearEngagementAnswer)
+                FaunaPossibilityReason(clearEngagementAnswer)
 
                 Text(L.personalization.shareSignalsTitle)
                     .font(.headline)
@@ -206,6 +229,8 @@ public struct PersonalizationView: View {
                 ) {
                     Task { await setSignalShare(!signalShare) }
                 }
+                .faunaPossible(shareSignalsAnswer)
+                FaunaPossibilityReason(shareSignalsAnswer)
                 Text(L.personalization.shareSignalsSubtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -223,8 +248,10 @@ public struct PersonalizationView: View {
             await vm.configure(api: client.api)
             trainedTopicsVM.configure(api: client.api)
             await trainedTopicsVM.load()
-            await hydrateSignalShare()
         }
+        // The opt-in is read over the live feed manager, so it is re-read
+        // whenever a manager comes up (a page opened before it waits on it).
+        .task(id: feedVM.managerGeneration) { await hydrateSignalShare() }
         .onStoreChange { await trainedTopicsVM.resync() }
     }
 
@@ -305,6 +332,9 @@ public struct PersonalizationView: View {
             .automationActivate(Ids.personalizationTrainedFactorPublishButton) {
                 openPublishSheet(row)
             }
+            // Absent on a row with no addressable model; blocked while the
+            // live feed window is not up, so no sheet opens onto nothing.
+            .faunaPossible(publishOpenAnswer(row))
 
             Button(role: .destructive) {
                 Task { await trainedTopicsVM.delete(id: row.id) }
@@ -410,7 +440,16 @@ public struct PersonalizationView: View {
                 TextField(L.personalization.publishNamePlaceholder, text: $publishName)
                     .textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier(Ids.personalizationTrainedFactorPublishNameInput)
-                    .automationField(Ids.personalizationTrainedFactorPublishNameInput, text: $publishName)
+                    // Enter is the sheet's submit: the same press as Publish,
+                    // refused with its reason while the draft cannot succeed
+                    // (ui/settings.md § Errors & edge cases). `commit` is the
+                    // agent's door to that same Enter.
+                    .automationField(
+                        Ids.personalizationTrainedFactorPublishNameInput,
+                        text: $publishName,
+                        commit: { Task { await submitPublish() } }
+                    )
+                    .onSubmit { Task { await submitPublish() } }
 
                 automationText(
                     Ids.personalizationTrainedFactorPublishLimitationNote,
@@ -431,19 +470,20 @@ public struct PersonalizationView: View {
                     Button(L.personalization.publishSubmit) {
                         Task { await submitPublish() }
                     }
-                    .disabled(!publishCanSubmit)
                     .accessibilityIdentifier(Ids.personalizationTrainedFactorPublishSubmitButton)
-                    .automationActivate(
-                        Ids.personalizationTrainedFactorPublishSubmitButton,
-                        isEnabled: { publishCanSubmit }
-                    ) { Task { await submitPublish() } }
+                    .automationActivate(Ids.personalizationTrainedFactorPublishSubmitButton) {
+                        Task { await submitPublish() }
+                    }
+                    .faunaPossible(publishSubmitAnswer)
 
                     Button(L.common.cancel) { closePublishSheet() }
                         .accessibilityIdentifier(Ids.personalizationTrainedFactorPublishCancelButton)
                         .automationActivate(Ids.personalizationTrainedFactorPublishCancelButton) {
                             closePublishSheet()
                         }
+                        .disabled(publishBusy)
                 }
+                FaunaPossibilityReason(publishSubmitAnswer)
             }
             .padding(12)
             .background(Color.secondary.opacity(0.06))
@@ -586,15 +626,30 @@ public struct PersonalizationView: View {
         .automationScope(Ids.personalizationTrainedFactorPublishExemplarItem, index: index)
     }
 
-    /// Publish is armed once at least one row of the ACTIVE kind is kept —
-    /// independent of the name field (the disarm/re-arm e2e leg flips
-    /// checkboxes before ever typing a name). Mirrors linux
-    /// `refresh_submit_sensitivity`.
-    private var publishCanSubmit: Bool {
+    /// Whether at least one row of the ACTIVE kind is kept.
+    private var publishAnyKept: Bool {
         if isModelKind {
             return publishNgrams.contains { publishNgramIncluded[$0.ngram] ?? false }
         }
         return publishExemplars.contains { publishIncluded[$0.postId] ?? false }
+    }
+
+    /// The sheet's Publish: the shared `publish_submit_possibility` — a public
+    /// name within the bound, at least one kept item, no publish in flight
+    /// (`settings.md` § Errors & edge cases, *Personal form submits paint
+    /// from their draft*; tui's `PublishSheetState::submit_answer`).
+    private var publishSubmitAnswer: Possibility {
+        trainedFactorPublishSubmitPossibility(name: publishName, anyKept: publishAnyKept, busy: publishBusy)
+    }
+
+    /// A row's Publish…: the shared `publish_open_possibility` — absent with
+    /// no addressable model, blocked while the live feed manager is not up or
+    /// a registry write is in flight (tui's `publish_open_answer`).
+    private func publishOpenAnswer(_ row: FfiTrainedTopicRow) -> Possibility {
+        trainedFactorPublishOpenPossibility(
+            hasFactorKey: row.factorKey != nil,
+            managerReady: feedVM.manager != nil,
+            busy: trainedTopicsVM.busy)
     }
 
     /// Reveal the sheet pre-targeted at `row`, on the default List kind, then
@@ -602,6 +657,8 @@ public struct PersonalizationView: View {
     /// discards a stale reply that lands after the sheet closed or
     /// re-targeted a different row.
     private func openPublishSheet(_ row: FfiTrainedTopicRow) {
+        // The press asks the paint's answer again: no sheet opens onto nothing.
+        if refusePress(publishOpenAnswer(row), errorMessage: &trainedTopicsVM.errorMessage) { return }
         publishTargetId = row.id
         publishTargetFactorKey = row.factorKey
         publishKind = "list"
@@ -614,6 +671,7 @@ public struct PersonalizationView: View {
         publishIncludedExamples = 0
         publishMarkedExamples = 0
         publishName = ""
+        publishBusy = false
         publishGeneration += 1
         let generation = publishGeneration
         publishSheetOpen = true
@@ -697,24 +755,24 @@ public struct PersonalizationView: View {
     }
 
     /// Publish the checked rows of the ACTIVE kind under `publishName`
-    /// (trimmed; a blank name is a client-side no-op, same guard
-    /// `TrainedTopicsVM.create` uses — the boundary's own `BlankName` error is
-    /// a defensive fallback that should never actually fire from this guard).
-    /// A refusal surfaces via the page's existing `error-message` (shared with
-    /// the rest of the trained-topics facet); success closes the sheet.
+    /// (trimmed). The press asks `publishSubmitAnswer` again and refuses with
+    /// its reason; a boundary refusal surfaces via the page's existing
+    /// `error-message` (shared with the rest of the trained-topics facet);
+    /// success closes the sheet.
     ///
     /// Model kind: `moreDocs`/`lessDocs` are passed through UNSHRUNK — they
     /// are the corpus's own counters, not the pruned entry count, and stay
     /// true however much of the vocabulary the user withheld.
     private func submitPublish() async {
+        if refusePress(publishSubmitAnswer, errorMessage: &trainedTopicsVM.errorMessage) { return }
         guard let targetId = publishTargetId, let client else { return }
         let trimmedName = publishName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedName.isEmpty else { return }
+        publishBusy = true
+        defer { publishBusy = false }
         if isModelKind {
             let ngrams = publishNgrams
                 .filter { publishNgramIncluded[$0.ngram] ?? false }
                 .map { FfiPublishNgram(ngram: $0.ngram, more: $0.more, less: $0.less) }
-            guard !ngrams.isEmpty else { return }
             do {
                 _ = try await client.api.trainedTopicPublishModel(
                     factorId: targetId, name: trimmedName,
@@ -729,7 +787,6 @@ public struct PersonalizationView: View {
         let entries = publishExemplars
             .filter { publishIncluded[$0.postId] ?? false }
             .map { FfiPublishEntry(postId: $0.postId, score: $0.score) }
-        guard !entries.isEmpty else { return }
         do {
             _ = try await client.api.trainedTopicPublishList(
                 factorId: targetId, name: trimmedName, entries: entries)
@@ -771,19 +828,28 @@ public struct PersonalizationView: View {
     /// swallowing it here would look exactly like a no-op success, a
     /// recurring silent-feature-death bug class on this client.
     private func clearEngagementData() async {
-        do { try await feedVM.manager?.deleteCueRollup() }
+        // The press asks the paint's answer again: no manager is said on
+        // `error-message`, never a silent no-op.
+        if refusePress(clearEngagementAnswer, errorMessage: &trainedTopicsVM.errorMessage) { return }
+        guard let manager = feedVM.manager else { return }
+        do { try await manager.deleteCueRollup() }
         catch { trainedTopicsVM.errorMessage = DisplayError.message(error) }
     }
 
     /// Read the signal opt-in + published list (`fauna.moderation.signal_share.status`,
-    /// page mount). Mirrors linux `hydrate_signal_share`.
+    /// page mount and each new manager). Mirrors linux `hydrate_signal_share`.
+    /// With no manager the read stays pending — the toggle's answer then says
+    /// the feed is not ready.
     private func hydrateSignalShare() async {
+        signalShareRead = PageRead()
         guard let manager = feedVM.manager else { return }
         do {
             let status = try await manager.signalShareStatus()
             signalShare = status.share
             signalSharePublished = status.published
+            signalShareRead.resolved()
         } catch {
+            signalShareRead.failed()
             trainedTopicsVM.errorMessage = DisplayError.message(error)
         }
     }
@@ -793,6 +859,7 @@ public struct PersonalizationView: View {
     /// withdraws this actor's signals, which may shrink the list. Mirrors
     /// linux `set_signal_share`.
     private func setSignalShare(_ share: Bool) async {
+        if refusePress(shareSignalsAnswer, errorMessage: &trainedTopicsVM.errorMessage) { return }
         guard let manager = feedVM.manager else { return }
         do {
             _ = try await manager.setSignalSharing(share: share)
@@ -813,6 +880,16 @@ public struct PersonalizationView: View {
     /// rename-button) the name currently staged in `trainedTopicName`, then
     /// reset to create mode — mirrors windows' `SubmitTrainedTopicAsync`.
     private func submitTrainedTopic() async {
+        // A refused press keeps the draft and the rename target — the refusal
+        // is painted on `error-message` by the VM.
+        guard trainedTopicsVM.nameAnswer(trainedTopicName).isPossible else {
+            if let id = renamingTrainedFactorId {
+                await trainedTopicsVM.rename(id: id, name: trainedTopicName)
+            } else {
+                await trainedTopicsVM.create(name: trainedTopicName)
+            }
+            return
+        }
         if let id = renamingTrainedFactorId {
             await trainedTopicsVM.rename(id: id, name: trainedTopicName)
         } else {

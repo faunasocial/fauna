@@ -249,7 +249,8 @@ async fn serve_plaintext(state: &AppState, token: &ShareToken) -> Response {
 /// fragment key, carry a registered envelope, and name a SEALED manifest none
 /// of whose blobs is under a legal-takedown withhold. Returns the envelope, the
 /// manifest's own bytes (as uploaded — their hash is the token's
-/// `manifest_hash`) and the parsed manifest.
+/// `manifest_hash`) and the parsed manifest — a paged root flattened through
+/// the one walk into its single-manifest view.
 async fn private_manifest(
     state: &AppState,
     token: &ShareToken,
@@ -297,6 +298,35 @@ async fn private_manifest(
             return Err(StatusCode::NOT_FOUND.into_response());
         }
     };
+    // A paged root is read through the one walk (`file-sync.md` § Paged
+    // manifests): its pages, each fetched through the withhold gate and
+    // verified against the root, flatten into the file's store keys, so the
+    // chunk-by-index arm below answers across page boundaries.
+    let manifest = if manifest.is_paged() {
+        use crate::web_content::file_bytes::flatten_paged;
+        match flatten_paged(
+            &state.db,
+            &store,
+            backup_svc.encryption_key(),
+            &manifest,
+            None,
+        )
+        .await
+        {
+            Ok(flat) => flat,
+            Err(FileOpenError::Withheld(ground)) => {
+                return Err(crate::blob_routes::withheld_status(ground).into_response());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "share: private link names a paged root whose pages do not walk: {e}"
+                );
+                return Err(StatusCode::NOT_FOUND.into_response());
+            }
+        }
+    } else {
+        manifest
+    };
     // A declared token over a plaintext manifest is refused: there is nothing
     // to key, and this arm never serves plaintext.
     if manifest.stored_hashes.is_none() {
@@ -306,10 +336,14 @@ async fn private_manifest(
         )
             .into_response());
     }
+    // A paged root was flattened above, so this list is the file's.
+    let Ok(store_keys) = manifest.store_keys() else {
+        return Err(StatusCode::NOT_FOUND.into_response());
+    };
     // The public walk refuses the whole file when any blob it names is
     // withheld; so does this arm, on every answer — the viewer page included —
     // rather than serving a link that dies part-way through.
-    for key in manifest.store_keys() {
+    for key in store_keys {
         if let Some(ground) = crate::blob_routes::withhold_ground(&state.db, &key.digest()).await {
             return Err(crate::blob_routes::withheld_status(ground).into_response());
         }
@@ -429,7 +463,12 @@ pub async fn handle_share_chunk(
         Ok(found) => found,
         Err(refusal) => return refusal,
     };
-    let Some(store_key) = manifest.store_keys().into_iter().nth(index) else {
+    // `private_manifest` flattened a paged root, so `index` counts across pages.
+    let Some(store_key) = manifest
+        .store_keys()
+        .ok()
+        .and_then(|k| k.into_iter().nth(index))
+    else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let Some(backup_svc) = &state.backup_service else {

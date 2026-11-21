@@ -151,6 +151,20 @@ class AppLaunchVM @Inject constructor(
     }
 
     /**
+     * The first-run wizard's `LoggedIn` exit (`onboarding.md` § Wizard exit
+     * handling → *The finished wizard holds until the session is signed in*):
+     * a launch like every other entry — a fresh machine over the identity the
+     * wizard persisted — never a shell mounted without one. The NavHost shows
+     * the progress view while it runs and reaches the shell only through
+     * [NavTarget.Authenticated]; a failed session start stays on the retry
+     * screen ([sessionStartFailed]).
+     */
+    suspend fun launchAfterWizard() {
+        sessionStartFailedFlow.value = false
+        start()
+    }
+
+    /**
      * Where the blocking sign-out finish runs — file I/O and, at the launch and
      * on Remove Again, the sync agent's dismissal under its budget. A test pins
      * it to its own scheduler.
@@ -235,19 +249,49 @@ class AppLaunchVM @Inject constructor(
      * § 3b, `fauna_launch_machine::dial::resolved_dial_url`). `sessionAccount`
      * itself keeps the literal typed URL; only this connection site resolves.
      */
-    suspend fun connectActiveSession() {
-        val secret = sessionAccount.secretHex ?: return
+    suspend fun connectActiveSession(): Boolean {
+        val secret = sessionAccount.secretHex ?: return true
         val storedNestUrl = sessionAccount.nestUrl.orEmpty()
         apiClient.nodeUrl = resolvedDialUrl(storedNestUrl)
-        apiClient.authenticate(secret)
+        return try {
+            apiClient.authenticate(secret)
+            sessionStartFailedFlow.value = false
+            true
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // A session start that throws must never leave the progress view up
+            // for good: the launch surface goes to `launch_retry`, whose Retry
+            // runs the launch again (`onboarding.md` § Wizard exit handling →
+            // *The finished wizard holds until the session is signed in*).
+            ShellLog.w("AppLaunchVM", "[launch] session start failed: ${e.message}")
+            sessionStartFailedFlow.value = true
+            false
+        }
     }
+
+    private val sessionStartFailedFlow = kotlinx.coroutines.flow.MutableStateFlow(false)
+
+    /**
+     * The session start after an `Online` verdict threw ([connectActiveSession]):
+     * the NavHost routes to [NavTarget.TransientError] over the machine's
+     * `Online`, and [retry] runs a fresh launch.
+     */
+    val sessionStartFailed: StateFlow<Boolean> = sessionStartFailedFlow
 
     /**
      * Retry CTA on the launch retry screen. Re-runs the silent challenge
      * against the saved nest; no-op if the machine isn't in
-     * Offline { transient: true }.
+     * Offline { transient: true }. After a failed session start
+     * ([sessionStartFailed]) the machine sits on `Online`, so Retry runs a
+     * fresh launch instead, which ends in the same session start.
      */
     suspend fun retry() {
+        if (sessionStartFailedFlow.value) {
+            sessionStartFailedFlow.value = false
+            drive(machines.fresh()) { it.start() }
+            return
+        }
         val machine = shownMachine() ?: return
         drive(machine) { it.retrySilentChallenge() }
     }
@@ -469,8 +513,12 @@ class AppLaunchVM @Inject constructor(
      * only copy of the successor's key, so it is put on screen, never dropped).
      */
     suspend fun succeedStolenLocked(phrase: String, confirm: String): LockedCeremonyResult {
-        if (confirm != RecoveryKitVM.STOLEN_CONFIRM_WORD) return LockedCeremonyResult.NotArmed
-        if (phrase.isEmpty()) return LockedCeremonyResult.NoPhrase
+        // The draft answer the press was painted from, asked again (`ui/README.md`
+        // § Offer only what is possible, rule 6): the kit, then the word.
+        val draft = com.fauna.ffi.recoveryStolenEntryPossibility(phrase, confirm)
+        if (draft !is uniffi.fauna_core.Possibility.Possible) {
+            return LockedCeremonyResult.Blocked((draft as? uniffi.fauna_core.Possibility.Blocked)?.reason)
+        }
         val secretHex = sessionAccount.secretHex?.ifBlank { null }
         val nestUrl = sessionAccount.nestUrl?.ifBlank { null }
         if (secretHex == null || nestUrl == null) return LockedCeremonyResult.Failed(null)
@@ -510,10 +558,9 @@ class AppLaunchVM @Inject constructor(
     sealed class LockedCeremonyResult {
         /** Landed and persisted: the successor is active and the machine re-runs. */
         data object SignedIn : LockedCeremonyResult()
-        /** `identity-stolen-confirm-field` is not the literal `SUCCEED`. */
-        data object NotArmed : LockedCeremonyResult()
-        /** No kit typed into `recovery-entry-phrase-field`. */
-        data object NoPhrase : LockedCeremonyResult()
+        /** The shared draft answer said no — no kit typed, or the confirm
+         *  field is not the literal `SUCCEED`; [reason] is its line. */
+        data class Blocked(val reason: uniffi.fauna_core.LocalizedText?) : LockedCeremonyResult()
         /** A refused or failed arm — its shared sentence is [outcome]`.message`. */
         data class Refused(val outcome: com.fauna.ffi.FfiStolenOutcome) : LockedCeremonyResult()
         /** Landed, but this device could not keep the successor's key: show it. */

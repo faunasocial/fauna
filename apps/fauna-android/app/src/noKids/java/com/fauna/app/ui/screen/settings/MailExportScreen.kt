@@ -24,6 +24,13 @@ import com.fauna.app.ui.components.rememberTwoClickArm
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.MailTransferText
 import com.fauna.app.ui.util.ValueFormat
+import com.fauna.app.ui.util.answerRefusal
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.carveOutAnswer
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.localized
+import com.fauna.app.ui.util.pressAsked
 import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.getStringFmt
 import com.fauna.app.ui.util.resolveLocalized
@@ -38,8 +45,13 @@ import uniffi.fauna_client_mail_settings.MailboxOption
 import uniffi.fauna_client_mail_settings.MailboxProgressView
 import uniffi.fauna_client_mail_settings.exportConfirmEstimate
 import uniffi.fauna_client_mail_settings.exportFormatLabel
+import uniffi.fauna_client_mail_settings.mailExportNextPossibility
+import uniffi.fauna_client_mail_settings.mailExportStartPossibility
 import social.fauna.generated.Ids
 import java.io.File
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
 
 /**
  * The per-account `mail-export` wizard (`mail-export.md`): Format → Scope →
@@ -103,6 +115,7 @@ fun MailExportScreen(
         onCancel = vm::cancel,
         onDiscard = vm::discard,
         onDownload = vm::download,
+        onRefuse = { appMessages.showError(it) },
     )
 }
 
@@ -125,6 +138,9 @@ fun MailExportContent(
     onCancel: () -> Unit,
     onDiscard: () -> Unit,
     onDownload: () -> Unit,
+    // A refused press's reason (Next off Scope, Start, Download), for the
+    // page's `error-message` (the wrapper's banner) — rule 6's second half.
+    onRefuse: (String) -> Unit = {},
 ) {
     Scaffold(
         topBar = {
@@ -156,10 +172,10 @@ fun MailExportContent(
         ) {
             when (snapshot.step) {
                 ExportStep.FORMAT -> FormatStep(snapshot.format, formatLabel, onSelectFormat, onNext)
-                ExportStep.SCOPE -> ScopeStep(snapshot, onToggleMailbox, onSetDateFrom, onSetDateTo, onSetStripHeaders, onPrev, onNext)
-                ExportStep.CONFIRM -> ConfirmStep(snapshot, formatLabel, onPrev, onStart)
+                ExportStep.SCOPE -> ScopeStep(snapshot, onToggleMailbox, onSetDateFrom, onSetDateTo, onSetStripHeaders, onPrev, onNext, onRefuse)
+                ExportStep.CONFIRM -> ConfirmStep(snapshot, formatLabel, onPrev, onStart, onRefuse)
                 ExportStep.PROGRESS -> ProgressStep(snapshot, onPause, onResume, onCancel, onDiscard)
-                ExportStep.DONE -> DoneStep(snapshot, formatLabel, onDownload, onDiscard)
+                ExportStep.DONE -> DoneStep(snapshot, formatLabel, onDownload, onDiscard, onRefuse)
             }
         }
     }
@@ -216,7 +232,9 @@ private fun ScopeStep(
     onSetStripHeaders: (Boolean) -> Unit,
     onPrev: () -> Unit,
     onNext: () -> Unit,
+    onRefuse: (String) -> Unit,
 ) {
+    val context = LocalContext.current
     Text(stringResource(R.string.mail_export_scope_title), style = MaterialTheme.typography.titleMedium)
 
     Column(modifier = Modifier.testTag(Ids.MAIL_EXPORT_SCOPE_MAILBOXES)) {
@@ -273,14 +291,23 @@ private fun ScopeStep(
         testId = "mail-export-scope-strip-headers-toggle",
     )
 
+    // The machine's own answer over the drafts (zero mailboxes, a bad range —
+    // `mail-export.md` § Wizard steps), painted and asked again at the press.
+    // The drafts are the snapshot's: each keystroke dispatches.
+    val nextAnswer = askForm { mailExportNextPossibility(snapshot, snapshot.dateFrom, snapshot.dateTo) }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedButton(onClick = onPrev, modifier = Modifier.testTag(Ids.WIZARD_BACK_BUTTON)) {
             Text(stringResource(R.string.mail_export_back))
         }
-        Button(onClick = onNext, modifier = Modifier.testTag(Ids.WIZARD_NEXT_BUTTON)) {
+        Button(
+            onClick = { pressAsked(context, nextAnswer, onRefuse, onNext) },
+            enabled = nextAnswer.isPossible,
+            modifier = Modifier.testTag(Ids.WIZARD_NEXT_BUTTON),
+        ) {
             Text(stringResource(R.string.mail_export_next))
         }
     }
+    DisabledControlReasonText(localized(nextAnswer.blockedReason))
 }
 
 /** The shared elapsed time / time left of this session (`mail-export.md` § Wizard steps steps 4–5). */
@@ -299,6 +326,7 @@ private fun ConfirmStep(
     formatLabel: (ExportFormat) -> String,
     onPrev: () -> Unit,
     onStart: () -> Unit,
+    onRefuse: (String) -> Unit,
 ) {
     Text(stringResource(R.string.mail_export_confirm_title), style = MaterialTheme.typography.titleMedium)
     // The message total, estimated bytes and estimated time all come from the
@@ -336,20 +364,23 @@ private fun ConfirmStep(
         )
     }
     // Start opens an export session on the nest (OnlineOnly); Back stays live.
+    // It also waits on the scope's own answer, re-asked at the press
+    // (`MailExportSnapshot::start_possibility`).
     val startGate = faunaGate("fauna.bridges.start_export_session")
+    val startAnswer = askForm { mailExportStartPossibility(snapshot) }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedButton(onClick = onPrev, modifier = Modifier.testTag(Ids.WIZARD_BACK_BUTTON)) {
             Text(stringResource(R.string.mail_export_back))
         }
         Button(
-            onClick = onStart,
-            enabled = startGate.enabled,
+            onClick = { pressAsked(context, startAnswer, onRefuse, onStart) },
+            enabled = startGate.enabled && startAnswer.isPossible,
             modifier = Modifier.testTag(Ids.MAIL_EXPORT_START_BUTTON),
         ) {
             Text(stringResource(R.string.mail_export_start_button))
         }
     }
-    DisabledControlReasonText(startGate.reason)
+    DisabledControlReasonText(startGate.reason ?: localized(startAnswer.blockedReason))
 }
 
 @Composable
@@ -463,6 +494,7 @@ private fun DoneStep(
     formatLabel: (ExportFormat) -> String,
     onDownload: () -> Unit,
     onDiscard: () -> Unit,
+    onRefuse: (String) -> Unit,
 ) {
     Text(stringResource(R.string.mail_export_done_title), style = MaterialTheme.typography.titleMedium)
     val context = LocalContext.current
@@ -484,13 +516,27 @@ private fun DoneStep(
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.testTag(Ids.MAIL_EXPORT_DOWNLOAD_URL),
     )
-    // Discard deletes the stored archive on the nest (OnlineOnly); Download
-    // reads the already-minted URL and is not a gated kind.
+    // Discard deletes the stored archive on the nest (OnlineOnly). Download is
+    // a GET of the already-minted URL — no wire kind for [faunaGate] to
+    // classify — but it still needs a live nest, so it paints from the shared
+    // carve-out answer ([carveOutAnswer], `mail-export.md`'s Download offline
+    // gate; the backups `SnapshotFileDownloadButton` shape), and the press asks
+    // the same answer again, refusing with its reason on `error-message`
+    // instead of starting a fetch that cannot land (rule 6).
     val discardGate = faunaGate("fauna.bridges.discard_export_blob")
+    val downloadAnswer = carveOutAnswer()
+    val currentDownloadAnswer by rememberUpdatedState(downloadAnswer)
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Button(
-            onClick = onDownload,
-            enabled = snapshot.downloadUrl.isNotEmpty(),
+            onClick = {
+                val refusal = answerRefusal(context, currentDownloadAnswer)
+                if (refusal != null) {
+                    refusal.reason?.let(onRefuse)
+                } else {
+                    onDownload()
+                }
+            },
+            enabled = snapshot.downloadUrl.isNotEmpty() && downloadAnswer.isPossible,
             modifier = Modifier.testTag(Ids.MAIL_EXPORT_DOWNLOAD_BUTTON),
         ) { Text(stringResource(R.string.mail_export_download_button)) }
         OutlinedButton(
@@ -500,6 +546,9 @@ private fun DoneStep(
             modifier = Modifier.testTag(Ids.MAIL_EXPORT_DISCARD_BUTTON),
         ) { Text(stringResource(R.string.mail_export_discard_button)) }
     }
+    // One line per distinct reason: offline, both buttons carry the same one.
+    val downloadReason = localized(downloadAnswer.blockedReason)
+    DisabledControlReasonText(downloadReason.takeIf { it != discardGate.reason })
     DisabledControlReasonText(discardGate.reason)
 }
 

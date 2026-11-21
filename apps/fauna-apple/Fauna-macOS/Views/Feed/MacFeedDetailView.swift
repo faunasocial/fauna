@@ -59,20 +59,19 @@ struct MacFeedDetailView: View {
                     Button(L.common.post) {
                         submitPost()
                     }
-                    .disabled(
-                        vm.composeText.trimmingCharacters(in: .whitespaces).isEmpty
-                        || !vm.composeReady
-                    )
+                    .disabled(!vm.composeReady)
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     .accessibilityIdentifier(Ids.postSubmitButton)
                     .automationActivate(
                         Ids.postSubmitButton,
-                        isEnabled: {
-                            !vm.composeText.trimmingCharacters(in: .whitespaces).isEmpty
-                            && vm.composeReady
-                        }
+                        isEnabled: { vm.composeReady }
                     ) { submitPost() }
+                    // The draft's shared answer (`fauna_feed::forms`), outside
+                    // the automation modifier so the registry reads it too.
+                    // The always-mounted composer carries the reason on the
+                    // control (tooltip + hint), not a standing caption.
+                    .faunaPossible(vm.postSubmitPossibility)
                 }
                 TextField(L.feed.post.tagsPlaceholder, text: composeTags)
                     .textFieldStyle(.roundedBorder)
@@ -250,6 +249,7 @@ struct MacFeedDetailView: View {
                                 }
                             )
                             .padding(.horizontal)
+                            .faunaActsOnClick()
                             .onTapGesture { openPostCard(post) }
                             // In-process automation actuation of the card (opens the
                             // detail sheet). `.onTapGesture` is a native gesture the
@@ -526,6 +526,10 @@ private struct PostDetailSheet: View {
             // Body — the shared document walk (render-model.md § D6); replaces flat `post.body`.
             DocumentBodyView(document: livePost.document)
                 .font(.body)
+                // The post's text is selectable here, on the detail, not on the
+                // feed list's card whose click opens it (ui/README.md § Text the
+                // person reads can be copied, rule 3).
+                .textSelection(.enabled)
                 .accessibilityIdentifier(Ids.feedPostDetailBody)
                 .automationValue(Ids.feedPostDetailBody, text: { renderDocumentToPlaintext(document: livePost.document) })
 

@@ -534,6 +534,16 @@ impl MailRows {
         Ok(out)
     }
 
+    /// **Whether the account has a mailbox** (`mail-credentials.md` § MSEK
+    /// lifecycle → *Every account holds the key*, ruling 2): its custody holds
+    /// at least one credential row, of any state — live, revoked or burned.
+    /// Holding an MSEK is not this: every account holds one from its first
+    /// connect, whatever the deployment serves.
+    #[must_use]
+    pub fn has_mailbox(&self) -> bool {
+        !self.credentials.is_empty()
+    }
+
     /// **Every id the plane holds, revoked included** — the set
     /// `derive_credential_id` must dedup against: a marked id is spent, since
     /// a re-mint under it would join as revoked.
@@ -1116,6 +1126,83 @@ mod tests {
                 .zip(&cfg.prior_msek_retirements)
                 .all(|(a, b)| a == b)
         );
+    }
+
+    /// **A minted key is born in the ring** (`mail-credentials.md` § MSEK
+    /// lifecycle → *Every account holds the key*, ruling 4): a custody holding
+    /// only the mint — the state row's `K` and `K`'s own generation row —
+    /// folds to no prior; two replicas that each minted (`K1`, `K2`) fold,
+    /// once their rows meet, to the one key the state row's join keeps and
+    /// the other as a prior, whichever order the rows arrive in.
+    #[test]
+    fn a_minted_key_is_born_in_the_ring_and_a_displaced_mint_is_a_prior() {
+        let k1 = SecretArray32::new([1; 32]);
+        let k2 = SecretArray32::new([2; 32]);
+        let state = |k: &SecretArray32, at: u64| {
+            MailRecord::State(MailStateRow {
+                msek: Some(k.clone()),
+                msek_at: Timestamp(at),
+                ..MailStateRow::default()
+            })
+        };
+        let born = |k: &SecretArray32, at: u64| {
+            MailRecord::Generation(PriorMsekRetirement {
+                msek: k.clone(),
+                retired_at_unix: at,
+            })
+        };
+        let enc = |recs: &[MailRecord]| -> Vec<(String, Vec<u8>)> {
+            recs.iter()
+                .map(|r| (r.plane_key().unwrap(), r.encode().unwrap()))
+                .collect()
+        };
+        let fold = |e: &[(String, Vec<u8>)]| {
+            MailConfig::fold(e.iter().map(|(k, v)| (k.as_str(), v.as_slice()))).unwrap()
+        };
+
+        let alone = fold(&enc(&[born(&k1, 10), state(&k1, 10)]));
+        assert_eq!(alone.msek.as_ref(), Some(&k1));
+        assert!(
+            alone.prior_mseks.is_empty(),
+            "the current key is never a prior"
+        );
+        assert!(alone.prior_msek_retirements.is_empty());
+
+        // K2's state row carries the later stamp, so the join keeps K2.
+        let met = [born(&k1, 10), state(&k1, 10), born(&k2, 11), state(&k2, 11)];
+        let mut reversed = met.clone();
+        reversed.reverse();
+        for recs in [met.as_slice(), reversed.as_slice()] {
+            let cfg = fold(&enc(recs));
+            assert_eq!(cfg.msek.as_ref(), Some(&k2));
+            assert_eq!(
+                cfg.prior_mseks,
+                vec![k1.clone()],
+                "the displaced mint is kept"
+            );
+            assert_eq!(cfg.prior_msek_retired_at(&k1), Some(10));
+        }
+    }
+
+    /// **The mailbox is the credential** (ruling 2): a key alone is no
+    /// mailbox; any credential row is one, a revoked one included.
+    #[test]
+    fn a_mailbox_is_any_credential_row_never_the_key() {
+        let mut rows = MailRows {
+            state: Some(MailStateRow {
+                msek: Some(SecretArray32::new([1; 32])),
+                ..MailStateRow::default()
+            }),
+            ..MailRows::default()
+        };
+        assert!(!rows.has_mailbox(), "a key alone is no mailbox");
+        let mut revoked = cred("gone", 1, 1);
+        revoked.revoked_at_unix = Some(2);
+        revoked.secret = Default::default();
+        rows.credentials
+            .insert(revoked.credential_id.clone(), revoked);
+        assert!(rows.has_mailbox(), "a revoked row still names a mailbox");
+        assert!(rows.config().live_credentials().next().is_none());
     }
 
     /// A generation row is keyed by its fingerprint in lowercase hex; a row

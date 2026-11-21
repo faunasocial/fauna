@@ -480,43 +480,31 @@ def test_make_admin_offers_and_schedules_without_error(admin_app, nest_instance)
 
 @pytest.mark.feature("admin-users")
 def test_remove_admin_refused_at_last_superadmin(admin_app, nest_instance):
-    """Users section: the roster surface's revoke instrument refuses to strand
-    the deployment at zero superadmins.
+    """Users section: the page does not offer a removal the nest always
+    refuses (`admin.md` § 2 → *What a row offers*).
 
-    Unlike the grant, `fauna.admin.admins.remove` enforces the roster floor
-    **synchronously** — `admin_ws_handlers::admins_remove_handler` calls
-    the target-aware `can_remove_admin` before scheduling anything (and the
-    writer re-refuses at execution — the floor's authoritative line), so with the single
-    superadmin a fresh nest starts with (the only count reachable from e2e —
-    a second admin only joins after a 24h grant executes), the refusal is
-    immediate and testable through the real UI, unlike the grant's eventual
-    effect above.
+    A fresh nest starts with a single superadmin (the only count reachable from
+    e2e — a second admin only joins after a 24h grant executes), so its row
+    carries the wire's `last_superadmin` flag, and the shared
+    `remove_admin_possibility` paints `admin-users-remove-admin-button` blocked:
+    shown, so the admin sees the role can be removed, but not live, its reason
+    naming the step that unblocks it. The nest's own floor
+    (`admins_remove_handler` → `can_remove_admin`, the writer re-refusing at
+    execution) stays the authority and is witnessed at the API tier.
     """
     admin_hex = bytes(nest_instance["admin"]["signing_key"].verify_key).hex()
     admin_app.admin.navigate_users()
     admin_row = admin_app.admin.admin_row_index(admin_hex)
 
     assert admin_app.admin.user_remove_admin_available(admin_row), (
-        f"the admin's own row should offer remove-admin. error: {admin_app.error_text()!r}"
+        f"the admin's own row should show remove-admin. error: {admin_app.error_text()!r}"
     )
     assert not admin_app.admin.user_make_admin_available(admin_row), (
         "an admin row must not offer make-admin"
     )
-
-    admin_app.admin.remove_admin(admin_row)
-
-    err = admin_app.admin.users_action_error_text()
-    assert err, (
-        "expected the last-superadmin removal to be refused via "
-        f"admin-users-action-error, but it was empty. global error-message: "
-        f"{admin_app.error_text()!r}"
-    )
-    assert not admin_app.has_error(), (
-        f"the refusal leaked into the global error-message banner: {admin_app.error_text()!r}"
-    )
-    # Nothing changed — the admin's own row still offers remove-admin.
-    assert admin_app.admin.user_remove_admin_available(admin_row), (
-        "a refused removal must not alter the row's controls"
+    assert not admin_app.admin.user_remove_admin_enabled(admin_row), (
+        "remove-admin is live on the nest's last superadmin, a removal the nest "
+        f"always refuses. error: {admin_app.error_text()!r}"
     )
 
 

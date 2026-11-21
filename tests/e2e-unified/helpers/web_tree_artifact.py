@@ -26,6 +26,7 @@ builds the tree itself (`just web-test`).
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -108,11 +109,22 @@ def _first_line(text: str) -> str:
     return line[:200]
 
 
+_BUILT_AT = re.compile(r" at ([0-9a-fA-F]{40})\s*$")
+
+
+def built_commit(run: dict) -> str:
+    """The commit a run built: the one its title names (a dispatch with the `commit`
+    input, whose head stays the branch tip), else its head — the reading
+    `release_attempt.image_built_commit` and `image-earlier-candidates.py` make."""
+    m = _BUILT_AT.search(run.get("displayTitle") or "")
+    return m.group(1).lower() if m else str(run["headSha"])
+
+
 def candidates(repo: Path = _REPO_ROOT) -> list[Candidate]:
-    """The green `build-nest-image.yml` runs, newest first."""
+    """The green `build-nest-image.yml` runs, newest first, each at the commit it built."""
     argv = [
         _gh(), "run", "list", "-w", WORKFLOW, "-s", "success",
-        "--json", "databaseId,headSha,createdAt", "-L", str(RUN_LIMIT),
+        "--json", "databaseId,headSha,createdAt,displayTitle", "-L", str(RUN_LIMIT),
     ]
     try:
         proc = subprocess.run(
@@ -132,7 +144,7 @@ def candidates(repo: Path = _REPO_ROOT) -> list[Candidate]:
     try:
         runs = json.loads(proc.stdout or "[]")
         found = [
-            Candidate(int(r["databaseId"]), str(r["headSha"]), str(r["createdAt"]))
+            Candidate(int(r["databaseId"]), built_commit(r), str(r["createdAt"]))
             for r in runs
         ]
     except (ValueError, KeyError, TypeError):
@@ -166,8 +178,8 @@ class _Gate:
         self._head_ids = {p: _object_id(repo, head, p) for p in self.inputs}
         self._fetched = False
 
-    def staleness(self, commit: str) -> str | None:
-        """None when `commit` is current for `HEAD`; else why it is not."""
+    def ancestry(self, commit: str) -> str | None:
+        """None when `commit` is an ancestor of `HEAD` (in the object store); else why not."""
         if not _has_commit(self.repo, commit) and not self._fetched:
             self._fetched = True
             try:
@@ -178,6 +190,13 @@ class _Gate:
             return "its commit is not in the object store"
         if _git(self.repo, "merge-base", "--is-ancestor", commit, self.head).returncode != 0:
             return "its commit is not an ancestor of HEAD"
+        return None
+
+    def staleness(self, commit: str) -> str | None:
+        """None when `commit` is current for `HEAD`; else why it is not."""
+        why = self.ancestry(commit)
+        if why is not None:
+            return why
         moved = [
             p for p in self.inputs
             if self._head_ids[p] is None
@@ -288,6 +307,51 @@ def ensure_tree(
     raise WebTreeUnavailable(
         f"every candidate is stale — the newest artifact's commit {cand.commit[:12]} "
         f"(run {cand.run_id}): {why}"
+    )
+
+
+@dataclass(frozen=True)
+class AncestorTree:
+    """The newest artifact at an ancestor of `HEAD` (bound (d)): where it is cached, the
+    commit a run must go to, and why the gate at `HEAD` reads it stale (None: current)."""
+
+    run_id: int
+    commit: str
+    path: Path
+    stale_at_head: str | None
+
+    @property
+    def current_at_head(self) -> bool:
+        return self.stale_at_head is None
+
+
+def ancestor_tree(
+    repo: Path = _REPO_ROOT, cache_root: Path | None = None, inputs=VIEWER_INPUTS
+) -> AncestorTree:
+    """The newest green run whose commit is an ancestor of `HEAD` and whose `web-tree`
+    downloads (or is cached and verified) — with NO input comparison, because the run goes
+    to that commit (`build-system.md` § The Deno build sandbox → *The web tree is consumed
+    off Linux, never built there*, bound (d)). Whether
+    the gate of bound (b) also reads it current at `HEAD` decides only whether that run
+    needs a detach. Raises `WebTreeUnavailable`."""
+    cache_root = cache_root or default_cache_root()
+    head_proc = _git(repo, "rev-parse", "HEAD")
+    if head_proc.returncode != 0:
+        raise WebTreeUnavailable("the checkout has no HEAD")
+    gate = _Gate(repo, head_proc.stdout.strip(), inputs)
+    for cand in candidates(repo):
+        if gate.ancestry(cand.commit) is not None:
+            continue
+        cached = cache_root / cand.commit
+        if not _verified(cached, cand.commit):
+            try:
+                cached = _download(cand, cache_root, repo)
+            except _NoArtifact:
+                continue
+        return AncestorTree(cand.run_id, cand.commit, cached, gate.staleness(cand.commit))
+    raise WebTreeUnavailable(
+        f"nothing in retention: no green {WORKFLOW} run at an ancestor of HEAD still holds "
+        f"a `{ARTIFACT}` artifact"
     )
 
 

@@ -21,7 +21,11 @@ use std::sync::Arc;
 
 use adw::prelude::*;
 use fauna_client::NestClient;
-use fauna_client_web::{SiteLinkDisabledReason, SubdomainDisabledReason, WebClient, WebPageRead};
+use fauna_client_web::{
+    SiteLinkDisabledReason, SiteLinkView, SubdomainDisabledReason, SubdomainView, WebClient,
+    WebPageRead,
+};
+use fauna_core::possibility::{Possibility, ReadState};
 use fauna_protocol::web::PublishedPost;
 
 use crate::async_helper::spawn_with_snapshot;
@@ -145,6 +149,8 @@ struct WebCtx {
     rt: tokio::runtime::Handle,
     // Suppresses the toggle handler while `render` syncs it programmatically.
     guard: Rc<Cell<bool>>,
+    /// The toggle's last painted answer, asked again by its handler.
+    toggle_answer: RefCell<Possibility>,
     w: WebWidgets,
 }
 
@@ -170,7 +176,7 @@ pub fn build_web_page() -> (gtk::Box, Rc<dyn Fn()>) {
     let toggle = adw::SwitchRow::builder().active(false).build();
     toggle.set_title(WS::SUBDOMAIN_TOGGLE_LABEL);
     toggle.set_subtitle(WS::SUBDOMAIN_TOGGLE_SUBTITLE);
-    set_toggle_hydrated(&toggle, false);
+    paint_toggle(&toggle, toggle_possibility(ReadState::Pending, None));
     set_test_id(&toggle, ids::WEB_SETTINGS_SUBDOMAIN_TOGGLE);
     crate::offline_gate::declare_wire_kind(&toggle, "fauna.web.set_subdomain_enabled");
     group.add(&toggle);
@@ -295,11 +301,29 @@ pub fn build_web_page() -> (gtk::Box, Rc<dyn Fn()>) {
     )
 }
 
-/// The subdomain toggle's hydrate gate: enabled only once a nest-confirmed
-/// view is in (`hydrated`), so an early click is refused loudly instead of
-/// being dropped (lift of `tui:3796`).
-fn set_toggle_hydrated(toggle: &adw::SwitchRow, hydrated: bool) {
-    toggle.set_sensitive(hydrated);
+/// The subdomain toggle's shared answer
+/// (`fauna_client_web::subdomain_toggle_possibility`): not enabled before the
+/// read resolves (an errored read says so), absent on a nest with no serving
+/// domain, blocked with the step on no or a reserved handle; switching off is
+/// always possible (`web-content-hosting.md` § Published-post management).
+fn toggle_possibility(read: ReadState, view: Option<&SubdomainView>) -> Possibility {
+    fauna_client_web::subdomain_toggle_possibility(read, view)
+}
+
+/// Paint the toggle from its answer through the possibility seam; the reason
+/// rides the switch's tooltip.
+fn paint_toggle(toggle: &adw::SwitchRow, answer: Possibility) {
+    crate::possible::paint(toggle, None, answer);
+}
+
+/// Both copy buttons' shared answer over the resolved origin
+/// (`fauna_client_web::site_link_copy_possibility`). With no read cached yet
+/// there is no origin, so the buttons are blocked.
+fn copy_possibility(link: Option<&SiteLinkView>) -> Possibility {
+    match link {
+        Some(link) => fauna_client_web::site_link_copy_possibility(link),
+        None => Possibility::from_read(ReadState::Pending),
+    }
 }
 
 fn wire(w: WebWidgets) -> Rc<dyn Fn()> {
@@ -313,6 +337,7 @@ fn wire(w: WebWidgets) -> Rc<dyn Fn()> {
         web: Arc::new(WebClient::new(client.nest_rpc().clone())),
         rt: client.runtime_handle(),
         guard: Rc::new(Cell::new(false)),
+        toggle_answer: RefCell::new(toggle_possibility(ReadState::Pending, None)),
         w,
     });
 
@@ -322,6 +347,19 @@ fn wire(w: WebWidgets) -> Rc<dyn Fn()> {
         toggle.connect_active_notify(move |sw| {
             if ctx.guard.get() {
                 return; // programmatic sync from render(), not a user action
+            }
+            // The action asks the same answer the switch paints from, and a
+            // refusal says why — never a silent drop (`docs/goal/ui/README.md`
+            // § Offer only what is possible, rules 6 and 7).
+            let answer = ctx.toggle_answer.borrow().clone();
+            if !answer.is_possible() {
+                ctx.guard.set(true);
+                sw.set_active(!sw.is_active());
+                ctx.guard.set(false);
+                if let Some(reason) = answer.reason() {
+                    show_error(&ctx.w, &reason.resolve(crate::i18n::strings::lookup));
+                }
+                return;
             }
             set_enabled(&ctx, sw.is_active());
         });
@@ -468,8 +506,13 @@ fn render(ctx: &Rc<WebCtx>, res: Result<WebPageRead, String>) {
     // only from a nest-confirmed snapshot, so it doubles as the round-trip proof.
     set_test_attr(&w.toggle, "state", if snap_enabled { "on" } else { "off" });
     // Interactive only off a nest-confirmed view; an errored read leaves it
-    // disabled, as tui does.
-    set_toggle_hydrated(&w.toggle, res.is_ok());
+    // blocked with load-failed, as tui does.
+    let answer = match &res {
+        Ok(read) => toggle_possibility(ReadState::Resolved, Some(&read.view)),
+        Err(_) => toggle_possibility(ReadState::Failed, None),
+    };
+    *ctx.toggle_answer.borrow_mut() = answer.clone();
+    paint_toggle(&w.toggle, answer);
 
     // URL row: the live URL (whether on or off — it's where the site would
     // serve), else the disabled reason.
@@ -551,8 +594,9 @@ fn render_published_posts(ctx: &Rc<WebCtx>, posts: &[PublishedPost]) {
             w.published_list.remove(&row);
         }
     }
+    let copy = copy_possibility(link.as_ref());
     for (i, post) in posts.iter().enumerate() {
-        let row = build_published_row(ctx, post, i, origin);
+        let row = build_published_row(ctx, post, i, origin, &copy);
         w.published_list.append(&row);
         w.published_rows.borrow_mut().push(row);
     }
@@ -563,6 +607,7 @@ fn build_published_row(
     post: &PublishedPost,
     index: usize,
     origin: Option<&str>,
+    copy: &Possibility,
 ) -> gtk::Box {
     let row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -586,7 +631,7 @@ fn build_published_row(
 
     let copy_link_btn = gtk::Button::with_label(WP::COPY_WEB_LINK);
     set_test_id(&copy_link_btn, ids::WEB_PUBLISHED_POST_COPY_LINK_BUTTON);
-    copy_link_btn.set_sensitive(origin.is_some());
+    crate::possible::paint(&copy_link_btn, None, copy.clone());
     if let Some(origin) = origin {
         let url = fauna_client_web::post_page_url(origin, &post.slug);
         copy_link_btn.connect_clicked(move |btn| {
@@ -605,7 +650,7 @@ fn build_published_row(
             ids::WEB_PUBLISHED_POST_COPY_PAYWALL_LINK_BUTTON,
         );
         crate::offline_gate::declare_wire_kind(&paywall_btn, "fauna.web.paywall.mint_token");
-        paywall_btn.set_sensitive(origin.is_some());
+        crate::possible::paint(&paywall_btn, None, copy.clone());
         if let Some(origin) = origin {
             let ctx = Rc::clone(ctx);
             let slug = post.slug.clone();
@@ -759,19 +804,60 @@ mod tests {
     use super::*;
 
     /// The subdomain toggle reads disabled until the nest-confirmed view is
-    /// in, and enabled after (`tui:3796` lift).
+    /// in, and enabled after (`tui:3796` lift) — painted from the shared
+    /// answer.
     #[test]
     fn subdomain_toggle_is_disabled_until_hydrated() {
         crate::testid::run_on_gtk_thread(|| {
             let toggle = adw::SwitchRow::builder().active(false).build();
-            set_toggle_hydrated(&toggle, false);
+            paint_toggle(&toggle, toggle_possibility(ReadState::Pending, None));
             assert!(
                 !toggle.is_sensitive(),
                 "pre-hydrate toggle must be disabled"
             );
-            set_toggle_hydrated(&toggle, true);
+            let view = fauna_client_web::subdomain_view(false, Some("alice"), "web.test");
+            paint_toggle(
+                &toggle,
+                toggle_possibility(ReadState::Resolved, Some(&view)),
+            );
             assert!(toggle.is_sensitive(), "hydrated toggle must be enabled");
         });
+    }
+
+    /// No serving domain hides the toggle; no handle leaves it shown but
+    /// blocked with the step on its tooltip.
+    #[test]
+    fn subdomain_toggle_is_absent_without_a_domain_and_blocked_without_a_handle() {
+        crate::testid::run_on_gtk_thread(|| {
+            let toggle = adw::SwitchRow::builder().active(false).build();
+            let no_domain = fauna_client_web::subdomain_view(false, Some("alice"), "");
+            paint_toggle(
+                &toggle,
+                toggle_possibility(ReadState::Resolved, Some(&no_domain)),
+            );
+            assert!(!toggle.is_visible(), "no serving domain: absent");
+            let no_handle = fauna_client_web::subdomain_view(false, None, "web.test");
+            paint_toggle(
+                &toggle,
+                toggle_possibility(ReadState::Resolved, Some(&no_handle)),
+            );
+            assert!(toggle.is_visible() && !toggle.is_sensitive());
+            assert_eq!(
+                toggle.tooltip_text().as_deref(),
+                Some(WS::SUBDOMAIN_NO_HANDLE)
+            );
+        });
+    }
+
+    /// The copy buttons are blocked with no cached read, and answer from the
+    /// resolved origin once one is in.
+    #[test]
+    fn copy_buttons_answer_from_the_resolved_origin() {
+        assert!(!copy_possibility(None).is_possible());
+        let live = fauna_client_web::site_link_view(&[], true, Some("alice"), "web.test");
+        assert!(copy_possibility(Some(&live)).is_possible());
+        let off = fauna_client_web::site_link_view(&[], false, Some("alice"), "web.test");
+        assert!(copy_possibility(Some(&off)).reason().is_some());
     }
 
     #[test]

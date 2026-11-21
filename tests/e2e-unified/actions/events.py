@@ -1298,16 +1298,6 @@ class EventsActions:
         self.driver.click("events-next-month")
         self._wait_for_date_label_change(before)
 
-    def pan_forward_without_waiting(self) -> None:
-        """Click `events-next-month` with no expectation that anything moves.
-
-        The agenda view has no date range to pan, so its label is *supposed* to
-        hold still — which makes `next_month`'s change-barrier the wrong tool
-        there (it would time out on correct behaviour). Callers asserting
-        inertness use this and then poll for the absence themselves.
-        """
-        self.driver.click("events-next-month")
-
     def _wait_for_date_label_change(self, before: str,
                                     timeout: float = MONTH_NAV_BUDGET_S) -> None:
         """Wait until `calendar-date-label`'s text differs from `before`.

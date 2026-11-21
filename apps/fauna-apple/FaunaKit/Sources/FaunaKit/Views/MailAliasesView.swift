@@ -111,43 +111,33 @@ public struct MailAliasesView: View {
                 beginAdd()
             }
             .accessibilityIdentifier(Ids.mailAliasesAddButton)
-            .automationActivate(
-                Ids.mailAliasesAddButton,
-                isEnabled: { vm.defaultDomain != nil }
-            ) { beginAdd() }
-            .disabled(vm.defaultDomain == nil)
+            .automationActivate(Ids.mailAliasesAddButton) { beginAdd() }
+            .faunaPossible(vm.createAnswer)
             // Bulk paste-import (the recipient-whitelist import path — a user
             // migrating a ~100-address allowlist pastes it in one shot).
             // Domain-gated exactly like add/generate (linux `mail_aliases.rs:695`).
             Button(L.mailAliases.importButton) {
-                showingImportSheet = true
+                beginImport()
             }
             .accessibilityIdentifier(Ids.mailAliasesImportButton)
-            .automationActivate(
-                Ids.mailAliasesImportButton,
-                isEnabled: { vm.defaultDomain != nil }
-            ) { showingImportSheet = true }
-            .disabled(vm.defaultDomain == nil)
+            .automationActivate(Ids.mailAliasesImportButton) { beginImport() }
+            .faunaPossible(vm.createAnswer)
             Button(L.mailAliases.generateButton) {
                 generateDisposable()
             }
             .accessibilityIdentifier(Ids.mailAliasesGenerateDisposableButton)
             .automationActivate(
                 Ids.mailAliasesGenerateDisposableButton,
-                isEnabled: { vm.defaultDomain != nil },
                 attributes: { ["copied": copiedMintedAddress ?? ""] }
             ) { generateDisposable() }
-            .disabled(vm.defaultDomain == nil)
+            .faunaPossible(vm.createAnswer)
             // The page's one header control that COMMITS: add and import above
             // only open a sheet (arming is local), while Generate mints the
             // alias on the spot. `MailAliasesAction::GenerateDisposable` →
             // `MailAliasesNest::generate_disposable_alias`.
             .faunaGate("fauna.bridges.generate_disposable_alias")
-            if vm.defaultDomain == nil {
-                Text(L.mailAliases.noDefaultDomain)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            // The shared answer's reason, once for the three header paths.
+            FaunaPossibilityReason(vm.createAnswer)
             // The full handle-bearing disposable address is shown once at mint so
             // the user can copy it (the list row only carries the `-temp-` tag).
             if let minted = vm.snapshot?.lastMintedAddress {
@@ -383,12 +373,20 @@ public struct MailAliasesView: View {
     /// Open the add-sheet (new alias). Shared by the header add `Button` and its
     /// `.automationActivate` so the two never diverge.
     private func beginAdd() {
+        // Each header path's press asks what the paint asked (rule 7).
+        if refusePress(vm.createAnswer, errorMessage: &vm.errorMessage) { return }
         sheetMode = .add
+    }
+
+    private func beginImport() {
+        if refusePress(vm.createAnswer, errorMessage: &vm.errorMessage) { return }
+        showingImportSheet = true
     }
 
     /// Mint a disposable alias. Shared by the generate `Button` and its
     /// `.automationActivate`.
     private func generateDisposable() {
+        if refusePress(vm.createAnswer, errorMessage: &vm.errorMessage) { return }
         Task { await vm.dispatch(.generateDisposable(ttlDays: nil, uses: nil, label: "")) }
     }
 

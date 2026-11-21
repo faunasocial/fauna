@@ -16,6 +16,9 @@ import SwiftUI
 /// box read resolves ≥1 box (`box-recovery.md` § Recovery UI) — after the
 /// surface has painted, so a slow or dead saved nest never delays it. macOS
 /// pairs its own title (`launch-error-title`, a macOS `platform_elements` entry).
+/// With more than one account on the device it also carries the account switcher
+/// (``LaunchRetryAccountSwitcher``) — the way back from a failed append finish —
+/// when the host passes `onSwitchAccount`.
 public struct LaunchRetryView: View {
     private let error: String
     private let onRetry: () -> Void
@@ -23,6 +26,7 @@ public struct LaunchRetryView: View {
     private let loadRecoverableBoxes: (() async -> [String])?
     private let onRecover: ([String]) -> Void
     private let onRetire: (() -> Void)?
+    private let onSwitchAccount: (@MainActor (String, Bool) async throws -> Void)?
 
     /// `launch-identity-label`: the bound account's cached identity
     /// (`FaunaAccounts.launchIdentityLine`); `nil` → absent.
@@ -38,7 +42,8 @@ public struct LaunchRetryView: View {
         onUseDifferentNest: @escaping () -> Void,
         loadRecoverableBoxes: (() async -> [String])?,
         onRecover: @escaping ([String]) -> Void,
-        onRetire: (() -> Void)?
+        onRetire: (() -> Void)?,
+        onSwitchAccount: (@MainActor (String, Bool) async throws -> Void)? = nil
     ) {
         self.error = error
         self.onRetry = onRetry
@@ -46,6 +51,7 @@ public struct LaunchRetryView: View {
         self.loadRecoverableBoxes = loadRecoverableBoxes
         self.onRecover = onRecover
         self.onRetire = onRetire
+        self.onSwitchAccount = onSwitchAccount
     }
 
     public var body: some View {
@@ -96,6 +102,9 @@ public struct LaunchRetryView: View {
                     .automationActivate(Ids.launchRetireButton) { onRetire() }
             }
             #endif
+            if let onSwitchAccount {
+                LaunchRetryAccountSwitcher(onSwitch: onSwitchAccount)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()

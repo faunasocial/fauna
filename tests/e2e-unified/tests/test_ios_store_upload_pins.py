@@ -1,6 +1,6 @@
 """The iOS store upload recipe keeps the shape installers/ios.md § Upload mechanics names.
 
-`just ios-store-upload <version> [export|upload|build|sign]`
+`just ios-store-upload <version> [export|upload|build|ffi|archive|sign]`
 (`scripts/ios-store-upload.sh`) is the one command that builds — and uploads —
 the App Store build from the recorded public commit, in the two halves the
 release workflow calls (installers/store-review.md § The store legs, *How the

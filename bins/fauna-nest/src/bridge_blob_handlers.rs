@@ -1264,6 +1264,21 @@ fn set_mail_enabled_handler() -> RpcHandler {
                 fauna_protocol::bridge_routing::config_change_reason::MAIL_ENABLED,
             )
             .await;
+            // (4) A box with no diagnostics reading yet gets its first one
+            // now, in the background, so the mail health readout can say
+            // whether mail can leave this box (outbound port 25) without
+            // waiting for the first daily pass. Per `mail-deliverability.md`
+            // § Symptom diagnostics.
+            // Generation-scoped: the run holds `AppState`, so a deployment-seed
+            // rotation's teardown must reach it.
+            if req.enabled {
+                state.spawn_scoped(
+                    crate::bridge_routing_handlers::run_first_diagnostics_if_none(
+                        Arc::clone(&state),
+                        actor_id,
+                    ),
+                );
+            }
             encode_reply(&SetMailEnabledReply {
                 ok: true,
                 extra: Default::default(),

@@ -482,8 +482,6 @@ def test_windows_add_account_appends_second_identity_to_registry(
                 "args": {"handle": handle},
             },
             "continue_enabled": True,
-            "control_checkbox_visible": False,
-            "control_checkbox_checked": False,
         }, handle=handle)
         driver.click(HANDLE_CONTINUE_BUTTON)
 
@@ -1354,8 +1352,6 @@ def test_windows_abandoned_create_identity_does_not_ghost_the_switcher(
                 "args": {"handle": handle},
             },
             "continue_enabled": True,
-            "control_checkbox_visible": False,
-            "control_checkbox_checked": False,
         }, handle=handle)
         driver.click(HANDLE_CONTINUE_BUTTON)
 

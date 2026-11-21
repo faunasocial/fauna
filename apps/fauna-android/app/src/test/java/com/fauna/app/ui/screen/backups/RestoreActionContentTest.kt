@@ -101,7 +101,9 @@ class RestoreActionContentTest {
     fun emptySnapshots_pickerDisabled_andConfirmStaysDisabled() {
         render(snapshots = emptyList())
         composeTestRule.onNodeWithTag("restore-snapshot-select").assertIsNotEnabled()
-        composeTestRule.onNodeWithTag("restore-confirm-input").performTextInput("42")
+        // Nothing to re-type until a snapshot exists (the shared
+        // `restore_inputs_possibility`): the friction bar paints disabled too.
+        composeTestRule.onNodeWithTag("restore-confirm-input").assertIsNotEnabled()
         composeTestRule.onNodeWithTag("restore-confirm-button").assertIsNotEnabled()
     }
 

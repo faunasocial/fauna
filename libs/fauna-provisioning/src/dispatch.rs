@@ -87,6 +87,7 @@ pub enum DnsDispatch {
     Gandi(crate::dns::gandi::Gandi),
     Hetzner(crate::dns::hetzner::HetznerDns),
     Bundled(crate::dns::bundled::BundledDns),
+    Spaceship(crate::dns::spaceship::SpaceshipDns),
 }
 
 impl DnsDispatch {
@@ -107,6 +108,7 @@ impl DnsDispatch {
             Self::Gandi(_) => "GandiDns",
             Self::Hetzner(_) => "HetznerDns",
             Self::Bundled(_) => "BundledDns",
+            Self::Spaceship(_) => "SpaceshipDns",
         }
     }
 }
@@ -120,6 +122,23 @@ impl DnsProvider for DnsDispatch {
             Self::Gandi(p) => p.verify(client).await,
             Self::Hetzner(p) => p.verify(client).await,
             Self::Bundled(p) => p.verify(client).await,
+            Self::Spaceship(p) => p.verify(client).await,
+        }
+    }
+
+    async fn create_zone(
+        &self,
+        client: &reqwest::Client,
+        domain: &str,
+    ) -> Result<DnsZone, ProvisionError> {
+        match self {
+            Self::Cloudflare(p) => p.create_zone(client, domain).await,
+            Self::Porkbun(p) => p.create_zone(client, domain).await,
+            Self::Namecheap(p) => p.create_zone(client, domain).await,
+            Self::Gandi(p) => p.create_zone(client, domain).await,
+            Self::Hetzner(p) => p.create_zone(client, domain).await,
+            Self::Bundled(p) => p.create_zone(client, domain).await,
+            Self::Spaceship(p) => p.create_zone(client, domain).await,
         }
     }
 
@@ -136,6 +155,7 @@ impl DnsProvider for DnsDispatch {
             Self::Gandi(p) => p.create_record(client, zone_id, record).await,
             Self::Hetzner(p) => p.create_record(client, zone_id, record).await,
             Self::Bundled(p) => p.create_record(client, zone_id, record).await,
+            Self::Spaceship(p) => p.create_record(client, zone_id, record).await,
         }
     }
 
@@ -153,6 +173,7 @@ impl DnsProvider for DnsDispatch {
             Self::Gandi(p) => p.find_records(client, zone_id, name, record_type).await,
             Self::Hetzner(p) => p.find_records(client, zone_id, name, record_type).await,
             Self::Bundled(p) => p.find_records(client, zone_id, name, record_type).await,
+            Self::Spaceship(p) => p.find_records(client, zone_id, name, record_type).await,
         }
     }
 
@@ -189,6 +210,10 @@ impl DnsProvider for DnsDispatch {
                 p.delete_record(client, zone_id, name, record_type, value)
                     .await
             }
+            Self::Spaceship(p) => {
+                p.delete_record(client, zone_id, name, record_type, value)
+                    .await
+            }
         }
     }
 
@@ -202,6 +227,7 @@ impl DnsProvider for DnsDispatch {
             Self::Gandi(p) => p.record_names_relative_to_zone(),
             Self::Hetzner(p) => p.record_names_relative_to_zone(),
             Self::Bundled(p) => p.record_names_relative_to_zone(),
+            Self::Spaceship(p) => p.record_names_relative_to_zone(),
         }
     }
 
@@ -213,6 +239,7 @@ impl DnsProvider for DnsDispatch {
             Self::Gandi(p) => p.base_url(),
             Self::Hetzner(p) => p.base_url(),
             Self::Bundled(p) => p.base_url(),
+            Self::Spaceship(p) => p.base_url(),
         }
     }
 }
@@ -414,6 +441,7 @@ pub enum RegistrarDispatch {
     Namecheap(crate::registrar::namecheap::NamecheapRegistrar),
     Cloudflare(crate::registrar::cloudflare::CloudflareRegistrar),
     Bundled(crate::registrar::bundled::BundledRegistrar),
+    Spaceship(crate::registrar::spaceship::SpaceshipRegistrar),
 }
 
 impl RegistrarDispatch {
@@ -433,6 +461,7 @@ impl RegistrarDispatch {
             Self::Namecheap(_) => "NamecheapRegistrar",
             Self::Cloudflare(_) => "CloudflareRegistrar",
             Self::Bundled(_) => "BundledRegistrar",
+            Self::Spaceship(_) => "SpaceshipRegistrar",
         }
     }
 
@@ -461,9 +490,11 @@ impl RegistrarDispatch {
             // adapter that gains an auth-code call must come here and be
             // matched by a `supports_auth_code` arm, which
             // `tests/registrar_auth_code_dispatch.rs` pins as a bijection.
-            Self::Porkbun(_) | Self::Gandi(_) | Self::Namecheap(_) | Self::Cloudflare(_) => {
-                Ok(None)
-            }
+            Self::Porkbun(_)
+            | Self::Gandi(_)
+            | Self::Namecheap(_)
+            | Self::Cloudflare(_)
+            | Self::Spaceship(_) => Ok(None),
         }
     }
 }
@@ -496,6 +527,7 @@ pub fn supports_auth_code(id: ProviderId) -> bool {
         | ProviderId::Hetzner
         | ProviderId::Namecheap
         | ProviderId::Gandi
+        | ProviderId::Spaceship
         | ProviderId::Digitalocean
         | ProviderId::Vultr
         | ProviderId::Ovh
@@ -511,6 +543,7 @@ impl Registrar for RegistrarDispatch {
             Self::Namecheap(p) => p.verify(client).await,
             Self::Cloudflare(p) => p.verify(client).await,
             Self::Bundled(p) => p.verify(client).await,
+            Self::Spaceship(p) => p.verify(client).await,
         }
     }
 
@@ -525,6 +558,7 @@ impl Registrar for RegistrarDispatch {
             Self::Namecheap(p) => p.check(client, domain).await,
             Self::Cloudflare(p) => p.check(client, domain).await,
             Self::Bundled(p) => p.check(client, domain).await,
+            Self::Spaceship(p) => p.check(client, domain).await,
         }
     }
 
@@ -557,6 +591,26 @@ impl Registrar for RegistrarDispatch {
                 p.register(client, domain, years, agreed_price_cents, contact)
                     .await
             }
+            Self::Spaceship(p) => {
+                p.register(client, domain, years, agreed_price_cents, contact)
+                    .await
+            }
+        }
+    }
+
+    async fn set_nameservers(
+        &self,
+        client: &reqwest::Client,
+        domain: &str,
+        nameservers: &[String],
+    ) -> Result<(), ProvisionError> {
+        match self {
+            Self::Porkbun(p) => p.set_nameservers(client, domain, nameservers).await,
+            Self::Gandi(p) => p.set_nameservers(client, domain, nameservers).await,
+            Self::Namecheap(p) => p.set_nameservers(client, domain, nameservers).await,
+            Self::Cloudflare(p) => p.set_nameservers(client, domain, nameservers).await,
+            Self::Bundled(p) => p.set_nameservers(client, domain, nameservers).await,
+            Self::Spaceship(p) => p.set_nameservers(client, domain, nameservers).await,
         }
     }
 
@@ -567,6 +621,7 @@ impl Registrar for RegistrarDispatch {
             Self::Namecheap(p) => p.requires_contact(),
             Self::Cloudflare(p) => p.requires_contact(),
             Self::Bundled(p) => p.requires_contact(),
+            Self::Spaceship(p) => p.requires_contact(),
         }
     }
 
@@ -580,6 +635,7 @@ impl Registrar for RegistrarDispatch {
             Self::Namecheap(p) => p.fetch_default_contact(client).await,
             Self::Cloudflare(p) => p.fetch_default_contact(client).await,
             Self::Bundled(p) => p.fetch_default_contact(client).await,
+            Self::Spaceship(p) => p.fetch_default_contact(client).await,
         }
     }
 
@@ -593,6 +649,7 @@ impl Registrar for RegistrarDispatch {
             Self::Namecheap(p) => p.list_tld_pricing(client).await,
             Self::Cloudflare(p) => p.list_tld_pricing(client).await,
             Self::Bundled(p) => p.list_tld_pricing(client).await,
+            Self::Spaceship(p) => p.list_tld_pricing(client).await,
         }
     }
 
@@ -607,6 +664,7 @@ impl Registrar for RegistrarDispatch {
             Self::Namecheap(p) => p.availability(client, domain).await,
             Self::Cloudflare(p) => p.availability(client, domain).await,
             Self::Bundled(p) => p.availability(client, domain).await,
+            Self::Spaceship(p) => p.availability(client, domain).await,
         }
     }
 }
@@ -626,10 +684,15 @@ pub fn dns_provider(
     match id {
         ProviderId::Cloudflare => {
             let token = creds.get("api-token")?.to_string();
-            let adapter = match override_base_url {
+            let mut adapter = match override_base_url {
                 Some(base) => crate::dns::cloudflare::Cloudflare::with_base_url(token, base),
                 None => crate::dns::cloudflare::Cloudflare::new(token),
             };
+            // Optional here: only the zone door reads it (field kinds
+            // `[registrar, zone]`); record calls build without it.
+            if let Some(account_id) = creds.get("account-id") {
+                adapter = adapter.with_account_id(account_id.to_string());
+            }
             Some(DnsDispatch::Cloudflare(adapter))
         }
         ProviderId::Porkbun => {
@@ -690,6 +753,20 @@ pub fn dns_provider(
             Some(DnsDispatch::Bundled(crate::dns::bundled::BundledDns::new(
                 base, token,
             )))
+        }
+        ProviderId::Spaceship => {
+            let api_key = creds.get("api-key")?.to_string();
+            let api_secret = creds.get("api-secret")?.to_string();
+            // Precedence as Gandi's: `override_base_url` > `api-base` cred >
+            // the proxy-aware default.
+            let base = override_base_url.or_else(|| creds.get("api-base").map(|s| s.to_string()));
+            let adapter = match base {
+                Some(b) => {
+                    crate::dns::spaceship::SpaceshipDns::with_base_url(api_key, api_secret, b)
+                }
+                None => crate::dns::spaceship::SpaceshipDns::new(api_key, api_secret),
+            };
+            Some(DnsDispatch::Spaceship(adapter))
         }
         ProviderId::Digitalocean => None, // VPS only
         ProviderId::Vultr => None,        // VPS only
@@ -785,6 +862,7 @@ pub fn vps_provider(
         ProviderId::Porkbun => None,    // DNS + Registrar only
         ProviderId::Namecheap => None,  // DNS only
         ProviderId::Gandi => None,      // DNS only
+        ProviderId::Spaceship => None,  // DNS + Registrar only
     }
 }
 
@@ -859,6 +937,20 @@ pub fn registrar(id: ProviderId, creds: Credentials) -> Option<RegistrarDispatch
                 None => crate::registrar::namecheap::NamecheapRegistrar::new(api_user, api_key),
             };
             Some(RegistrarDispatch::Namecheap(registrar))
+        }
+        ProviderId::Spaceship => {
+            let api_key = creds.get("api-key")?.to_string();
+            let api_secret = creds.get("api-secret")?.to_string();
+            // `api-base` cred override — same rationale as Gandi above.
+            let registrar = match creds.get("api-base") {
+                Some(base) => crate::registrar::spaceship::SpaceshipRegistrar::with_base_url(
+                    api_key,
+                    api_secret,
+                    base.to_string(),
+                ),
+                None => crate::registrar::spaceship::SpaceshipRegistrar::new(api_key, api_secret),
+            };
+            Some(RegistrarDispatch::Spaceship(registrar))
         }
         ProviderId::Digitalocean => None, // VPS only
         ProviderId::Vultr => None,        // VPS only

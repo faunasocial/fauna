@@ -20,6 +20,11 @@ import com.fauna.ffi.FfiIssuerKeyView
 import com.fauna.ffi.FfiSeedRotationConfirmView
 import com.fauna.ffi.FfiWebAppOrigin
 import com.fauna.ffi.onboarding.AdminNatModeMachine
+import com.fauna.app.ui.util.answerRefusal
+import com.fauna.app.ui.util.inFlightPossibility
+import com.fauna.app.ui.util.machinePossibility
+import uniffi.fauna_core.Possibility
+import uniffi.fauna_core.ReadState
 import com.fauna.ffi.onboarding.NatModeState
 import com.fauna.ffi.onboarding.qualifyReclaimHandle
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -115,6 +120,38 @@ class AdminNestVM @Inject constructor(
     /** Disables the pairing toggle + serving-port save mid-write (re-dispatch guard). */
     val working = MutableStateFlow(false)
 
+    /**
+     * Where the page's own reflective read (`fauna.admin.services.list` +
+     * `fauna.setup.status`) stands (admin.md § Errors & edge cases, *Controls
+     * wait for their read*): pending until the first answer, failed after a
+     * refused first read, resolved once one read succeeded — a re-read that
+     * fails after that keeps the earlier answer.
+     */
+    private var nestRead = ReadState.PENDING
+
+    private fun nestWriteNow(): Possibility =
+        com.fauna.ffi.writeAfterReadPossibility(nestRead, !working.value)
+
+    /**
+     * The pairing toggle's and the serving-port input's and save's answer:
+     * the shared `write_after_read_possibility` over the reflective read and
+     * this page's own write — a toggle flipped before the read would write
+     * over a value the page never showed.
+     */
+    val nestWriteAnswer = MutableStateFlow(nestWriteNow())
+
+    private fun refreshNestWrite() {
+        nestWriteAnswer.value = nestWriteNow()
+    }
+
+    /** Ask [answer] at a press: `true` when it may go; otherwise its reason
+     *  goes on `error-message` and nothing reaches the nest. */
+    private fun pressAllowed(answer: Possibility): Boolean {
+        val refusal = answerRefusal(appContext, answer) ?: return true
+        refusal.reason?.let { error.value = it }
+        return false
+    }
+
     /** Page-scoped error surface (`error-message`): pairing + factory-reset fail here. */
     val error = MutableStateFlow<String?>(null)
 
@@ -189,6 +226,23 @@ class AdminNestVM @Inject constructor(
     val natMessage = MutableStateFlow<LocalizedText?>(null)
     val natSubmitEnabled = MutableStateFlow(false)
     val natSubmitting = MutableStateFlow(false)
+
+    /** A NAT save this page sent and has not heard back from. */
+    private var natSaving = false
+
+    private fun natAnswer(ask: (AdminNatModeMachine) -> Possibility): Possibility =
+        if (natSaving) inFlightPossibility() else machinePossibility(natMachine, ask)
+
+    /**
+     * The NAT radios' and save's answers — the shared
+     * `AdminNatModeMachine::select_possibility` / `save_possibility` (admin.md
+     * § Errors & edge cases, *Controls wait for their read*): blocked until
+     * `fauna.setup.status` resolves; a failed read (or a machine that could
+     * not be built) leaves them blocked, because saving the pre-selected
+     * default `public` over an unread mode would be a guess.
+     */
+    val natSelectAnswer = MutableStateFlow(natAnswer { it.selectPossibility() })
+    val natSaveAnswer = MutableStateFlow(natAnswer { it.savePossibility() })
 
     /**
      * The deployment-identity rotation ceremony's arm state (`admin-nest-seed-rotate-*`) — `null` = un-armed (the section shows only
@@ -509,6 +563,19 @@ class AdminNestVM @Inject constructor(
         resolve = { resolveLocalizedNested(appContext, it).orEmpty() },
     )
 
+    /** A return by Back to this page reads it again (`AdminEntryReread`). */
+    val entryReread = AdminEntryReread({
+        hydrate()
+        hydrateNatMode()
+        hydrateRegion()
+        featureLimits.refresh()
+        hydrateWebAppOrigin()
+        hydrateUpdateChannel()
+        hydrateOauthKeys()
+        loadReports()
+        loadBlocked()
+    })
+
     init {
         hydrate()
         hydrateNatMode()
@@ -519,12 +586,31 @@ class AdminNestVM @Inject constructor(
         hydrateOauthKeys()
         loadReports()
         loadBlocked()
+        // A read that has not answered is read again when the nest connection
+        // comes back (`docs/goal/behavior/admin.md` § Errors & edge cases,
+        // *Controls wait for their read*; tui's `reconnect_reread_op`, whose
+        // Nest page waits on the same two reads): the reflective read while
+        // it is unresolved, and `fauna.setup.status` while the NAT machine's
+        // `select_possibility` still refuses. An answered read is kept, so a
+        // port typed over it survives.
+        viewModelScope.rereadOnReconnect(
+            api.reconnectTick,
+            answered = { nestRead == ReadState.RESOLVED },
+            reread = ::hydrate,
+        )
+        viewModelScope.rereadOnReconnect(
+            api.reconnectTick,
+            answered = { machinePossibility(natMachine) { it.selectPossibility() } is Possibility.Possible },
+            reread = ::hydrateNatMode,
+        )
     }
 
     /** Re-render the three NAT StateFlows from the machine's current snapshot
      *  (dispatch-style: view awaits an action, then re-reads — the
      *  `nat_mode_choice.rs` idiom, mirrored from linux/web). */
     private fun renderNatSnapshot() {
+        natSelectAnswer.value = natAnswer { it.selectPossibility() }
+        natSaveAnswer.value = natAnswer { it.savePossibility() }
         val snap = natMachine?.snapshot() ?: return
         natSelectedMode.value = snap.selectedMode
         natMessage.value = snap.message
@@ -545,6 +631,7 @@ class AdminNestVM @Inject constructor(
     /** Radio click (`admin-nest-nat-mode-{public,private}-radio`). Synchronous
      *  like linux/web — no network call, just a local state flip. */
     fun selectNatMode(mode: NodeMode) {
+        if (!pressAllowed(natAnswer { it.selectPossibility() })) return
         natMachine?.select(mode)
         renderNatSnapshot()
     }
@@ -553,9 +640,18 @@ class AdminNestVM @Inject constructor(
      *  mode via the mutable `fauna.setup.nat_mode`. Save stays enabled after
      *  success — the set is mutable and an immediate re-flip is allowed. */
     fun saveNatMode() {
+        // The press asks the save answer live, so a second press mid-submit
+        // is refused with *still saving* before the re-paint lands.
+        if (!pressAllowed(natAnswer { it.savePossibility() })) return
+        natSaving = true
+        renderNatSnapshot()
         viewModelScope.launch {
-            natMachine?.submit()
-            renderNatSnapshot()
+            try {
+                natMachine?.submit()
+            } finally {
+                natSaving = false
+                renderNatSnapshot()
+            }
         }
     }
 
@@ -564,23 +660,32 @@ class AdminNestVM @Inject constructor(
      *  socket comes up (transport.md § Request lifecycle step 3). */
     private fun hydrate() {
         viewModelScope.launch {
+            var read = false
             try {
                 pairing.value = api.adminServicesList().pairing
                 // Serving port + OS-maintenance fields are best-effort reads
                 // off the same anonymous setup-status; a failure leaves them
-                // at their defaults rather than failing the whole hydrate.
-                runCatching {
+                // at their defaults rather than failing the whole hydrate —
+                // but the reflective read is resolved only when it answered
+                // too, since the port field shows what it read.
+                read = runCatching {
                     val status = api.nestSetupStatus()
                     servingPort.value = status.servingPort.toInt()
                     frontedByRouter.value = status.frontedByRouter
                     osHostStatusPresent.value = status.osHostStatusPresent
                     osSecurityUpdates.value = status.osSecurityUpdatesPending.toInt()
                     osRebootPending.value = status.osRebootPending
-                }
+                }.isSuccess
             } catch (_: Exception) {
                 // One attempt: the transport already waits out a socket that
                 // has not landed yet (NestClient::request_inner).
             }
+            nestRead = when {
+                read -> ReadState.RESOLVED
+                nestRead == ReadState.RESOLVED -> ReadState.RESOLVED
+                else -> ReadState.FAILED
+            }
+            refreshNestWrite()
         }
     }
 
@@ -590,8 +695,10 @@ class AdminNestVM @Inject constructor(
      *  (the screen range-checks before calling). The new port binds on the next
      *  nest restart. Mirrors [setPairing]'s reflective write-then-reread. */
     fun setServingPort(port: Int) {
+        if (!pressAllowed(nestWriteNow())) return
+        working.value = true
+        refreshNestWrite()
         viewModelScope.launch {
-            working.value = true
             try {
                 api.adminSetServingPort(port.toUShort())
                 servingPort.value = api.nestSetupStatus().servingPort.toInt()
@@ -600,6 +707,7 @@ class AdminNestVM @Inject constructor(
                 error.value = e.message
             } finally {
                 working.value = false
+                refreshNestWrite()
             }
         }
     }
@@ -760,8 +868,11 @@ class AdminNestVM @Inject constructor(
     /** Flip the admin `pairing` flag, then re-read so the toggle reflects the
      *  persisted state (matches Linux's reflective sync). */
     fun setPairing(enabled: Boolean) {
+        // The press asks the answer the toggle was painted from, live.
+        if (!pressAllowed(nestWriteNow())) return
+        working.value = true
+        refreshNestWrite()
         viewModelScope.launch {
-            working.value = true
             try {
                 api.adminServicesUpdate("pairing", enabled)
                 pairing.value = api.adminServicesList().pairing
@@ -770,6 +881,7 @@ class AdminNestVM @Inject constructor(
                 error.value = e.message
             } finally {
                 working.value = false
+                refreshNestWrite()
             }
         }
     }

@@ -1,43 +1,59 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Fauna for Windows — MICROSOFT STORE package (full MSIX).
+  Fauna for Windows — the full MSIX, for the MICROSOFT STORE and the DIRECT DOWNLOAD.
 
   This is the Store channel's artifact: a package that CARRIES ITS BINARIES INSIDE,
   which is what earns Store re-signing (no certificate to manage, no SmartScreen
   warning, free). Design of record:
   docs/goal/architecture/installers/windows.md § Store distribution (MSIX).
 
-  ── How this differs from installer/sparse/AppxManifest.xml.in ──
-  The sparse package is a manifest-ONLY identity carrier for the MSI-installed shell
-  extension: uap10:AllowExternalContent + `Add-AppxPackage -ExternalLocation` point
-  it at payload outside the package. That shape cannot be Store-distributed, hence
-  this second manifest. Four deliberate divergences, each pinned by
+  ── Two channels, one template ── The direct-download package (the bundle the
+  organisation's download page offers) is rendered from this same file by the same
+  build script, switched to the direct channel: installers/windows.md § Direct
+  download (MSIX app + nest MSI). The channel changes exactly five things, each a
+  token below or a switch of the build script, never a second copy of this file:
+  the identity name, the publisher, Properties/DisplayName, the write-virtualization
+  block and the flavour. The text below IS the Store manifest; for the direct
+  channel only, the build script inserts the write-virtualization opt-out (two
+  namespaces on Package, two Properties elements, one capability).
+
+  ── The app's one package identity ── This package is not an identity carrier for
+  files installed some other way: the manifest-only sparse package an MSI once
+  registered beside the app (uap10:AllowExternalContent) retired 2026-11-16
+  (installers/windows.md section Direct download, 6), and that shape could never be
+  Store-distributed anyway. Four properties follow, each pinned by
   tests/e2e-unified/tests/platform/windows/test_store_package.py:
 
     1. No AllowExternalContent — content is internal.
-    2. com:Class/@Path is the BARE fauna_shell.dll. Path 1's version-stamped
+    2. com:Class/@Path is the BARE fauna_shell.dll. The MSI's version-stamped
        filename exists to dodge an MSI's inability to replace a DLL Explorer holds
        open; an MSIX is replaced atomically, so there is no lock to dodge.
-    3. A real AppListEntry — this package IS the app (the sparse one suppresses it
-       because the MSI already installs the Start-menu shortcut).
+    3. A real AppListEntry — this package IS the app.
     4. Identity/@Name is a token too, not just @Publisher: Partner Center assigns
        BOTH at name reservation, and the Store rejects any mismatch.
 
-  ── THIS IS A TEMPLATE ── The dedicated store-package build script substitutes the four
+  ── THIS IS A TEMPLATE ── The dedicated store-package build script substitutes the five
   double-at tokens and packs the result; the packer hard-fails on any that survive.
 
     @@IdentityName@@           Partner-Center-reserved package name, minted at name
                                reservation. Reserved 2026-08-22: FaunaSocial.FaunaSocial
-                               (the sparse package is FaunaSocial.Fauna, a deliberately
-                               distinct identity so both may register on one box).
+                               (FaunaSocial.Fauna, the retired sparse package's name,
+                               is left unused).
                                Still a token, never hard-coded: the dev loop registers
-                               a plain-DN identity the Store would reject.
+                               a plain-DN identity the Store would reject. The direct
+                               channel's is FaunaSocial.FaunaDesktop.
     @@Publisher@@              Partner Center's CN=<GUID>. MSIX requires
                                Identity/@Publisher to equal the signing cert Subject
                                DN exactly, and PackageFamilyName hashes from it — a
                                dev-signed package is a DIFFERENT app identity than
                                the Store-signed one. Remove-AppxPackage the dev one;
-                               never expect an in-place upgrade across the swap.
+                               never expect an in-place upgrade across the swap. The
+                               direct channel's is its signing certificate's subject,
+                               recorded in installer/PackageIdentity.props.
+    @@DisplayName@@            Properties/DisplayName, per channel (the build
+                               script's DISPLAY_NAME): the Store's must equal its
+                               reservation, Fauna Social; the direct channel's is
+                               Fauna (see Properties below).
     @@PackageVersion@@         4-part MSIX version, read from Package.wxs (one home).
                                Re-registering an unchanged version fails 0x80073CF9.
     @@ProcessorArchitecture@@  x64 or arm64. A full MSIX carries native binaries, so
@@ -64,15 +80,16 @@
             ProcessorArchitecture="@@ProcessorArchitecture@@" />
 
   <Properties>
-    <!-- MUST equal a name reserved for this product in Partner Center, which
-         validates it at package upload. "Fauna" was unavailable (another
-         publisher holds it), so the reservation, and therefore this value, is
-         "Fauna Social".
-         The APP's own name stays "Fauna" (Application/VisualElements below):
-         priority 1 says a Store name-availability accident must not leak a
+    <!-- For the Store, MUST equal a name reserved for this product in Partner
+         Center, which validates it at package upload. "Fauna" was unavailable
+         (another publisher holds it), so the reservation, and therefore the Store
+         value, is "Fauna Social". The direct-download package has no reservation
+         and names itself "Fauna" here.
+         The APP's own name stays "Fauna" on both (Application/VisualElements
+         below): priority 1 says a Store name-availability accident must not leak a
          naming divergence into the app UI, where Fauna is "Fauna" on all seven
          apps. Only the Store LISTING carries the longer name. -->
-    <DisplayName>Fauna Social</DisplayName>
+    <DisplayName>@@DisplayName@@</DisplayName>
     <PublisherDisplayName>Fauna Social</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
 
@@ -97,7 +114,12 @@
          Re-adding either the scoped virtualization:ExcludedDirectory form or the
          blanket desktop6 switch is a goal-doc decision, not a manifest edit:
          installers/windows.md section Data continuity. Pinned by
-         test_store_package.py::test_declares_no_write_virtualization_opt_out. -->
+         test_store_package.py::test_declares_no_write_virtualization_opt_out.
+
+         The direct-download package DOES keep %LocalAppData%\Fauna unvirtualized
+         (installers/windows.md section Direct download, 5): the build script
+         inserts that channel's opt-out after this comment, for that channel
+         alone. -->
   </Properties>
 
   <Resources>
@@ -105,7 +127,7 @@
   </Resources>
 
   <Dependencies>
-    <!-- The MSIX packaging floor, matching the sparse package. The Win11 DEFAULT
+    <!-- The MSIX packaging floor. The Win11 DEFAULT
          context menu only renders from 22000, but everything else here (the app,
          fauna://, the logon sync agent) works below that, so the floor is not the
          menu's. -->
@@ -158,10 +180,10 @@
 
         <!-- The Win11 default context menu. Clsid is the EXISTING root
              IExplorerCommand CLSID (FaunaContextMenu) that ShellExt.wxs registers
-             as *\shell\Fauna's ExplorerCommandHandler and the sparse package also
-             names — a THIRD registration surface for one implementation, never a
-             9th COM class. The submenu's children come from the handler's
-             EnumSubCommands, so only the root verb appears here. -->
+             as *\shell\Fauna's ExplorerCommandHandler — a second registration
+             surface for one implementation, never a 9th COM class. The submenu's
+             children come from the handler's EnumSubCommands, so only the root
+             verb appears here. -->
         <desktop4:Extension Category="windows.fileExplorerContextMenus">
           <desktop4:FileExplorerContextMenus>
             <desktop5:ItemType Type="*">
@@ -178,9 +200,8 @@
 
         <!-- Registers the CLSID in the MANIFEST instead of the registry; Explorer
              activates it out-of-process via the COM surrogate (dllhost.exe), which
-             is what carries package identity into the handler. Unlike the sparse
-             package, @Path resolves INSIDE the package, so it is the bare
-             build-output name. -->
+             is what carries package identity into the handler. @Path resolves
+             INSIDE the package, so it is the bare build-output name. -->
         <com:Extension Category="windows.comServer">
           <com:ComServer>
             <com:SurrogateServer DisplayName="Fauna Shell Extension">

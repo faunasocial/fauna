@@ -54,6 +54,7 @@ import {
   type ContentPolicyValue,
 } from './wasm';
 import { guardSingletonBuild } from './singleton-build';
+import { trackRpc } from './rpc-in-flight';
 import { ClientSupersededError, supersededWaiterNext } from './client-supersede';
 import { portIsStale, resetActorScopedState } from './actorScope';
 import { nodeUrl, storedNestUrl, getAuthToken } from './api';
@@ -64,10 +65,12 @@ import { hexToBytes } from './hex';
 import type { SharedRpcPort } from '../../static/fauna_wasm.js';
 import { identity, reconnectTick, connectionStatus } from './store';
 import type { LocalizedText } from '#lib/i18n/localized';
+import type { Possibility } from '#lib/possibility';
 import type { OwedNestEntry, OwedNests } from '#lib/recovery-owed-nests';
 import type { SupervisionSnapshotValue } from './supervisionRestore';
 import type { BlockedPeer, ContactAsk, FeedAsk } from './ward-asks';
 import type { FilterRule } from './types';
+import type { AddressbooksRead } from './address-book';
 import type {
   WsRpcClient,
   WasmDnsManagementMachine,
@@ -734,10 +737,14 @@ async function ensureConnected(c: WsRpcClient): Promise<void> {
   throw new Error('WS-RPC client failed to connect within 15s');
 }
 
-async function call<T>(secretHex: string, fn: (c: WsRpcClient) => Promise<T>): Promise<T> {
-  const c = await getClient(secretHex);
-  await ensureConnected(c);
-  return fn(c);
+function call<T>(secretHex: string, fn: (c: WsRpcClient) => Promise<T>): Promise<T> {
+  // Counted from entry — the e2e barrier's completion observable
+  // (`#lib/rpc-in-flight`); `callStore` below is counted the same way.
+  return trackRpc(async () => {
+    const c = await getClient(secretHex);
+    await ensureConnected(c);
+    return fn(c);
+  });
 }
 
 /** The connection wait alone — `call`'s first half, with no request after it.
@@ -762,9 +769,24 @@ export async function awaitNestConnection(secretHex: string): Promise<void> {
  *  first listing). A tab loaded with the nest unreachable hosts its runtime
  *  for that reason: stage one starts it over this call, and only stage two
  *  waits for the socket. */
-async function callStore<T>(secretHex: string, fn: (c: WsRpcClient) => Promise<T>): Promise<T> {
+/** `call` for a seam whose promise lives as long as the identity — a loop
+ *  that settles only at sign-out (`runCriticalAlertSweep`). It is NOT counted
+ *  in `#lib/rpc-in-flight`: that count is the e2e barrier's "a gesture's call
+ *  has not settled yet", and a call that never settles would hold every
+ *  barrier to its bound (measured 2026-11-19: 122 bounds met in one web
+ *  actuation sweep, all on this loop). A seam belongs here only if its promise
+ *  is documented never to resolve in normal operation. */
+async function callLoop<T>(secretHex: string, fn: (c: WsRpcClient) => Promise<T>): Promise<T> {
   const c = await getClient(secretHex);
+  await ensureConnected(c);
   return fn(c);
+}
+
+function callStore<T>(secretHex: string, fn: (c: WsRpcClient) => Promise<T>): Promise<T> {
+  return trackRpc(async () => {
+    const c = await getClient(secretHex);
+    return fn(c);
+  });
 }
 
 /** `call` for a seam that must live OUTSIDE this file. The one caller today is
@@ -1959,11 +1981,11 @@ export interface RecoveryStatus {
   allows_create: boolean;
   allows_replace: boolean;
   allows_lost: boolean;
-  /** `identity-stolen-button`'s enablement — true in EVERY state, per
-   *  settings.md § Recovery kit's "stolen (any)". Read rather than assumed
-   *  constant here so the enablement matrix stays the shared crate's to decide,
-   *  and so the kit-in-hand phrase field gates on the same predicate tui's
-   *  does — the succession is one of the ceremonies that reads it. */
+  /** Whether the succession ceremony is offered in this kit state — every
+   *  state, per settings.md § Recovery kit's "stolen (any)". Read rather than
+   *  assumed constant so the matrix stays the shared crate's: the kit-in-hand
+   *  phrase field renders on it, as tui's does. `identity-stolen-button`
+   *  itself paints from its draft answer (`stolenEntryPossibility`). */
   allows_stolen: boolean;
   /** `recovery-kit-escrow-reseal-button`'s render gate — the no-escrow state only. */
   allows_escrow_reseal: boolean;
@@ -2344,6 +2366,11 @@ export interface AdminUser {
   // Drives `admin-users-supervised-by` and the take-over offer
   // (family-safety.md § App surface → Admin take-over).
   guardian?: { actor_id: Uint8Array | number[]; handle?: string } | null;
+  // Read-only: removing this row's admin role would leave the nest with no
+  // superadmin (admin.md § 2 → *What a row offers*). Absent ⇒ `false` — the
+  // control is offered and an older nest's refusal reads on the error line.
+  // Read through `adminRemoveAdminPossibility`, never tested here.
+  last_superadmin?: boolean;
 }
 
 /** A storage/feature tier definition (`fauna.admin.tiers.list`). */
@@ -3042,6 +3069,11 @@ export interface AdminWebAppOriginView {
   scope: LocalizedText;
   can_set: boolean;
   central_label: LocalizedText;
+  /** Whether the section is shown at all (`web-content-hosting.md` § While
+   *  the central origin is not live, the choice is not offered, rule 5). */
+  section_possibility: Possibility;
+  /** Whether the central radio is offered: possible only on `central_live`. */
+  central_possibility: Possibility;
 }
 
 /** `fauna.admin.web_app_origin.get` folded through the shared view — an older
@@ -3819,6 +3851,21 @@ export function caldavListCalendars(secretHex: string): Promise<{ calendars: any
   return call(secretHex, (c) => c.caldavListCalendars(secretHex) as Promise<{ calendars: any[] }>);
 }
 
+/** The Events page's calendar load (events.md § Errors & edge cases → *No
+ *  calendar to hold an event*, rulings 2 and 5): `{ state: "unresolved" }` (a
+ *  missing key included — the mint is in flight), `{ state:
+ *  "provision_failed", error }` or `{ state: "loaded", calendars }` — hand it
+ *  whole to `eventCreatePossibility` / `eventCreateTarget`. */
+export function caldavReadCalendars(secretHex: string): Promise<CalendarsRead> {
+  return call(secretHex, (c) => c.caldavReadCalendars(secretHex) as Promise<CalendarsRead>);
+}
+
+/** `calendarsRead`'s serde form (the wasm face's value). */
+export type CalendarsRead =
+  | { state: 'unresolved' }
+  | { state: 'provision_failed'; error: string }
+  | { state: 'loaded'; calendars: any[]; unreadable?: number };
+
 /** Provision a new calendar (MKCOL). `calendarId` is a client-generated 32-byte
  *  hex id (`crypto.getRandomValues`). Resolves `{ id }`. */
 export function caldavProvisionCalendar(
@@ -3866,6 +3913,14 @@ export function carddavListAddressbooks(
     secretHex,
     (c) => c.carddavListAddressbooks(secretHex) as Promise<{ addressbooks: any[] }>,
   );
+}
+
+/** The Address Book segment's book load (`ui/contacts.md` § Errors & edge
+ *  cases): `{ state: "unresolved" }` (a missing key included — the mint is in
+ *  flight: paint loading, never an empty address book) or `{ state: "loaded",
+ *  addressbooks }` — paint it with `#lib/address-book`. */
+export function carddavReadAddressbooks(secretHex: string): Promise<AddressbooksRead> {
+  return call(secretHex, (c) => c.carddavReadAddressbooks(secretHex) as Promise<AddressbooksRead>);
 }
 
 /** Locate a card by its `uid_hash` (hex-encoded `blake3(uid)`) across every
@@ -4244,11 +4299,13 @@ export function linkedNestsMachineWithTrust(secretHex: string): Promise<WasmLink
 // shared Rust step every app's `LoggedIn` handoff runs
 // (`fauna_client_mail_settings::serving_enablement`). The four intents are the
 // onboarding machine's `*EnableRequested()`; resolves once every step has
-// answered. No enablement logic in the SPA (priority #2).
+// answered — to the page's `error-message` text when a step was refused for
+// good, else `undefined` (§ 3b *The step completes; it is not fired once*).
+// No enablement logic in the SPA (priority #2).
 export function applyServingEnablement(
   secretHex: string,
   intents: { email: boolean; caldav: boolean; carddav: boolean; webdav: boolean },
-): Promise<void> {
+): Promise<string | undefined> {
   return call(secretHex, (c) =>
     c.applyPostClaimServingEnablement(
       hexToBytes(secretHex),
@@ -5101,13 +5158,15 @@ export type DeploymentSeedCustodyOutcome =
   | 'bound_unresolved'
   | 'store_not_ready';
 
-/** `onWarning` receives the warning a run owes the admin when custody ends
- *  unconfirmed — the shared `fauna_client_config::custody_leg_warning`, which
- *  the caller only renders (`resolveLocalized`); the choice between the
- *  warnings is made in Rust. */
+/** `onWarning` receives every run's custody signal: the warning a run owes
+ *  the admin when custody ends unconfirmed — the shared
+ *  `fauna_client_config::custody_leg_warning`, which the caller only renders
+ *  (`resolveLocalized`) — or `null`, the cleared mark, with the custody
+ *  warnings to take down if one still shows (`is_custody_leg_warning`). The
+ *  choice between the warnings is made in Rust. */
 export function selfHealDeploymentSeedCustody(
   secretHex: string,
-  onWarning: (warning: LocalizedText) => void,
+  onWarning: (warning: LocalizedText | null, custodyWarnings?: LocalizedText[]) => void,
 ): Promise<DeploymentSeedCustodyOutcome> {
   return call(secretHex, (c) =>
     c.selfHealDeploymentSeedCustody(secretHex, onWarning),
@@ -5119,8 +5178,10 @@ export function selfHealDeploymentSeedCustody(
 // (`docs/goal/architecture/encryption-at-rest.md` § Capability tiering →
 // *Content-sealing epochs*). Fired at the same universal post-auth point as
 // `selfHealDeploymentSeedCustody`: slides the published epoch-seal-key horizon forward over
-// the shared, idempotent `MailSettingsMachine::refresh_epoch_schedule` — a
-// no-op when mail isn't enabled (no MSEK). Best-effort — the caller should
+// the shared, idempotent `MailSettingsMachine::refresh_epoch_schedule`, whose
+// first step mints the account key when the walked custody holds none
+// (`mail-credentials.md` § MSEK lifecycle → *Every account holds the key*) — a
+// no-op past that when the account has no mailbox. Best-effort — the caller should
 // catch and log, never surface to the user.
 export function refreshMailEpochSchedule(secretHex: string): Promise<void> {
   return mailSettingsMachine(secretHex).then((m) => m.refreshEpochSchedule());
@@ -5174,7 +5235,7 @@ export function reportHostAddress(secretHex: string): Promise<HostAddressReport>
 // normal operation (only on sign-out) — callers MUST stay fire-and-forget,
 // never `await` this.
 export function runCriticalAlertSweep(secretHex: string): Promise<void> {
-  return call(secretHex, (c) => c.runCriticalAlertSweep(secretHex)) as Promise<void>;
+  return callLoop(secretHex, (c) => c.runCriticalAlertSweep(secretHex)) as Promise<void>;
 }
 
 // ── S8 seal-backfill sweep ───────────────────────────────────────────────

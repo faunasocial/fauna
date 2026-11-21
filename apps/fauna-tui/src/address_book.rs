@@ -24,12 +24,12 @@ use fauna_ui_ids as ids;
 use std::sync::Arc;
 
 use fauna_client::NestClient;
+pub use fauna_client_carddav::AddressbooksReadState;
 pub use fauna_client_carddav::{AddressbookRow, VCardRow, addressbook_row, vcard_row};
 use fauna_client_carddav::{
-    CardDavClient, DavRecipientKeys, DecodedCardsPage,
-    bridge_routing::{ListAddressbooksRequest, QueryCardsRequest},
+    CardDavClient, DavRecipientKeys, DecodedCardsPage, bridge_routing::QueryCardsRequest,
 };
-use fauna_client_config::{DavStoreContext, dav_store_context};
+use fauna_client_config::{DavStoreContext, dav_custody, dav_store_context};
 use fauna_core::identity::ActorKeypair;
 use fauna_i18n::strings::contacts as t;
 
@@ -75,36 +75,31 @@ async fn carddav_context(
     dav_store_context(mail, ActorKeypair::from_secret(secret).actor_id().0).await
 }
 
-/// `fauna.bridges.list_addressbooks` → unseal each book's metadata → picker rows.
+/// `fauna.bridges.list_addressbooks` → unseal each book's metadata → picker
+/// rows, through the shared typed read
+/// ([`fauna_client_carddav::CardDavClient::read_addressbooks`]).
 ///
-/// An actor with no MSEK has no CardDAV store at all, so the read degrades to an
-/// **empty list rather than an error** — the same degrade the Events page's
-/// CalDAV read performs for the identical reason (priority #3).
+/// A custody holding no key yet (the mint at first connect in flight) or not
+/// readable yet answers [`AddressbooksReadState::Unresolved`] with no rows and
+/// no call — a wait the segment paints as loading, never an empty address book
+/// (`contacts.md` § Errors & edge cases); the store-change notice re-runs it
+/// ([`crate::contacts::store_resync_op`]).
 pub async fn load_addressbooks(
     nest: Arc<NestClient>,
     secret: [u8; 32],
     mail: Arc<dyn fauna_client_config::MailStore>,
-) -> Result<Vec<AddressbookRow>, String> {
-    let Some(DavStoreContext {
-        actor_id,
-        msek,
-        prior_mseks,
-    }) = carddav_context(mail.as_ref(), secret).await
-    else {
-        return Ok(Vec::new());
-    };
-    let keys =
-        DavRecipientKeys::from_mseks(fauna_client_carddav::DavKind::Card, &msek, &prior_mseks);
-    let books = CardDavClient::new(nest)
-        .list_addressbooks_decoded(
-            ListAddressbooksRequest {
-                actor_id: actor_id.to_vec(),
-            },
-            &keys,
-        )
+) -> Result<(AddressbooksReadState, Vec<AddressbookRow>), String> {
+    let custody = dav_custody(
+        mail.as_ref(),
+        ActorKeypair::from_secret(secret).actor_id().0,
+    )
+    .await;
+    let read = CardDavClient::new(nest)
+        .read_addressbooks(&custody)
         .await
         .map_err(|e| format!("list_addressbooks: {e}"))?;
-    Ok(books.iter().map(addressbook_row).collect())
+    let rows = read.addressbooks().iter().map(addressbook_row).collect();
+    Ok((read.state(), rows))
 }
 
 /// `fauna.bridges.query_cards` → unseal + parse each body → card rows.
@@ -259,6 +254,15 @@ pub fn render(st: &ContactsState, out: &mut Vec<Element>) {
         return;
     }
 
+    // A read that has not answered — a missing key included — paints the
+    // loading line in place of the books, never an empty address book
+    // (`contacts.md` § Errors & edge cases). A deep link's books may land
+    // before the segment's own read; rows already in hand are painted.
+    if st.addressbooks_read == AddressbooksReadState::Unresolved && st.addressbooks.is_empty() {
+        out.push(Element::chrome(t::address_book::LOADING));
+        return;
+    }
+
     for b in &st.addressbooks {
         out.push(Element::gesture_button(
             ids::ADDRESSBOOK_ITEM,
@@ -298,6 +302,7 @@ mod tests {
     fn state_with(cards: Vec<VCardRow>, open: Option<&str>) -> ContactsState {
         ContactsState {
             segment: Segment::AddressBook,
+            addressbooks_read: AddressbooksReadState::Loaded,
             cards,
             open_card: open.map(str::to_string),
             ..ContactsState::default()
@@ -421,6 +426,52 @@ mod tests {
         let mut out = Vec::new();
         render(&st, &mut out);
         assert_eq!(ids(&out), vec!["vcard-card", "vcard-card-fn"]);
+    }
+
+    /// A book read that has not answered (a custody with no key yet: the mint
+    /// in flight) paints the loading line and nothing of an address book —
+    /// never an empty one (`contacts.md` § Errors & edge cases).
+    #[test]
+    fn an_unresolved_read_paints_loading_never_an_empty_book() {
+        let st = ContactsState {
+            segment: Segment::AddressBook,
+            ..ContactsState::default()
+        };
+        assert_eq!(st.addressbooks_read, AddressbooksReadState::Unresolved);
+        let mut out = Vec::new();
+        render(&st, &mut out);
+        assert_eq!(out.len(), 1, "{:?}", ids(&out));
+        assert!(
+            format!("{:?}", out[0]).contains(t::address_book::LOADING),
+            "{:?}",
+            out[0]
+        );
+        assert!(!ids(&out).iter().any(|i| i == "addressbook-item"));
+    }
+
+    /// A loaded read with no books paints no loading line: an empty loaded
+    /// list is a real answer (the address book has no lazy provisioning).
+    #[test]
+    fn a_loaded_read_with_no_books_paints_no_loading_line() {
+        let st = state_with(vec![], None);
+        let mut out = Vec::new();
+        render(&st, &mut out);
+        assert!(out.is_empty(), "{:?}", ids(&out));
+    }
+
+    /// The load itself: a custody with no key answers unresolved with no rows
+    /// and no call (the nest below is never dialed).
+    #[tokio::test]
+    async fn load_addressbooks_on_a_custody_with_no_key_is_unresolved() {
+        let (read, rows) = load_addressbooks(
+            dummy_nest(),
+            [7u8; 32],
+            std::sync::Arc::new(fauna_client_config::test_helpers::FakeMailStore::empty()),
+        )
+        .await
+        .expect("a wait is no error");
+        assert_eq!(read, AddressbooksReadState::Unresolved);
+        assert!(rows.is_empty());
     }
 
     // Never actually dialed — both tests below refuse before either

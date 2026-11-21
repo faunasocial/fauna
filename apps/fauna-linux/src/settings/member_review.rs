@@ -119,6 +119,10 @@ struct Widgets {
     list: gtk::Box,
     placeholder: gtk::Label,
     rows: RefCell<Vec<gtk::Box>>,
+    /// Every row's `member-review-remove-button`, repainted from its answer on
+    /// each read — a re-read answering the same roster rebuilds no row, yet the
+    /// conversations session may have come up since.
+    removes: RefCell<Vec<gtk::Button>>,
     /// The roster (with each row's resolved handle) the rows were last built
     /// from. A re-read answering the same rebuilds nothing — the store-change
     /// notice re-drives the read while the page is open (a level, not an
@@ -197,6 +201,7 @@ fn build_page_widgets() -> (gtk::Box, Widgets) {
         list,
         placeholder,
         rows: RefCell::new(Vec::new()),
+        removes: RefCell::new(Vec::new()),
         painted: RefCell::new(None),
         read_error_shown: Cell::new(false),
     };
@@ -313,6 +318,7 @@ pub(crate) fn build_ephemeral_pass(error_label: &gtk::Label) -> (gtk::Box, Rc<dy
             // Never shown: the pass has no empty state (it simply is absent).
             placeholder: gtk::Label::builder().visible(false).build(),
             rows: RefCell::new(Vec::new()),
+            removes: RefCell::new(Vec::new()),
             painted: RefCell::new(None),
             read_error_shown: Cell::new(false),
         },
@@ -521,20 +527,45 @@ fn render_rows(ctx: &Rc<Ctx>, reviews: &[MemberReview]) {
         .map(|r| (r.clone(), ctx.manager.handle_for_person(&r.person)))
         .collect();
     if ctx.w.painted.borrow().as_ref() == Some(&painted) {
+        paint_removes(ctx);
         return;
     }
     *ctx.w.painted.borrow_mut() = Some(painted);
-    let mut rows = ctx.w.rows.borrow_mut();
-    for row in rows.drain(..) {
-        ctx.w.list.remove(&row);
-    }
-    for (i, review) in reviews.iter().enumerate() {
-        let row = build_review_row(ctx, review, i);
-        ctx.w.list.append(&row);
-        rows.push(row);
+    {
+        let mut rows = ctx.w.rows.borrow_mut();
+        for row in rows.drain(..) {
+            ctx.w.list.remove(&row);
+        }
+        ctx.w.removes.borrow_mut().clear();
+        for (i, review) in reviews.iter().enumerate() {
+            let row = build_review_row(ctx, review, i);
+            ctx.w.list.append(&row);
+            rows.push(row);
+        }
     }
     ctx.w.placeholder.set_visible(reviews.is_empty());
     ctx.w.list.set_visible(!reviews.is_empty());
+    paint_removes(ctx);
+}
+
+/// `member-review-remove-button`'s answer: Remove evicts through the
+/// conversations session, so it is not possible until that session is up
+/// (`succession-propagation.md`; the shared
+/// `fauna_core::data::member_review_remove_possibility`).
+fn remove_answer() -> fauna_core::possibility::Possibility {
+    fauna_core::data::member_review_remove_possibility(
+        crate::conversations::conv_backend::active_session().is_some(),
+    )
+}
+
+/// Paint every row's Remove from its answer; the reason rides the button's
+/// tooltip (the row has no line of its own — linux's disabled-with-a-reason
+/// idiom).
+fn paint_removes(ctx: &Rc<Ctx>) {
+    let answer = remove_answer();
+    for remove in ctx.w.removes.borrow().iter() {
+        crate::possible::paint(remove, None, answer.clone());
+    }
 }
 
 /// One `member-review-row` for `review`, with `member-review-keep-button` /
@@ -588,6 +619,7 @@ fn build_review_row(ctx: &Rc<Ctx>, review: &MemberReview, _i: usize) -> gtk::Box
         remove.connect_clicked(move |_| dispatch_remove(&ctx, person));
     }
     row.append(&remove);
+    ctx.w.removes.borrow_mut().push(remove);
 
     row
 }
@@ -607,7 +639,24 @@ fn dispatch_keep(ctx: &Rc<Ctx>, person: ActorId) {
     );
 }
 
+/// The Remove press's refusal, if any: the blocked answer's reason, resolved
+/// for `error-message`; `None` while the eviction may go ahead.
+fn remove_refusal(answer: &fauna_core::possibility::Possibility) -> Option<String> {
+    if answer.is_possible() {
+        return None;
+    }
+    Some(crate::possible::reason_text(answer).unwrap_or_default())
+}
+
 fn dispatch_remove(ctx: &Rc<Ctx>, person: ActorId) {
+    // The answer the button painted from, asked again: with no conversations
+    // session there is no eviction and no verdict — said on `error-message`,
+    // never a press that returns with nothing shown.
+    if let Some(reason) = remove_refusal(&remove_answer()) {
+        show_verdict_message(ctx, Some(&reason));
+        paint_removes(ctx);
+        return;
+    }
     let manager = ctx.manager.clone();
     let ctx_render = Rc::clone(ctx);
     spawn_with_snapshot(
@@ -834,5 +883,22 @@ mod tests {
             assert!(ctx.w.rows.borrow().is_empty());
             assert!(ctx.w.placeholder.is_visible());
         });
+    }
+
+    /// Rule 7 on Remove (`succession-propagation.md`): with no conversations
+    /// session the press is refused with the not-ready reason for
+    /// `error-message`, never a silent return; with one it goes ahead.
+    #[test]
+    fn remove_refuses_without_the_conversations_session() {
+        assert_eq!(
+            remove_refusal(&fauna_core::data::member_review_remove_possibility(false)).as_deref(),
+            Some(crate::i18n::strings::settings::recovery_kit::REVIEW_REMOVE_NOT_READY)
+        );
+        assert_eq!(
+            remove_refusal(&fauna_core::data::member_review_remove_possibility(true)),
+            None
+        );
+        // A unit test builds no session, so the live answer is the refusal.
+        assert!(!remove_answer().is_possible());
     }
 }

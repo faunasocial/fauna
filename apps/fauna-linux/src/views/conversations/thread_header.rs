@@ -15,12 +15,12 @@
 //! to AT-SPI when nested.
 
 use fauna_ui_ids as ids;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk::prelude::*;
 
-use fauna_conversations::{ThreadCapabilities, TypedAddress, snapshot::ThreadDetail};
+use fauna_conversations::{ThreadControl, TypedAddress, snapshot::ThreadDetail};
 use fauna_core::data::MemberReview;
 use fauna_core::identity::ActorId;
 
@@ -36,6 +36,9 @@ pub struct ThreadHeader {
     members_box: gtk::Box,
     rename_btn: gtk::Button,
     add_participant_btn: gtk::Button,
+    /// The `Invite` answer the add-person button was last painted from, asked
+    /// again by its click so no picker opens for a viewer it is not offered to.
+    may_invite: Rc<Cell<bool>>,
     room_class_label: gtk::Label,
     /// `thread-room-notice` — the room's one standing notice, off the shared
     /// `RoomNotice` (awaiting-key wins over moderation-unverified).
@@ -161,6 +164,7 @@ impl ThreadHeader {
 
         let on_rename: VoidCb = Rc::new(RefCell::new(None));
         let on_add_participant: VoidCb = Rc::new(RefCell::new(None));
+        let may_invite = Rc::new(Cell::new(false));
 
         {
             let cb = on_rename.clone();
@@ -172,7 +176,11 @@ impl ThreadHeader {
         }
         {
             let cb = on_add_participant.clone();
+            let may_invite = Rc::clone(&may_invite);
             add_participant_btn.connect_clicked(move |_| {
+                if !may_invite.get() {
+                    return;
+                }
                 if let Some(f) = cb.borrow().as_ref() {
                     f();
                 }
@@ -205,6 +213,7 @@ impl ThreadHeader {
             members_box,
             rename_btn,
             add_participant_btn,
+            may_invite,
             room_class_label,
             room_notice_label,
             guardian_slot,
@@ -236,12 +245,15 @@ impl ThreadHeader {
         while let Some(child) = self.members_box.first_child() {
             self.members_box.remove(&child);
         }
-        // A chip removes its participant when the rail's membership is mutable
-        // AND the viewer's role in a governed room may remove one — the roles
-        // table applied in shared Rust (`RoomSnapshot::gate`), never re-derived
-        // here (`conversation-rooms.md` § Roles and authorization).
+        // A chip removes its participant only where the shared `RemoveMember`
+        // answer is possible: the rail's membership is mutable AND the
+        // viewer's role in a governed room may remove — the roles table applied
+        // in shared Rust (`ThreadCapabilities::possibility`), never re-derived
+        // here (`ui/conversations.md` § Errors & edge cases → *Controls this
+        // person can never use*). Anyone else reads the chips as the inert
+        // roster; the chip itself is never absent.
         let membership_mutable = detail.capabilities.supports_membership_change;
-        let removable = membership_mutable && detail.capabilities.can_remove_members;
+        let removable = super::thread_control(detail, ThreadControl::RemoveMember).is_possible();
         for (i, (display, addr)) in detail
             .participant_displays
             .iter()
@@ -265,9 +277,8 @@ impl ThreadHeader {
             let reviewed_person = addr
                 .person_actor_id()
                 .filter(|person| fauna_core::data::is_under_review(member_reviews, person));
-            let greyed = membership_mutable && !removable;
             let (chip, chip_label) =
-                build_member_chip(display, removable, greyed, role, reviewed_person, {
+                build_member_chip(display, removable, role, reviewed_person, {
                     let cb = self.on_keep_member.clone();
                     move |person| {
                         if let Some(f) = cb.borrow().as_ref() {
@@ -291,13 +302,12 @@ impl ThreadHeader {
                 });
                 chip_label.add_controller(gesture);
             } else if !membership_mutable {
-                // (A `greyed` chip — the rail's membership is mutable but the
-                // viewer's ROLE may not remove, a plain member of a governed
-                // room — takes neither branch: it is still the Remove control,
-                // greyed by `build_member_chip`, never hidden and never demoted
-                // to this address popover, which a user and a driver both read
-                // as a live control — `ui/conversations.md` § Architectural
-                // rules 5.)
+                // (A room chip whose remove is absent — the rail's membership
+                // is mutable but the viewer's ROLE may not remove, a plain
+                // member of a governed room — takes neither branch: it is the
+                // inert roster, a label with no gesture, never this address
+                // popover, which a user and a driver both read as a live
+                // control.)
                 //
                 // Informational chip (mail): clicking reveals the full
                 // address / contact in a popover — never removes
@@ -353,7 +363,7 @@ impl ThreadHeader {
         }
 
         self.apply_room(detail);
-        self.apply_capabilities(&detail.capabilities);
+        self.apply_capabilities(detail);
     }
 
     /// The room's class statement and the editor's door — read off the
@@ -419,16 +429,19 @@ impl ThreadHeader {
         *self._on_room_search.borrow_mut() = Some(Box::new(f));
     }
 
-    fn apply_capabilities(&self, caps: &ThreadCapabilities) {
+    fn apply_capabilities(&self, detail: &ThreadDetail) {
+        let caps = &detail.capabilities;
         // Render unconditionally; gate on visibility
         // (capability gating, never rail branches).
         self.rename_btn.set_visible(caps.supports_rename);
-        self.add_participant_btn
-            .set_visible(caps.supports_membership_change);
-        // ...and GREY it — never hide it — when the viewer's role in a
-        // governed room may not invite (`ui/conversations.md`
-        // § Architectural rules 5; the roles table is applied in shared Rust).
-        self.add_participant_btn.set_sensitive(caps.can_invite);
+        // The add-person affordance is the shared `Invite` answer: painted
+        // only where the rail's membership is mutable AND the viewer's role in
+        // a governed room may invite — absent otherwise, never a dead button
+        // the room would refuse (`ui/conversations.md` § Errors & edge cases →
+        // *Controls this person can never use*).
+        let invite = super::thread_control(detail, ThreadControl::Invite);
+        self.may_invite.set(invite.is_possible());
+        crate::possible::paint(&self.add_participant_btn, None, invite);
         // The room's search door — a community room whose floor seats this
         // account (`room-search.md` § The surface), decided in shared Rust.
         self.room_search_btn.set_visible(caps.can_search_room);
@@ -459,14 +472,14 @@ impl ThreadHeader {
 /// The chip pill and, separately, the label inside it that carries
 /// `thread-member-chip` — the widget a removal gesture must sit on.
 ///
-/// `greyed`: the chip is a Remove control the viewer's role may not use — the
-/// id-carrying label goes insensitive, so the automation gate refuses to drive
-/// it, while the review pair's Keep beside it (an account-plane write, not a
-/// removal) stays live.
+/// `removable`: the shared `RemoveMember` answer is possible, so the label
+/// carries the remove (wired by the caller). Otherwise the label is the inert
+/// roster — no gesture, so the automation gate refuses to drive it as not
+/// actuable — while the review pair's Keep beside it (an account-plane write,
+/// not a removal) stays live.
 fn build_member_chip(
     text: &str,
     removable: bool,
-    greyed: bool,
     role: Option<fauna_conversations::RoomRole>,
     reviewed_person: Option<ActorId>,
     on_keep_click: impl Fn(ActorId) + 'static,
@@ -486,9 +499,6 @@ fn build_member_chip(
     label.set_margin_top(2);
     label.set_margin_bottom(2);
     crate::testid::set_test_id(&label, ids::THREAD_MEMBER_CHIP);
-    if greyed {
-        label.set_sensitive(false);
-    }
     // The chip's `role` state — a state of an existing element, ui.yaml's
     // ratified shape for one (`recipient-resolve-status`'s `state`), so a
     // driver reads the role off the chip it already addresses.
@@ -538,7 +548,7 @@ fn build_member_chip(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use fauna_conversations::address::Rail;
     use fauna_conversations::capabilities::derive_capabilities;
@@ -663,7 +673,9 @@ mod tests {
 
     /// A governed room seeded onto `detail_with_one_participant`'s thread:
     /// two Fauna seats, alice the viewer and owner, bob a plain member.
-    fn governed_two_seats(viewer_role: RoomRole) -> ThreadDetail {
+    pub(in crate::views::conversations) fn governed_two_seats(
+        viewer_role: RoomRole,
+    ) -> ThreadDetail {
         let mut detail = detail_with_one_participant(ActorId([7u8; 32]));
         detail.participants.push(TypedAddress::Fauna {
             handle: "bob".into(),
@@ -736,12 +748,14 @@ mod tests {
         });
     }
 
-    /// § Architectural rules 5: greyed, never hidden. A plain member sees the
-    /// editor's door painted and live (its controls grey per control inside)
-    /// and the add-participant affordance PAINTED and insensitive — the roles
-    /// table is applied in shared Rust, and this app never re-derives it.
+    /// `ui/conversations.md` § Errors & edge cases → *Controls this person can
+    /// never use*: a plain member sees the editor's door painted and live (the
+    /// controls inside answer per control), NO add-participant affordance (the
+    /// shared `Invite` answer is absent), and the chips as the inert roster —
+    /// the roles table is applied in shared Rust, and this app never
+    /// re-derives it.
     #[test]
-    fn a_plain_member_sees_the_room_affordances_greyed_not_hidden() {
+    fn a_plain_member_is_offered_no_room_control_a_role_would_give() {
         crate::testid::run_on_gtk_thread(|| {
             let header = ThreadHeader::new();
             header.render(&governed_two_seats(RoomRole::Member), &[]);
@@ -759,20 +773,24 @@ mod tests {
                 "live: the editor holds the member's own walk-out"
             );
 
-            let add = crate::automation::find::find_in(&root, ids::THREAD_ADD_PARTICIPANT_BUTTON)
-                .expect("thread-add-participant-button is painted on a mutable rail");
-            assert!(add.is_visible());
-            assert!(!add.is_sensitive(), "greyed off can_invite, not hidden");
+            // `find_in` prunes non-showing subtrees, as a driver's tree does.
+            assert!(
+                crate::automation::find::find_in(&root, ids::THREAD_ADD_PARTICIPANT_BUTTON)
+                    .is_none(),
+                "absent: a member of an invite-only room can never add someone here"
+            );
 
-            // The chip IS the Remove control on a mutable rail, so a member who
-            // may not remove sees it greyed — not demoted to the mail chip's
-            // address popover, which a driver (and a user) reads as live.
+            // The chip is the roster, so it is painted; with the remove absent
+            // it carries no gesture — neither a remove nor the mail chip's
+            // address popover — so a driver finds nothing to actuate.
             let mut chips: Vec<gtk::Widget> = Vec::new();
             crate::automation::find::collect_in(&root, ids::THREAD_MEMBER_CHIP, &mut chips);
-            assert_eq!(chips.len(), 2, "painted, never hidden");
+            assert_eq!(chips.len(), 2, "the roster stays painted");
             assert!(
-                chips.iter().all(|chip| !chip.is_sensitive()),
-                "greyed off can_remove_members, not hidden and not a live popover"
+                chips
+                    .iter()
+                    .all(|chip| !crate::automation::registry::is_actuable(chip)),
+                "a member's chips are the inert roster, never a remove"
             );
         });
     }

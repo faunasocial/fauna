@@ -474,6 +474,15 @@ async fn harness_against_nest(rows: &[(&str, i64)], nest_base_url: &str) -> Harn
     std::fs::create_dir_all(db_path.parent().unwrap()).expect("create db dir");
     {
         let db = SyncDb::open(&db_path).expect("open per-folder db");
+        // A two-way seat its nest once answered `sync` for — the persisted last
+        // authoritative answer the resolver falls back to with no nest here. A seat
+        // that never heard one is unresolved, and an unresolved seat declines a
+        // peer's delete on the on-demand fold (`file-sync.md` § 4). Without it the
+        // boot sweep's first-pass row read (`SyncEngine::row_read_for_first_pass`)
+        // re-resolves this seat `Unresolved` against the dead nest, and the
+        // remote-delete pins see the decline instead of the verdict they test.
+        db.set_cached_sync_mode(fauna_sync_engine::config::SyncMode::Sync.as_cache_str())
+            .expect("seed the seat's last authoritative sync mode");
         for (rel, size) in rows {
             db.upsert_entry(
                 rel,
@@ -2650,7 +2659,9 @@ async fn delete_a_placeholder_while_the_service_is_down(dir: &str) -> DownDelete
     let (connected_tx, connected_rx) = tokio::sync::oneshot::channel();
     let connect = {
         let (root, db_path, gone_rel) = (h.root.clone(), h.db_path.clone(), gone_rel.clone());
+        let mut once = Some((cmd_tx, connected_tx));
         move || {
+            let (cmd_tx, connected_tx) = once.take().expect("the root connects once");
             // Read the row as the root connects: the boot sweep has run by now.
             let row_at_connect = SyncDb::open(&db_path)
                 .expect("reopen db")
@@ -2658,11 +2669,15 @@ async fn delete_a_placeholder_while_the_service_is_down(dir: &str) -> DownDelete
                 .expect("get entry")
                 .map(|e| e.state);
             let conn = crate::cfapi_host::register_and_connect_product_root(
-                &root, FOLDER, cmd_tx, db_path, false,
+                &root,
+                FOLDER,
+                cmd_tx,
+                db_path.clone(),
+                false,
             )
             .expect("connect #2 over the kept registration");
             let _ = connected_tx.send(row_at_connect);
-            conn
+            crate::bridge::Connected::Up(conn)
         }
     };
     let loop_fut = crate::bridge::serve_hydration_root(
@@ -6724,6 +6739,211 @@ async fn the_startup_sweep_removes_ghosts_and_spares_live_roots() {
     fauna_cfapi::unregister_sync_root_with_shell(&live_id).expect("live shell down");
 }
 
+/// `reg.exe` over one registry path: `query` answers whether the key exists,
+/// `add`/`delete` must succeed. The test's own writes into the machine-wide
+/// shell state, through the tool a reader of the box would use.
+fn reg(args: &[&str]) -> bool {
+    std::process::Command::new("reg")
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run reg.exe")
+        .success()
+}
+
+const SYNC_ROOT_MANAGER: &str =
+    r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\SyncRootManager";
+
+/// **A removed package's root is swept whole at the next agent start**
+/// (`installers/windows.md` § Direct download, 5, *Removal*): an MSIX has no
+/// uninstall action, removing the package leaves its root's `SyncRootManager`
+/// key and its filter registration in place, and `Unregister` keeps that key
+/// (measured 2026-11-16 and 2026-11-17 on Windows). So the janitor picks an entry
+/// whose `AUMID` names a package no longer installed for this user, with its
+/// folder still there, and removes the filter half, the key and the Explorer
+/// namespace keys its `NamespaceCLSID` names — and the half key a refused
+/// `Register` leaves, whose `Unregister` the OS answers `0x80070490`, goes
+/// whole too. An installed package's root is spared.
+///
+/// The packaged shape is planted, not registered from a package: the entries
+/// are real unpackaged registrations given the `AUMID` value a package's
+/// `Register` writes, and the half key is written as a refused one leaves it.
+/// The install witness's item 4 registers from inside the real packages.
+#[tokio::test]
+async fn the_startup_sweep_removes_a_removed_packages_root_whole() {
+    let _serial = shell_sync_root_test_guard();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let pid = std::process::id();
+    let gone = format!("FaunaSocialTest.SweepGone{pid}_0000000000000");
+    assert!(
+        !fauna_cfapi::package_family_installed(&gone).expect("catalogue query"),
+        "precondition: {gone} is installed for this user"
+    );
+
+    // ── a removed package's root: the user's folder still there ──
+    let removed_dir = tmp.path().join("removed-package-root");
+    std::fs::create_dir_all(&removed_dir).expect("mk removed-package root");
+    std::fs::write(removed_dir.join("kept.txt"), b"a file the user keeps").expect("a file");
+    let removed_id = fauna_cfapi::register_sync_root_with_shell(
+        &removed_dir.to_string_lossy(),
+        "Fauna sweep-removed-package",
+        "sweep-removed-package",
+    )
+    .expect("register the removed package's root");
+    let removed_key = format!(r"{SYNC_ROOT_MANAGER}\{removed_id}");
+    let gone_aumid = format!("{gone}!FaunaApp");
+    assert!(
+        reg(&[
+            "add",
+            &removed_key,
+            "/v",
+            "AUMID",
+            "/t",
+            "REG_SZ",
+            "/d",
+            &gone_aumid,
+            "/f"
+        ]),
+        "write the AUMID of a removed package into {removed_key}"
+    );
+    let entry = |id: &str| {
+        fauna_cfapi::list_shell_sync_roots()
+            .expect("list")
+            .into_iter()
+            .find(|r| r.id == id)
+    };
+    let removed = entry(&removed_id).expect("the removed package's root is listed");
+    assert_eq!(removed.package_family(), Some(gone.as_str()));
+    let removed_ns = removed
+        .namespace_clsid
+        .clone()
+        .expect("a shell registration names its namespace class");
+
+    // ── the half key a refused `Register` leaves: no folder, its WOW6432Node class ──
+    let me = fauna_ipc::win_token::current_user_sid_string().expect("this user's SID");
+    let half_id = format!("Fauna!{me}!sweep-refused-register-{pid}");
+    let half_key = format!(r"{SYNC_ROOT_MANAGER}\{half_id}");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let half_ns = format!(
+        "{{{pid:08X}-6116-4000-8000-{:012X}}}",
+        nanos & 0xFFFF_FFFF_FFFF
+    );
+    let half_class = format!(r"HKCU\Software\Classes\WOW6432Node\CLSID\{half_ns}");
+    assert!(reg(&[
+        "add",
+        &half_key,
+        "/v",
+        "NamespaceCLSID",
+        "/t",
+        "REG_SZ",
+        "/d",
+        &half_ns,
+        "/f"
+    ]));
+    assert!(reg(&[
+        "add",
+        &half_key,
+        "/v",
+        "AUMID",
+        "/t",
+        "REG_SZ",
+        "/d",
+        &gone_aumid,
+        "/f"
+    ]));
+    assert!(reg(&[
+        "add",
+        &half_class,
+        "/ve",
+        "/t",
+        "REG_SZ",
+        "/d",
+        "Fauna",
+        "/f"
+    ]));
+
+    // ── an installed package's root: spared ──
+    let installed_dir = tmp.path().join("installed-package-root");
+    std::fs::create_dir_all(&installed_dir).expect("mk installed-package root");
+    let installed_id = fauna_cfapi::register_sync_root_with_shell(
+        &installed_dir.to_string_lossy(),
+        "Fauna sweep-installed-package",
+        "sweep-installed-package",
+    )
+    .expect("register the installed package's root");
+    assert!(reg(&[
+        "add",
+        &format!(r"{SYNC_ROOT_MANAGER}\{installed_id}"),
+        "/v",
+        "AUMID",
+        "/t",
+        "REG_SZ",
+        "/d",
+        "Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy!App",
+        "/f",
+    ]));
+
+    crate::cfapi_host::sweep_ghost_shell_registrations();
+
+    let removed_after = entry(&removed_id);
+    let removed_filter =
+        fauna_cfapi::is_filter_registered(&removed_dir.to_string_lossy()).expect("filter query");
+    let removed_ns_left: Vec<String> = [
+        format!(r"HKCU\Software\Classes\CLSID\{removed_ns}"),
+        format!(r"HKCU\Software\Classes\WOW6432Node\CLSID\{removed_ns}"),
+        format!(r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace\{removed_ns}"),
+    ]
+    .into_iter()
+    .filter(|k| reg(&["query", k]))
+    .collect();
+    let half_left = reg(&["query", &half_key]);
+    let half_class_left = reg(&["query", &half_class]);
+    let installed_after = entry(&installed_id);
+    let installed_filter =
+        fauna_cfapi::is_filter_registered(&installed_dir.to_string_lossy()).expect("filter query");
+
+    // Give back before asserting: the installed control, then anything the sweep left.
+    let _ = fauna_cfapi::unregister_sync_root(&installed_dir.to_string_lossy());
+    let _ = fauna_cfapi::unregister_sync_root_with_shell(&installed_id);
+    if removed_after.is_some() || removed_filter {
+        let _ = fauna_cfapi::unregister_sync_root(&removed_dir.to_string_lossy());
+        let _ = reg(&["delete", &removed_key, "/f"]);
+    }
+    for k in &removed_ns_left {
+        let _ = reg(&["delete", k, "/f"]);
+    }
+    if half_left {
+        let _ = reg(&["delete", &half_key, "/f"]);
+    }
+    if half_class_left {
+        let _ = reg(&["delete", &half_class, "/f"]);
+    }
+
+    assert!(
+        removed_after.is_none() && !removed_filter && removed_ns_left.is_empty(),
+        "a removed package's root was not swept whole: shell entry {removed_after:?}, filter \
+         registered {removed_filter}, namespace keys left {removed_ns_left:?}"
+    );
+    assert!(
+        removed_dir.join("kept.txt").exists(),
+        "the sweep took the user's folder or a file in it — only the binding goes"
+    );
+    assert!(
+        !half_left && !half_class_left,
+        "a refused Register's half key was not swept whole: key left {half_left}, \
+         WOW6432Node class left {half_class_left}"
+    );
+    assert!(
+        installed_after.is_some() && installed_filter,
+        "an installed package's root was swept: shell entry {installed_after:?}, filter \
+         registered {installed_filter}"
+    );
+}
+
 /// **The uninstall wipe is SELF-HEALED by the next product registration** —
 /// the coexistence hazard `installers/windows.md` § Data continuity names, made
 /// a mechanism instead of a manual pass.
@@ -7215,10 +7435,16 @@ async fn a_readers_presence_root_refuses_every_change_and_still_takes_remote_del
     let connect = {
         let (root, db_path) = (h.root.clone(), h.db_path.clone());
         move || {
-            crate::cfapi_host::register_and_connect_product_root(
-                &root, FOLDER, cmd_tx, db_path, true,
+            crate::bridge::Connected::Up(
+                crate::cfapi_host::register_and_connect_product_root(
+                    &root,
+                    FOLDER,
+                    cmd_tx.clone(),
+                    db_path.clone(),
+                    true,
+                )
+                .expect("connect a reader's root"),
             )
-            .expect("connect a reader's root")
         }
     };
     let loop_fut = crate::bridge::serve_hydration_root(
@@ -7379,10 +7605,16 @@ async fn a_writers_presence_root_populates_hydrates_and_uploads() {
     let connect = {
         let (root, db_path) = (h.root.clone(), h.db_path.clone());
         move || {
-            crate::cfapi_host::register_and_connect_product_root(
-                &root, FOLDER, cmd_tx, db_path, false,
+            crate::bridge::Connected::Up(
+                crate::cfapi_host::register_and_connect_product_root(
+                    &root,
+                    FOLDER,
+                    cmd_tx.clone(),
+                    db_path.clone(),
+                    false,
+                )
+                .expect("connect a writer's root"),
             )
-            .expect("connect a writer's root")
         }
     };
     let loop_fut = crate::bridge::serve_hydration_root(

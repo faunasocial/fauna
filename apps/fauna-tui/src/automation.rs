@@ -180,6 +180,11 @@ impl Registry {
                     "editable": e.field.is_some(),
                     "scope": scope,
                     "text": e.text,
+                    "attrs": e
+                        .attrs
+                        .iter()
+                        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                        .collect::<serde_json::Map<_, _>>(),
                 })
             })
             .collect();
@@ -1037,6 +1042,9 @@ fn state_json(app: &App, machine_result: Option<String>, device_id: Option<&str>
     // `painted-text-has-area` (`fauna_e2e_agent::PAINTED_TEXT_AREA_KEY`).
     // Measured by the render loop; a field read here. TOP-level.
     state[fauna_e2e_agent::PAINTED_TEXT_AREA_KEY] = app.painted_text_area.json();
+    // What each drawn frame showed at the root — the in-place witness's journal
+    // (`fauna_e2e_agent::ROOT_SURFACE_KEY`). TOP-level.
+    state[fauna_e2e_agent::ROOT_SURFACE_KEY] = app.root_surface.json();
     // The admin Held-Custody page's `{answered, row_count}` — whether the
     // registry read has ANSWERED, read off the loop while the nav's awaited
     // read is held at the nest (`admin::custody_hosting::state_json`).
@@ -1180,7 +1188,7 @@ async fn run_gesture(app: &mut App, gesture: crate::element::Gesture) {
                 app.spawn_page_op(*op);
             } else {
                 let outcome = op.run().await;
-                crate::app::apply_page_outcome(app, outcome);
+                apply_page_outcome_awaited(app, outcome).await;
             }
         }
         crate::app::GestureWork::Wizard(machine, action, payload) => {
@@ -1214,7 +1222,7 @@ async fn run_nav_enter(app: &mut App, page: crate::pages::Page) {
             return;
         }
         let outcome = op.run().await;
-        crate::app::apply_page_outcome(app, outcome);
+        apply_page_outcome_awaited(app, outcome).await;
     }
 }
 
@@ -1231,6 +1239,33 @@ fn feed_reload_held(app: &App) -> bool {
         .manager
         .as_ref()
         .is_some_and(|m| m.reload_hold_armed_for_test())
+}
+
+/// Apply an outcome the agent awaited, and await the follow-up read it left
+/// owed too — today the Folders page's mail-custody read
+/// ([`crate::settings::take_folders_custody_op`]), which a folders hydrate
+/// leaves to its own op so the rows paint before it answers. Awaited, so the
+/// driver's next read sees the toggle settled, as before the split; started
+/// instead while a test holds those reads
+/// (`fauna_client_folders::webdav_provision::hold_custody_reads_for_test`,
+/// the `folders_hold_custody_reads` command): the held read cannot land until
+/// the release, a command this same loop must run.
+#[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+async fn apply_page_outcome_awaited(app: &mut App, outcome: crate::app::PageOutcome) {
+    let crate::app::PageOutcome::Settings(outcome) = outcome else {
+        crate::app::apply_page_outcome(app, outcome);
+        return;
+    };
+    crate::settings::apply_outcome(app, outcome);
+    let Some(op) = crate::settings::take_folders_custody_op(&mut app.settings) else {
+        return;
+    };
+    if fauna_client_folders::webdav_provision::custody_reads_held_for_test() {
+        app.spawn_page_op(crate::app::PageOp::Settings(op));
+    } else {
+        let outcome = Box::pin(op.run()).await;
+        crate::settings::apply_outcome(app, outcome);
+    }
 }
 
 /// Perform one element op against the current frame's registry — the tui
@@ -1573,6 +1608,13 @@ pub async fn perform(app: &mut App, registry: &Registry, req: &ElementReq) -> Va
         // off the pty (`drivers/tui.py::get_clipboard_text`).
         ElementKind::ClipboardText => {
             json!({ "error": "the tui clipboard is read off the pty by the driver" })
+        }
+        // tui's selectable-text leg is the terminal's own selection, held by
+        // the owner's ask on how tui lets the terminal select text; until it
+        // lands no selection is served here (`surfaces.toml`
+        // `text-selection-read`).
+        ElementKind::SelectText | ElementKind::Selection => {
+            json!({ "error": "tui serves no text selection yet" })
         }
         // `Enter` on an actuable element is the KEYBOARD's activation of it:
         // the ring moves to the element the way the user's arrow keys would,
@@ -1988,6 +2030,22 @@ async fn dispatch_command(
         }
         "subscriptions_release_author_drain" => {
             fauna_client_subscriptions::orchestration::release_author_drain_for_test();
+            recognized(true)
+        }
+        // Hold the Folders page's mail-custody reads open, and release it:
+        // the one way to read `folder-webdav-toggle` while that read is out
+        // (`folders.md` § Errors & edge cases, *Own-tier and mail gates* —
+        // blocked "still loading"). An account-store read, so no nest reply
+        // hold reaches it; the hold is in shared Rust
+        // (`fauna_client_folders::webdav_provision::hold_custody_reads_for_test`)
+        // and process-wide, so pre-auth is fine. While held, this agent starts
+        // the read instead of awaiting it (`apply_page_outcome_awaited`).
+        "folders_hold_custody_reads" => {
+            fauna_client_folders::webdav_provision::hold_custody_reads_for_test();
+            recognized(true)
+        }
+        "folders_release_custody_reads" => {
+            fauna_client_folders::webdav_provision::release_custody_reads_for_test();
             recognized(true)
         }
         "feed_release_held_reload" => {
@@ -3003,7 +3061,7 @@ async fn dispatch_command(
             };
             if let Some(op) = app.apply_route(route) {
                 let outcome = op.run().await;
-                crate::app::apply_page_outcome(app, outcome);
+                apply_page_outcome_awaited(app, outcome).await;
             }
             recognized(true)
         }
@@ -3754,6 +3812,22 @@ mod tests {
         }
     }
 
+    /// `GET /registry` publishes each element's automation attributes, so a
+    /// whole-frame before/after comparison (the possibility sweep's
+    /// `actuation-changes-or-reports`) sees a state change that leaves the
+    /// text alone; an element with none publishes an empty map.
+    #[test]
+    fn snapshot_publishes_attrs() {
+        let registry = Registry::of([
+            crate::element::Element::label("toggle", "Dark").attr("state", "on"),
+            crate::element::Element::label("plain", "Text"),
+        ]);
+        let snap = registry.snapshot_json();
+        let els = snap["elements"].as_array().expect("elements");
+        assert_eq!(els[0]["attrs"], json!({"state": "on"}));
+        assert_eq!(els[1]["attrs"], json!({}));
+    }
+
     fn frame_registry(app: &App) -> Registry {
         let mut registry = Registry::default();
         crate::ui::register_listed(app, &mut registry);
@@ -3777,6 +3851,10 @@ mod tests {
         app.connection = fauna_ws_substrate::supervisor::ConnectionState::Disconnected;
         app.page = crate::pages::Page::Settings;
         app.settings.sub = crate::settings::SubPage::MailSpam;
+        // The page's entry is gated on mail being usable (`ui/mail-settings.md`
+        // § Errors & edge cases, the mail-usable gate): mail is on here.
+        app.settings
+            .set_mail_machine_for_test(crate::settings::mail_machine_in_for_test("on"));
         app
     }
 
@@ -5281,8 +5359,8 @@ mod tests {
     /// The `select` route, third of the three that were ungated.
     ///
     /// A DIFFERENT disabling mechanism on purpose: `folder-paywall-tier-select`
-    /// is disabled by an explicit `.enabled(!own_tiers.is_empty())` capability
-    /// check, not by the offline gate, so the two pins together prove the arm
+    /// is disabled by its own declared answer (the shared own-tier
+    /// `Possibility`, no tier owned), not by the offline gate, so the two pins together prove the arm
     /// consults `entry.enabled` itself rather than some connection-state proxy.
     #[test]
     fn selecting_on_a_disabled_picker_is_refused() {
@@ -5329,6 +5407,8 @@ mod tests {
     fn the_gate_leaves_enabled_controls_alone() {
         let mut app = disconnected_mail_spam_app();
         app.connection = fauna_ws_substrate::supervisor::ConnectionState::Connected;
+        // The input waits for its read (`ui/mail-settings.md`): resolve it.
+        app.settings.resolve_spam_threshold_read_for_test(None);
         let registry = frame_registry(&app);
         let mut r = req(ElementKind::Type, ids::MAIL_SPAM_THRESHOLD_OVERRIDE_INPUT);
         r.arg = "9".to_string();
@@ -6407,7 +6487,7 @@ mod tests {
                 .into_iter()
                 .find(|e| e.id == "awaiting-dns-copy-button")
                 .expect("the copy button is one of the page's required elements")
-                .enabled
+                .offered()
         };
         assert!(
             !enabled(&app),
@@ -6460,7 +6540,7 @@ mod tests {
                 .into_iter()
                 .find(|e| e.id == "awaiting-dns-fallthrough-button")
                 .expect("the exit is one of the page's required elements")
-                .enabled
+                .offered()
         };
         let records_less = test_app();
         seed_almost_ready_records_less(&records_less);

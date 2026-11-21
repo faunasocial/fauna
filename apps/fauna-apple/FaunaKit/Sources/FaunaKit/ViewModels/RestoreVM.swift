@@ -143,12 +143,24 @@ public final class RestoreVM {
 
     // MARK: - Local restore action
 
-    /// The `restore-confirm-button` enabled predicate: a snapshot is selected, its
-    /// kind's box is ticked, the typed text exactly equals its id, and no restore
-    /// is in flight. Mirrors linux `recompute_enabled` / android `confirmEnabled`.
-    public var confirmEnabled: Bool {
-        guard let id = selectedSnapshotId, !confirmText.isEmpty else { return false }
-        return confirmText == String(id) && selectedKindTicked && progress != .running
+    /// The selected snapshot's id as the shared answers take it (`nil` = there
+    /// is none to restore).
+    private var selectedIdText: String? { selectedSnapshotId.map { String($0) } }
+
+    /// `restore-kind-checkbox` and `restore-confirm-input`: they wait for a
+    /// snapshot to exist (`restore_inputs_possibility`; `ui/backups.md`
+    /// § Errors & edge cases → *What the page offers*).
+    public var inputsPossibility: Possibility {
+        restoreInputsPossibility(snapshotId: selectedIdText, kindTicked: selectedKindTicked)
+    }
+
+    /// `restore-confirm-button`: a selected snapshot whose kind is ticked, its
+    /// id re-typed, and no restore in flight (`restore_possibility`). The
+    /// button paints from it and `restore()` asks it again.
+    public var confirmPossibility: Possibility {
+        restorePossibility(
+            running: progress == .running, snapshotId: selectedIdText,
+            kindTicked: selectedKindTicked, typed: confirmText)
     }
 
     /// Whether the picked snapshot's kind box is ticked; a kind with no box is not
@@ -165,6 +177,7 @@ public final class RestoreVM {
     /// per-kind loop), then refresh history so the new row surfaces. On failure the
     /// progress falls back to idle and the error surfaces in `error-message`.
     public func restore() async {
+        if refusePress(confirmPossibility, errorMessage: &errorMessage) { return }
         guard let api, let id = selectedSnapshotId else { return }
         let confirmId = confirmText
         progress = .running

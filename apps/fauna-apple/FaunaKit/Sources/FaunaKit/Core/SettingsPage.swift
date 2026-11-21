@@ -368,8 +368,15 @@ public extension View {
     /// in-process driver, which fires `select` — the same selection the tap
     /// makes. A SwiftUI element carries one identifier, so this replaces the row's
     /// older `*-settings-link` id (Account's row keeps `account-settings-link`).
-    func settingsNavRow(_ page: SettingsPage, select: @escaping () -> Void) -> some View {
+    func settingsNavRow(
+        _ page: SettingsPage,
+        isSelected: @escaping () -> Bool,
+        select: @escaping () -> Void
+    ) -> some View {
         accessibilityIdentifier(page.navRowId)
-            .automationActivate(page.navRowId, perform: select)
+            .automationActivate(
+                page.navRowId,
+                attributes: { ["state": isSelected() ? "on" : "off"] },
+                perform: select)
     }
 }

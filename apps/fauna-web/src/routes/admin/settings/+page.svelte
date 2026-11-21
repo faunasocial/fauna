@@ -7,11 +7,24 @@
     type AdminMembershipTier,
     subscriptionsTiersList,
   } from '#lib/rpc';
-  import { onMount } from 'svelte';
+  import { readOnEntryAndReconnect } from '#lib/admin-reread';
   import MessageBanner from '#lib/components/MessageBanner.svelte';
   import { t } from '#lib/i18n/strings';
   import { byteSize } from '#lib/value-format';
-  import { defaultLapseTier, offlineAffordance, parseCap } from '#lib/wasm';
+  import {
+    adminMembershipClearPossibility,
+    adminMembershipSavePossibility,
+    adminTierCapsPossibility,
+    adminTierCreatePossibility,
+    adminTierDeletePossibility,
+    defaultLapseTier,
+    offlinePossibility,
+    parseCap,
+    writeAfterReadPossibility,
+  } from '#lib/wasm';
+  import { afterGate, askPossibility, formGate, formRefusal } from '#lib/form-gate';
+  import { reasonAttr } from '#lib/admin-read-gate';
+  import { readFailed, type ReadWord } from '#lib/read-gate';
   import { IDS } from '#lib/generated/uiIds';
 
   // admin-settings — renamed "Tiers" (admin.md § Admin IA redesign, 2026-06-04).
@@ -26,6 +39,9 @@
   // Tiers state
   let tiers = $state<AdminTier[]>([]);
   let tiersLoading = $state(true);
+  /** Where the page's `tiers.list` read stands (rule 5): a read that
+   *  answered once stays answered, so a failed re-read keeps the rows. */
+  let tiersRead = $state<ReadWord>('pending');
   let error = $state('');
 
   // Per-row editable cap drafts, keyed by tier name and seeded from the
@@ -40,7 +56,7 @@
 
   // `fauna.admin.tiers.create` is OnlineOnly (`fauna_protocol::offline_class`):
   // the shared verdict greys the add button while the nest is unreachable.
-  const offlineGate = makeOfflineGate(offlineAffordance, connectionStatus.subscribe);
+  const offlineGate = makeOfflineGate(offlinePossibility, connectionStatus.subscribe);
 
   // The add-a-tier form's drafts (admin.md § 3 → *Defining a new tier*): a name
   // plus the same five raw-i64 cap texts a row edits, empty until typed.
@@ -54,6 +70,46 @@
   function detail(e: unknown): string {
     return e instanceof Error ? e.message : String(e);
   }
+
+  /** The five cap drafts in the order the shared predicates take them (inbox,
+   *  storage, devices, blob size, feeds). */
+  function capList(d: TierDraft): string[] {
+    return [d.inbox, d.storage, d.devices, d.blobSize, d.feeds];
+  }
+
+  /** The five caps as numbers — asked only once the draft's answer is
+   *  possible, so every cap parses; `null` otherwise (never a stored
+   *  fallback). */
+  function parsedCaps(d: TierDraft): number[] | null {
+    const caps = capList(d).map((c) => parseCap(c));
+    return caps.some((c) => c == null) ? null : (caps as number[]);
+  }
+
+  /** A tier row's save: the shared `adminTierCapsPossibility` over its five
+   *  cap drafts (admin.md § Errors & edge cases → *A form's submit is live
+   *  only for a draft the nest would accept*). Painted and asked again. */
+  function tierSaveAnswer(name: string) {
+    const d = drafts[name];
+    if (!d) return null;
+    return askPossibility(() => adminTierCapsPossibility(capList(d)));
+  }
+
+  /** The add-a-tier form's read gate (admin.md § Errors & edge cases,
+   *  *Controls wait for their read*): `Possibility::for_write` over the
+   *  page's `tiers.list` read — still loading, failed to load — and the add's
+   *  own create in flight. Paints the name and cap inputs and folds before
+   *  the draft answer. */
+  const addReadAnswer = $derived(
+    askPossibility(() => writeAfterReadPossibility(tiersRead, !addingTier)),
+  );
+  const addReadGate = $derived(formGate(addReadAnswer));
+
+  /** The add-a-tier form: the read gate first (a page still loading says so
+   *  first), then the shared `adminTierCreatePossibility` (a name and five
+   *  parseable caps). */
+  const addAnswer = $derived(
+    afterGate(addReadAnswer, () => adminTierCreatePossibility(addName, capList(addCaps))),
+  );
 
   function seedDrafts() {
     const next: Record<string, TierDraft> = {};
@@ -105,10 +161,19 @@
     membershipDrafts = next;
   }
 
-  onMount(() => {
-    loadTiers();
-    loadMembership();
-  });
+  // Every entry reads the page (a `goto()` of this route does not remount
+  // it); when the nest comes back with the tier list unanswered, it reads
+  // again, so the add form painted *failed to load* recovers without a
+  // navigation. A re-read that fails after one succeeded keeps the earlier
+  // answer (`readFailed`).
+  readOnEntryAndReconnect(
+    async () => {
+      await Promise.allSettled([loadTiers(), loadMembership()]);
+    },
+    async () => {
+      if (tiersRead !== 'resolved') await Promise.allSettled([loadTiers(), loadMembership()]);
+    },
+  );
 
   async function loadTiers() {
     const id = $identity;
@@ -116,9 +181,11 @@
     tiersLoading = true;
     try {
       tiers = await adminTiersList(id.secretHex);
+      tiersRead = 'resolved';
       seedDrafts();
       seedMembershipDrafts();
     } catch (e) {
+      tiersRead = readFailed(tiersRead);
       error = t.admin.settings_page.load_tiers_error({ message: detail(e) });
     } finally {
       tiersLoading = false;
@@ -150,10 +217,23 @@
   // `saveTier` shape). The lapse-tier draft is always a definite selection
   // (seeded to the shared default), so it always rides explicit — never
   // relying on the wire's omit-means-default.
+  /** A membership row's save: the shared `adminMembershipSavePossibility` —
+   *  blocked until an admitted-at tier is picked. */
+  function membershipSaveAnswer(name: string) {
+    const d = membershipDrafts[name];
+    if (!d) return null;
+    return askPossibility(() => adminMembershipSavePossibility(d.adminTier));
+  }
+
   async function saveMembership(name: string) {
     const id = $identity;
     const d = membershipDrafts[name];
-    if (!id?.secretHex || !d || !d.adminTier) return;
+    if (!id?.secretHex || !d) return;
+    const refusal = formRefusal(membershipSaveAnswer(name));
+    if (refusal !== null) {
+      if (refusal) error = refusal;
+      return;
+    }
     savingMembership = name;
     error = '';
     try {
@@ -168,9 +248,22 @@
 
   // Drop a row's designation via `fauna.admin.membership_tiers.clear`; the
   // subscription tier itself survives, reverting to undesignated.
+  /** `admin-settings-membership-clear-button`: the shared
+   *  `adminMembershipClearPossibility` — blocked, saying nothing is set, while
+   *  the row holds no persisted designation. */
+  function membershipClearAnswer(name: string) {
+    const hasExisting = membershipTiers.some((m) => m.tier_name === name);
+    return askPossibility(() => adminMembershipClearPossibility(hasExisting));
+  }
+
   async function clearMembership(name: string) {
     const id = $identity;
     if (!id?.secretHex) return;
+    const refusal = formRefusal(membershipClearAnswer(name));
+    if (refusal !== null) {
+      if (refusal) error = refusal;
+      return;
+    }
     clearingMembership = name;
     error = '';
     try {
@@ -191,22 +284,20 @@
     const d = drafts[name];
     const tier = tiers.find((tier) => tier.name === name);
     if (!id?.secretHex || !d || !tier) return;
+    // A blank or unparseable cap is refused with the shared reason, never
+    // sent as the stored value (value-formatting.md § Tier cap validation).
+    const refusal = formRefusal(tierSaveAnswer(name));
+    if (refusal !== null) {
+      if (refusal) error = refusal;
+      return;
+    }
+    const caps = parsedCaps(d);
+    if (!caps) return;
+    const [inbox, storage, devices, blobSize, feeds] = caps;
     savingTier = name;
     error = '';
     try {
-      // Each cap parses through the shared `parse_cap` (wasm), falling back to
-      // the persisted value on a blank/unparseable edit — the no-silent-zeroing
-      // contract (value-formatting.md § Tier cap validation), unlike the prior
-      // `Number('')`→0 / `Number('abc')`→NaN.
-      await adminTiersUpdate(
-        id.secretHex,
-        name,
-        parseCap(d.inbox) ?? tier.max_inbox_bytes,
-        parseCap(d.storage) ?? tier.max_storage_bytes,
-        parseCap(d.devices) ?? tier.max_devices,
-        parseCap(d.blobSize) ?? tier.max_blob_size,
-        parseCap(d.feeds) ?? tier.max_feeds,
-      );
+      await adminTiersUpdate(id.secretHex, name, inbox, storage, devices, blobSize, feeds);
       await loadTiers();
     } catch (e) {
       error = t.admin.settings_page.save_tier_error({ message: detail(e) });
@@ -222,6 +313,8 @@
   async function deleteTier(name: string) {
     const id = $identity;
     if (!id?.secretHex) return;
+    // Ask the shared answer again: `free` is never removable.
+    if (askPossibility(() => adminTierDeletePossibility(name))?.state !== 'possible') return;
     deletingTier = name;
     error = '';
     try {
@@ -234,26 +327,23 @@
     }
   }
 
-  // Define a new tier via `fauna.admin.tiers.create`. Name-trim + every cap
-  // through the shared `parse_cap` (a blank or fractional cap is refused, a
-  // negative clamps to 0) — refused locally on the banner; a nest refusal
+  // Define a new tier via `fauna.admin.tiers.create`. The draft's validity is
+  // the shared `addAnswer` (a name, every cap through `parse_cap`) — painted
+  // on the add button and refused at the press on the banner; a nest refusal
   // (empty/duplicate name) is worded through `add_tier_error`. The form clears
   // only after the create lands, so a refused name keeps what was typed.
   async function addTier() {
+    const refusal = formRefusal(addAnswer);
+    if (refusal !== null) {
+      if (refusal) error = refusal;
+      return;
+    }
     const id = $identity;
     if (!id?.secretHex) return;
     const name = addName.trim();
-    if (!name) {
-      error = t.admin.settings_page.add_tier_error_empty_name;
-      return;
-    }
-    const caps = [addCaps.inbox, addCaps.storage, addCaps.devices, addCaps.blobSize, addCaps.feeds]
-      .map((c) => parseCap(c));
-    if (caps.some((c) => c == null)) {
-      error = t.admin.settings_page.add_tier_error_invalid_cap;
-      return;
-    }
-    const [inbox, storage, devices, blobSize, feeds] = caps as number[];
+    const caps = parsedCaps(addCaps);
+    if (!caps) return;
+    const [inbox, storage, devices, blobSize, feeds] = caps;
     addingTier = true;
     error = '';
     try {
@@ -331,14 +421,19 @@
                 class="tier-save-btn"
                 data-testid={IDS.ADMIN_SETTINGS_TIER_SAVE_BUTTON}
                 onclick={() => saveTier(tier.name)}
-                disabled={savingTier === tier.name}
+                disabled={formGate(tierSaveAnswer(tier.name)).disabled || savingTier === tier.name}
+                title={formGate(tierSaveAnswer(tier.name)).reason}
               >{savingTier === tier.name ? t.common.loading : t.common.save}</button>
-              <button
-                class="tier-save-btn"
-                data-testid={IDS.ADMIN_SETTINGS_TIER_DELETE_BUTTON}
-                onclick={() => deleteTier(tier.name)}
-                disabled={deletingTier === tier.name}
-              >{deletingTier === tier.name ? t.common.loading : t.admin.settings_page.delete_tier}</button>
+              <!-- Painted from the shared answer (admin.md § 3 → *Removing a
+                   tier*): absent on `free`, which the nest always refuses. -->
+              {#if formGate(askPossibility(() => adminTierDeletePossibility(tier.name))).shown}
+                <button
+                  class="tier-save-btn"
+                  data-testid={IDS.ADMIN_SETTINGS_TIER_DELETE_BUTTON}
+                  onclick={() => deleteTier(tier.name)}
+                  disabled={deletingTier === tier.name}
+                >{deletingTier === tier.name ? t.common.loading : t.admin.settings_page.delete_tier}</button>
+              {/if}
             {/if}
           </div>
         {/each}
@@ -355,6 +450,9 @@
       <input
         class="cap-input" type="text"
         data-testid={IDS.ADMIN_SETTINGS_TIER_ADD_NAME_INPUT}
+        disabled={addReadGate.disabled}
+        title={addReadGate.reason}
+        data-reason={reasonAttr(addReadGate)}
         bind:value={addName}
       />
     </label>
@@ -363,6 +461,9 @@
       <input
         class="cap-input" type="text" inputmode="numeric"
         data-testid={IDS.ADMIN_SETTINGS_TIER_CAP_INBOX}
+        disabled={addReadGate.disabled}
+        title={addReadGate.reason}
+        data-reason={reasonAttr(addReadGate)}
         bind:value={addCaps.inbox}
       />
     </label>
@@ -371,6 +472,9 @@
       <input
         class="cap-input" type="text" inputmode="numeric"
         data-testid={IDS.ADMIN_SETTINGS_TIER_CAP_STORAGE}
+        disabled={addReadGate.disabled}
+        title={addReadGate.reason}
+        data-reason={reasonAttr(addReadGate)}
         bind:value={addCaps.storage}
       />
     </label>
@@ -379,6 +483,9 @@
       <input
         class="cap-input" type="text" inputmode="numeric"
         data-testid={IDS.ADMIN_SETTINGS_TIER_CAP_DEVICES}
+        disabled={addReadGate.disabled}
+        title={addReadGate.reason}
+        data-reason={reasonAttr(addReadGate)}
         bind:value={addCaps.devices}
       />
     </label>
@@ -387,6 +494,9 @@
       <input
         class="cap-input" type="text" inputmode="numeric"
         data-testid={IDS.ADMIN_SETTINGS_TIER_CAP_BLOB_SIZE}
+        disabled={addReadGate.disabled}
+        title={addReadGate.reason}
+        data-reason={reasonAttr(addReadGate)}
         bind:value={addCaps.blobSize}
       />
     </label>
@@ -395,13 +505,18 @@
       <input
         class="cap-input" type="text" inputmode="numeric"
         data-testid={IDS.ADMIN_SETTINGS_TIER_CAP_FEEDS}
+        disabled={addReadGate.disabled}
+        title={addReadGate.reason}
+        data-reason={reasonAttr(addReadGate)}
         bind:value={addCaps.feeds}
       />
     </label>
     <button
       class="tier-save-btn"
       data-testid={IDS.ADMIN_SETTINGS_TIER_ADD_BUTTON}
-      use:offlineGate={{ kind: 'fauna.admin.tiers.create', disabled: addingTier }}
+      title={formGate(addAnswer).reason}
+      data-reason={reasonAttr(formGate(addAnswer))}
+      use:offlineGate={{ kind: 'fauna.admin.tiers.create', disabled: addingTier || formGate(addAnswer).disabled }}
       onclick={addTier}
     >{addingTier ? t.common.loading : t.admin.settings_page.add_tier}</button>
   </div>
@@ -419,7 +534,6 @@
     <div class="tier-grid">
       {#each ownMembershipTierNames as name (name)}
         {@const draft = membershipDrafts[name]}
-        {@const hasExisting = membershipTiers.some((m) => m.tier_name === name)}
         <div class="tier-item" data-testid={IDS.ADMIN_SETTINGS_MEMBERSHIP_ITEM}>
           {#if draft}
             <select
@@ -459,13 +573,15 @@
               class="tier-save-btn"
               data-testid={IDS.ADMIN_SETTINGS_MEMBERSHIP_SAVE_BUTTON}
               onclick={() => saveMembership(name)}
-              disabled={savingMembership === name}
+              disabled={formGate(membershipSaveAnswer(name)).disabled || savingMembership === name}
+              title={formGate(membershipSaveAnswer(name)).reason}
             >{savingMembership === name ? t.common.loading : t.admin.settings_page.membership_save}</button>
             <button
               class="tier-save-btn"
               data-testid={IDS.ADMIN_SETTINGS_MEMBERSHIP_CLEAR_BUTTON}
               onclick={() => clearMembership(name)}
-              disabled={!hasExisting || clearingMembership === name}
+              disabled={formGate(membershipClearAnswer(name)).disabled || clearingMembership === name}
+              title={formGate(membershipClearAnswer(name)).reason}
             >{clearingMembership === name ? t.common.loading : t.admin.settings_page.membership_clear}</button>
           {/if}
         </div>

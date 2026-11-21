@@ -258,6 +258,16 @@ impl RpcError {
     pub const CODE_BRIDGES_MAIL_UNAVAILABLE_HERE: &'static str =
         "fauna.bridges.mail_unavailable_here";
 
+    /// `fauna.admin.web_app_origin.set` with `central` on a nest whose build
+    /// says the central origin does not serve the app
+    /// (`web-content-hosting.md` § Same-origin security model → *While the
+    /// central origin is not live, the choice is not offered*, rule 4).
+    /// Nothing was written; it clears only with a nest build cut after the
+    /// cutover, so it stays [`RpcErrorAction::Rejected`]. Minted by the nest's
+    /// web-app origin `set` handler through `rpc_errors::typed_refusal`.
+    pub const CODE_ADMIN_WEB_APP_ORIGIN_CENTRAL_NOT_LIVE: &'static str =
+        "fauna.admin.web_app_origin.central_not_live";
+
     /// A room invitation the invitee's inbox could not take
     /// (`community-rooms.md` § Implementation status today, the invitations
     /// entry): ONE code for every failed check at the invite door's quota
@@ -350,15 +360,22 @@ impl RpcError {
     pub const CODE_SYNC_STORAGE_QUOTA_EXCEEDED: &'static str = "fauna.sync.storage_quota_exceeded";
 
     /// `fauna.backup.custody.materialize`'s empty-target refusal: the scope or
-    /// folder already holds live records the ceremony did not write. No force
-    /// arm exists; the remedy is pointing at another nest. Also what a
-    /// **repeat** of a materialize that already succeeded answers, which is
-    /// why a ceremony driver reads it as "this nest already holds this corpus"
-    /// rather than as a failure to retry. The emitter is
+    /// folder already holds live content the ceremony did not put there. No
+    /// force arm exists, and it is never whole by itself — a ceremony driver
+    /// reads it as a lived-in target, never as "already restored" (that is
+    /// [`Self::CODE_BACKUP_ALREADY_MATERIALIZED`]). The emitter is
     /// `bins/fauna-nest/src/backup_handlers.rs` (`materialize_error`), pinned
     /// equal to these constants by that module's tests; the classifier is
     /// `fauna_client_backup::reseed`.
     pub const CODE_BACKUP_TARGET_NOT_EMPTY: &'static str = "fauna.backup.target_not_empty";
+
+    /// `fauna.backup.custody.materialize`'s answer to a **repeat** of a flip
+    /// that already committed on this nest: its materialize receipt covers the
+    /// delivered copy (`backup-destinations.md` § Third destination kind → *A
+    /// lived-in segment set is completed by record in the same gesture*, rule
+    /// (2)). Nothing was written; a ceremony driver renders the set *already
+    /// restored* on this code alone.
+    pub const CODE_BACKUP_ALREADY_MATERIALIZED: &'static str = "fauna.backup.already_materialized";
 
     /// The empty-target rule's other half: the named folder is empty but
     /// carries a publication-bearing property (an audience already exists), so
@@ -630,6 +647,9 @@ impl RpcError {
             // with scanners. Explicit for the same side-by-side reason as the
             // device cap; the client machines key on the exact code.
             Self::CODE_BRIDGES_MAIL_UNAVAILABLE_HERE => RpcErrorAction::Rejected,
+            // Clears only with a nest build cut after the central origin's
+            // cutover; explicit beside its exact `localized` arm.
+            Self::CODE_ADMIN_WEB_APP_ORIGIN_CENTRAL_NOT_LIVE => RpcErrorAction::Rejected,
             // A full invitee inbox clears only when the invitee makes room or
             // their admin raises the tier, never on a retry of its own.
             // Explicit beside its exact `localized` arm.
@@ -795,6 +815,11 @@ impl RpcError {
             // Mail on a box deployed without content scanners: the sentence
             // names the remedy, a deployment with mail.
             Self::CODE_BRIDGES_MAIL_UNAVAILABLE_HERE => error::bridges::MAIL_UNAVAILABLE_HERE,
+            // A `central` web-app origin refused while the central origin is
+            // not live: the sentence says nothing changed and what to keep.
+            Self::CODE_ADMIN_WEB_APP_ORIGIN_CENTRAL_NOT_LIVE => {
+                error::admin::web_app_origin::CENTRAL_NOT_LIVE
+            }
             // A forward-all target on a hosted domain (`mail-forwarding.md`
             // § Don't do these) — the same remedy, an alias.
             "fauna.bridges.forward_target_on_local_domain" => {
@@ -1510,6 +1535,21 @@ mod tests {
             fauna_i18n::strings::error::bridges::OVER_QUOTA
         );
         assert!(err.localized().contains("storage is full"));
+        assert_eq!(err.action(), RpcErrorAction::Rejected);
+    }
+
+    /// The refused `central` web-app origin renders its own sentence and is
+    /// never retried (`web-content-hosting.md` § While the central origin is
+    /// not live, the choice is not offered, rule 4).
+    #[test]
+    fn a_central_web_app_origin_refusal_says_nothing_changed() {
+        let code = RpcError::CODE_ADMIN_WEB_APP_ORIGIN_CENTRAL_NOT_LIVE;
+        let err = RpcError::new(code, "error.admin.web_app_origin.central_not_live");
+        assert_eq!(
+            err.localized(),
+            fauna_i18n::strings::error::admin::web_app_origin::CENTRAL_NOT_LIVE
+        );
+        assert!(err.localized().contains("nothing was changed"));
         assert_eq!(err.action(), RpcErrorAction::Rejected);
     }
 

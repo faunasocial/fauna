@@ -61,6 +61,14 @@ pub(crate) async fn start_rotation(
         ));
     }
 
+    // No mailbox — no credential row of any state: nothing rests on any nest
+    // under the key (its mint put nothing there), so the rotation is
+    // custody-only and calls no nest (`mail-credentials.md` § MSEK lifecycle
+    // → *Every account holds the key*, ruling 6).
+    if !machine.mail_store().load_rows().await?.has_mailbox() {
+        return rotate_custody_only(machine, &mail).await;
+    }
+
     let new_msek: SecretArray32 = fresh_msek().into();
 
     // Step (c): persist the sentinel BEFORE any nest write. The staged
@@ -379,8 +387,9 @@ async fn drive_rotation_loop(
     // peer device whose state row carries the pre-rotation `msek` under a
     // newer stamp **revert our swap** when the walk merges it in — and the
     // displaced MSEK is NOT unioned into the priors (the join never unions a
-    // displaced key — a generation row is written only by a finalize, for the
-    // key it retires), so `new_msek` would be absent from
+    // displaced key — a generation row is written only by a mint, for the key
+    // it mints, and by a finalize, for the key it retires — never for a
+    // rotation's incoming key), so `new_msek` would be absent from
     // `msek`, `prior_mseks` and (once cleared) the sentinel, with NO
     // client-side flow to recover it from the nest wrapped blobs (only the
     // mail bridge unwraps them, session-local). The next rotation's grace list
@@ -434,8 +443,8 @@ async fn drive_rotation_loop(
         // (`owner-key-material.md` § Path B-sibling-2 → *Pre-rotation mail at
         // rest*) — with its retirement instant (the bounded-mail mint's
         // generation seal intervals and the openers' seal-time selection;
-        // idempotent across re-drives and resumes: a row already recorded for
-        // `old` keeps its first-recorded instant). Written BEFORE the swap, so
+        // the later of any recorded instant and now — the store's join keeps
+        // the later one too). Written BEFORE the swap, so
         // no crash between the two can leave the outgoing generation in
         // neither `msek` nor a generation row. THEN set MSEK := new and KEEP
         // the sentinel carrying `new_msek` so it stays recoverable until
@@ -448,7 +457,14 @@ async fn drive_rotation_loop(
                 .generations
                 .get(&MsekFingerprint::of(&old))
                 .map(|g| g.retired_at_unix);
-            let retired_at_unix = recorded.unwrap_or_else(|| machine.retirement_now_unix());
+            // The later of the recorded instant and now: the key was current
+            // until this swap, and a row its MINT wrote (born in the ring,
+            // `mail-credentials.md` § MSEK lifecycle → *Every account holds
+            // the key*, ruling 4) carries the mint's instant, never a
+            // retirement's. A row an earlier attempt of this finalize wrote
+            // is kept when it is the later (a clock that stepped back).
+            let now = machine.retirement_now_unix();
+            let retired_at_unix = recorded.map_or(now, |r| r.max(now));
             machine
                 .mail_store()
                 .retire_generation(PriorMsekRetirement {
@@ -531,6 +547,59 @@ async fn drive_rotation_loop(
 /// A row of a kind this build does not name refuses the rotation: its blobs
 /// cannot be re-wrapped here, and the sentinel stays set so a build that knows
 /// the kind can resume.
+/// **A rotation with no mailbox** (`mail-credentials.md` § MSEK lifecycle →
+/// *Every account holds the key*, ruling 6): sample the new key, write the
+/// outgoing generation's row (retired now), then swap — no snapshot, no
+/// registration, no re-wrap, and no nest call, since the key's mint put
+/// nothing on any nest. The incoming key is written to the ring too, before
+/// the swap, as a mint is (ruling 4): a concurrent device's state row that
+/// reverts the swap then leaves it a prior generation, so a calendar entry
+/// sealed under it in the window still opens. No sentinel: nothing between
+/// the two writes can strand a key the ring does not hold.
+async fn rotate_custody_only(
+    machine: &MailSettingsMachine,
+    mail: &MailConfig,
+) -> Result<(), DispatchError> {
+    let Some(old) = mail.msek.clone() else {
+        return Err(DispatchError::InvalidState(
+            "the account's mail key is not minted yet — nothing to rotate".into(),
+        ));
+    };
+    let new_msek: SecretArray32 = fresh_msek().into();
+    let now = machine.retirement_now_unix();
+    let store = machine.mail_store();
+    store
+        .retire_generation(PriorMsekRetirement {
+            msek: new_msek.clone(),
+            retired_at_unix: now,
+        })
+        .await?;
+    // The outgoing key's row: the store's join keeps the later instant, so a
+    // ring row its mint wrote moves to the retirement's.
+    store
+        .retire_generation(PriorMsekRetirement {
+            msek: old,
+            retired_at_unix: now,
+        })
+        .await?;
+    store
+        .write_state(MailStateRow {
+            msek: Some(new_msek.clone()),
+            ..MailStateRow::recreatable_of(mail)
+        })
+        .await?;
+    let rows = store.load_rows().await?;
+    machine.set_snapshot_from(&rows);
+    if rows.config().msek.as_ref() != Some(&new_msek) {
+        return Err(DispatchError::InvalidState(
+            "another device changed the mail key at the same moment — the key it chose \
+             stands, and both stay in the ring"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn wrap_credential(row: &MailCredential) -> Result<Credential, DispatchError> {
     Credential::of_row(row)
 }

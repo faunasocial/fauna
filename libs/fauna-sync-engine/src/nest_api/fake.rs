@@ -61,6 +61,9 @@ struct FakeState {
     /// The sealed parts of parked items larger than one message, by
     /// `(deposit id, index)`; they go with their item's retire.
     parts: Vec<((i64, u32), Vec<u8>)>,
+    /// What `nest_capabilities` answers — `paged-manifests` by default, the
+    /// current nest's shape.
+    capabilities: Vec<String>,
 }
 
 /// Recording, scriptable [`SyncControlApi`]. Cheap-clone via `Arc<Mutex<..>>`,
@@ -82,6 +85,9 @@ impl Default for FakeSyncControl {
                 update_ok: true,
                 inbox: Vec::new(),
                 parts: Vec::new(),
+                capabilities: vec![
+                    fauna_protocol::discovery::capability::PAGED_MANIFESTS.to_string(),
+                ],
             })),
         }
     }
@@ -110,6 +116,12 @@ impl FakeSyncControl {
         let fake = Self::default();
         fake.inner.lock().unwrap().fail_reports_remaining = n;
         fake
+    }
+
+    /// Set the capability tokens `nest_capabilities` answers — an empty
+    /// list stands in for a nest too old for paged manifests.
+    pub fn set_capabilities(&self, capabilities: Vec<String>) {
+        self.inner.lock().unwrap().capabilities = capabilities;
     }
 
     /// Every call the engine made, in order.
@@ -309,5 +321,13 @@ impl SyncControlApi for FakeSyncControl {
             .find(|((d, i), _)| parked && *d == req.deposit_id && *i == req.index)
             .map(|(_, sealed)| sealed.clone())
             .ok_or_else(|| SyncControlError("no such deposit part".into()))
+    }
+
+    async fn nest_capabilities(&self) -> Result<Vec<String>, SyncControlError> {
+        let st = self.inner.lock().unwrap();
+        if let Some(msg) = &st.fail_with {
+            return Err(SyncControlError(msg.clone()));
+        }
+        Ok(st.capabilities.clone())
     }
 }

@@ -1,6 +1,15 @@
 package com.fauna.app.ui.screen.settings
 
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.hasText
+import com.fauna.app.ui.FailingClipboard
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
@@ -47,16 +56,26 @@ class SettingsLogsContentTest {
         filterIndex: Int = 0,
         onFilterChange: (Int) -> Unit = {},
         onClear: () -> Unit = {},
+        onError: (String) -> Unit = {},
+        failingClipboard: Boolean = false,
     ) {
         composeTestRule.setContent {
-            SettingsLogsContent(
-                rows = rows,
-                copyText = copyText,
-                filterIndex = filterIndex,
-                onFilterChange = onFilterChange,
-                onClear = onClear,
-                onBack = {},
-            )
+            val page = @androidx.compose.runtime.Composable {
+                SettingsLogsContent(
+                    rows = rows,
+                    copyText = copyText,
+                    filterIndex = filterIndex,
+                    onFilterChange = onFilterChange,
+                    onClear = onClear,
+                    onBack = {},
+                    onError = onError,
+                )
+            }
+            if (failingClipboard) {
+                CompositionLocalProvider(LocalClipboardManager provides FailingClipboard("no clipboard here")) { page() }
+            } else {
+                page()
+            }
         }
     }
 
@@ -99,5 +118,49 @@ class SettingsLogsContentTest {
         // newest-first) log block; clear stays a callback (it mutates the ring).
         assertEquals(copyPayload, currentClipboardText())
         assertEquals(true, cleared)
+    }
+
+    @Test
+    fun emptyRingDisablesCopyAndClearBehindThePagesEmptyLine() {
+        // `ring_action_possibility(0, "logs.empty")` is blocked: both buttons
+        // disabled, the reason being the empty line already on the page (painted
+        // once — no second copy beside the buttons).
+        var cleared = false
+        render(rows = emptyList(), copyText = "", onClear = { cleared = true })
+        composeTestRule.onNodeWithTag("log-copy-button").assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("log-clear-button").assertIsNotEnabled()
+        assertEquals(
+            1,
+            composeTestRule.onAllNodes(hasText("No log entries yet.")).fetchSemanticsNodes().size,
+        )
+        assertEquals(false, cleared)
+    }
+
+    @Test
+    fun shownEntriesEnableCopyAndClear() {
+        render()
+        composeTestRule.onNodeWithTag("log-copy-button").assertIsEnabled()
+        composeTestRule.onNodeWithTag("log-clear-button").assertIsEnabled()
+    }
+
+    @Test
+    fun aCopyThatReachedTheClipboardIsConfirmed() {
+        render()
+        composeTestRule.onNodeWithTag("log-copy-button").performClick()
+        // "Copied!" (`common.copied`) on the button, the copied block as its
+        // `copied` attr — the `account-actor-id-copy-btn` contract.
+        composeTestRule.onNodeWithTag("log-copy-button").assert(hasText("Copied!"))
+        composeTestRule.onNodeWithTag("log-copy-button")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, copyPayload))
+    }
+
+    @Test
+    fun aFailedCopySaysSoOnTheErrorMessage() {
+        var error: String? = null
+        render(onError = { error = it }, failingClipboard = true)
+        composeTestRule.onNodeWithTag("log-copy-button").performClick()
+        assertEquals("Could not copy to the clipboard: no clipboard here", error)
+        // Not confirmed.
+        assertEquals(0, composeTestRule.onAllNodes(hasText("Copied!")).fetchSemanticsNodes().size)
     }
 }

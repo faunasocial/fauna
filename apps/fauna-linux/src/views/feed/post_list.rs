@@ -407,7 +407,7 @@ pub fn build_post_list_wired(
         compose_refreshing,
         compose_file_ready,
         compose_file_remove,
-    ) = build_compose_post_wired(manager, client);
+    ) = build_compose_post_wired(manager, client, &error_message_label);
     list_page.append(&compose_box);
 
     // Feed search bar — a *re-query* of the selected feed (never a client-side
@@ -451,6 +451,17 @@ pub fn build_post_list_wired(
             entry.set_text("");
             let m = Arc::clone(&m);
             rt.spawn(async move { m.clear_search().await });
+        });
+    }
+    // Offered only while there is a search to clear — the shared snapshot's
+    // `search_query` is `Some` exactly while the entry's trimmed text is
+    // non-empty (the handler above), the same rule tui, macOS and web paint
+    // (`docs/goal/ui/README.md` § Offer only what is possible).
+    clear_btn.set_visible(false);
+    {
+        let btn = clear_btn.clone();
+        search_entry.connect_changed(move |entry| {
+            btn.set_visible(!entry.text().trim().is_empty());
         });
     }
     search_bar.append(&clear_btn);
@@ -1435,6 +1446,7 @@ fn detail_embed_sig(post: &PostSummary) -> (bool, bool, bool, bool, bool) {
 fn build_compose_post_wired(
     manager: &Arc<LinuxFeedManager>,
     client: &Rc<FaunaClient>,
+    page_error: &gtk::Label,
 ) -> ComposePostWidgets {
     // Set by `render_posts` while it pushes the snapshot into these widgets,
     // so no live-sync handler below forwards that push back into the manager.
@@ -1680,19 +1692,30 @@ fn build_compose_post_wired(
     post_btn.set_margin_start(8);
     crate::testid::set_test_id(&post_btn, ids::POST_SUBMIT_BUTTON);
     crate::offline_gate::declare_wire_kind(&post_btn, "fauna.posts.create");
+    // Painted from the shared predicate as the person types — the buffer's
+    // `changed` fires for a restored draft `render_posts` pushes too
+    // (`ui/feed.md` § Errors & edge cases, form validity).
+    wire_submit_paint(
+        &post_btn,
+        &text_view,
+        fauna_feed::forms::post_submit_possibility,
+    );
 
     {
         let m = Arc::clone(manager);
         let c = Rc::clone(client);
         let tv = text_view.clone();
         let te = tags_entry.clone();
+        let page_error = page_error.clone();
         post_btn.connect_clicked(move |_| {
-            let buffer = tv.buffer();
-            let start = buffer.start_iter();
-            let end = buffer.end_iter();
-            let text = buffer.text(&start, &end, false).to_string();
+            let text = crate::form_gate::text_of(&tv);
             let tags = te.text().to_string();
-            if text.trim().is_empty() {
+            // The submit asks the predicate it is painted from and refuses
+            // with the same reason on `error-message`.
+            if crate::form_gate::refuse(
+                &fauna_feed::forms::post_submit_possibility(&text),
+                &page_error,
+            ) {
                 return;
             }
             // The audience is the manager's, never re-read off the select:
@@ -1715,7 +1738,7 @@ fn build_compose_post_wired(
             // verdict — only when the composer is otherwise untouched
             // (`ui/feed.md` § User actions, `post-submit-button`) — and the
             // paint shows it.
-            c.submit_post(Arc::clone(&m), text, tags);
+            c.submit_post(Arc::clone(&m), text, tags, |_sent| {});
         });
     }
 
@@ -2500,6 +2523,7 @@ fn show_tip_list_dialog(parent: Option<&gtk::Window>, post_tips: &TipView) {
         .modal(true)
         .default_width(360)
         .build();
+    crate::modal_escape::close_on_escape(&window);
     if let Some(p) = parent {
         window.set_transient_for(Some(p));
         if let Some(app) = p.application() {
@@ -4542,6 +4566,22 @@ pub(crate) fn format_timestamp(millis: i64) -> String {
     crate::client::format_epoch_us(millis.saturating_mul(1000))
 }
 
+/// Paint `submit` from `predicate` over `view`'s text now and on every edit
+/// (`crate::form_gate`; `ui/feed.md` § Errors & edge cases, form validity).
+fn wire_submit_paint(
+    submit: &gtk::Button,
+    view: &gtk::TextView,
+    predicate: fn(&str) -> fauna_core::possibility::Possibility,
+) {
+    crate::form_gate::paint_submit(submit, &predicate(&crate::form_gate::text_of(view)), None);
+    let btn = submit.clone();
+    view.buffer().connect_changed(move |buf| {
+        let (start, end) = buf.bounds();
+        let text = buf.text(&start, &end, false).to_string();
+        crate::form_gate::paint_submit(&btn, &predicate(&text), None);
+    });
+}
+
 /// Build a reply compose dialog (the send goes through `interact_with_post`
 /// → the shared `FeedManager::interact`).
 pub fn build_reply_dialog(
@@ -4554,6 +4594,7 @@ pub fn build_reply_dialog(
         .modal(true)
         .default_width(400)
         .build();
+    crate::modal_escape::close_on_escape(&dialog);
     // The first automation ids for this surface (`ui.yaml`'s
     // `feed-reply-dialog` note: "linux's build_reply_dialog … registers no
     // automation ids of its own — these IDs are the first for this surface").
@@ -4593,6 +4634,15 @@ pub fn build_reply_dialog(
     // real mutating control.
     crate::testid::set_test_id(&reply_btn, ids::FEED_REPLY_SUBMIT_BUTTON);
     crate::offline_gate::declare_wire_kind(&reply_btn, "fauna.posts.interact");
+    // Painted from the shared predicate as the person types.
+    wire_submit_paint(
+        &reply_btn,
+        &text_view,
+        fauna_feed::forms::reply_submit_possibility,
+    );
+    // The dialog covers the page, so its refusal and a failed save are
+    // painted on its own `error-message`.
+    let error_label = crate::form_gate::dialog_error_label();
 
     // Under a restricted target the dialog STATES where the reply goes —
     // `feed-reply-audience`, the manager's own per-post answer, never decided
@@ -4628,6 +4678,7 @@ pub fn build_reply_dialog(
     if audience == Some(ReplyAudience::PublicByConfirmation) {
         vbox.append(&public_confirm);
     }
+    vbox.append(&error_label);
     vbox.append(&reply_btn);
     dialog.set_content(Some(&vbox));
 
@@ -4638,17 +4689,35 @@ pub fn build_reply_dialog(
         let d = dialog.clone();
         let tv = text_view.clone();
         let confirm = public_confirm.clone();
-        reply_btn.connect_clicked(move |_| {
-            let buffer = tv.buffer();
-            let start = buffer.start_iter();
-            let end = buffer.end_iter();
-            let text = buffer.text(&start, &end, false).to_string();
-            if !text.trim().is_empty() {
-                // `confirm` is only ever visible (hence only ever checkable)
-                // under *public by confirmation*.
-                c.reply_to_post(&m, &pid, &text, confirm.is_active());
-                d.close();
+        let error_label = error_label.clone();
+        reply_btn.connect_clicked(move |btn| {
+            let text = crate::form_gate::text_of(&tv);
+            if crate::form_gate::refuse(
+                &fauna_feed::forms::reply_submit_possibility(&text),
+                &error_label,
+            ) {
+                return;
             }
+            crate::form_gate::show_error(&error_label, None);
+            // The dialog stays open while the reply saves and closes only on
+            // success; a failure keeps the typed text and shows the error
+            // (`ui/feed.md` § Errors & edge cases). The submit is held
+            // insensitive meanwhile so a second click cannot send it twice.
+            btn.set_sensitive(false);
+            let d = d.clone();
+            let error_label = error_label.clone();
+            let btn = btn.clone();
+            let tv = tv.clone();
+            // `confirm` is only ever visible (hence only ever checkable)
+            // under *public by confirmation*.
+            c.reply_to_post(&m, &pid, &text, confirm.is_active(), move |result| {
+                crate::form_gate::paint_submit(
+                    &btn,
+                    &fauna_feed::forms::reply_submit_possibility(&crate::form_gate::text_of(&tv)),
+                    None,
+                );
+                crate::form_gate::finish_save(&d, &error_label, result);
+            });
         });
     }
 
@@ -4667,6 +4736,7 @@ fn build_feed_compose_dialog(
         .default_width(480)
         .default_height(320)
         .build();
+    crate::modal_escape::close_on_escape(&dialog);
     crate::testid::set_test_id(&dialog, ids::FEED_COMPOSE_DIALOG);
 
     let header = adw::HeaderBar::new();
@@ -4791,6 +4861,21 @@ fn build_feed_compose_dialog(
     post_btn.set_margin_start(8);
     crate::testid::set_test_id(&post_btn, ids::POST_SUBMIT_BUTTON);
     crate::offline_gate::declare_wire_kind(&post_btn, "fauna.posts.create");
+    wire_submit_paint(
+        &post_btn,
+        &text_view,
+        fauna_feed::forms::post_submit_possibility,
+    );
+
+    // The dialog covers the page, so its refusal and a failed save are
+    // painted on its own `error-message`.
+    let page_error_label = crate::form_gate::dialog_error_label();
+
+    let error_label = gtk::Label::new(None);
+    error_label.set_visible(false);
+    error_label.set_wrap(true);
+    error_label.add_css_class("error");
+    crate::testid::set_test_id(&error_label, ids::COMPOSE_ERROR);
 
     {
         let m = Arc::clone(manager);
@@ -4800,29 +4885,57 @@ fn build_feed_compose_dialog(
         let d = dialog.clone();
         let ready = file_ready_marker.clone();
         let remove = file_remove_btn.clone();
-        post_btn.connect_clicked(move |_| {
-            let buffer = tv.buffer();
-            let start = buffer.start_iter();
-            let end = buffer.end_iter();
-            let text = buffer.text(&start, &end, false).to_string();
+        let page_error = page_error_label.clone();
+        let compose_error = error_label.clone();
+        post_btn.connect_clicked(move |btn| {
+            let text = crate::form_gate::text_of(&tv);
             let tags = te.text().to_string();
-            if text.trim().is_empty() {
+            if crate::form_gate::refuse(
+                &fauna_feed::forms::post_submit_possibility(&text),
+                &page_error,
+            ) {
                 return;
             }
+            crate::form_gate::show_error(&page_error, None);
             // The dialog carries no audience controls of its own; it posts
             // the audience the inline composer staged — the manager's, which
-            // `submit_post` reads itself.
-            c.submit_post(Arc::clone(&m), text, tags);
-            apply_compose_file_chip(&ready, &remove, None);
-            d.close();
+            // `submit_post` reads itself. It stays open while the post saves
+            // and closes only on success: a failure keeps the typed text and
+            // the staged attachment (the manager still holds its handle) and
+            // shows the manager's own `compose-error` on `error-message`
+            // (`ui/feed.md` § Errors & edge cases).
+            btn.set_sensitive(false);
+            let m2 = Arc::clone(&m);
+            let d = d.clone();
+            let ready = ready.clone();
+            let remove = remove.clone();
+            let page_error = page_error.clone();
+            let compose_error = compose_error.clone();
+            let btn = btn.clone();
+            let tv = tv.clone();
+            c.submit_post(Arc::clone(&m), text, tags, move |sent| {
+                crate::form_gate::paint_submit(
+                    &btn,
+                    &fauna_feed::forms::post_submit_possibility(&crate::form_gate::text_of(&tv)),
+                    None,
+                );
+                let compose = m2.snapshot().compose;
+                if sent {
+                    apply_compose_file_chip(&ready, &remove, None);
+                    crate::form_gate::show_error(&compose_error, None);
+                    crate::form_gate::finish_save(&d, &page_error, Ok(()));
+                } else {
+                    apply_compose_file_chip(&ready, &remove, compose.attached_file.as_ref());
+                    let text = compose
+                        .error
+                        .map(|e| e.resolve(crate::i18n::strings::lookup))
+                        .unwrap_or_else(|| crate::i18n::strings::common::ERROR.to_string());
+                    crate::form_gate::show_error(&compose_error, Some(&text));
+                    crate::form_gate::finish_save(&d, &page_error, Err(text));
+                }
+            });
         });
     }
-
-    let error_label = gtk::Label::new(None);
-    error_label.set_visible(false);
-    error_label.set_wrap(true);
-    error_label.add_css_class("error");
-    crate::testid::set_test_id(&error_label, ids::COMPOSE_ERROR);
 
     let action_bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     action_bar.set_margin_top(4);
@@ -4841,6 +4954,7 @@ fn build_feed_compose_dialog(
     vbox.append(&scroll);
     vbox.append(&action_bar);
     vbox.append(&error_label);
+    vbox.append(&page_error_label);
     dialog.set_content(Some(&vbox));
 
     dialog
@@ -5223,7 +5337,7 @@ mod tests {
             manager.update_compose_gate(Some("Gold".into()), "a teaser".into());
             let (client, _rx) = offline_client();
             let (compose_box, _, audience, text_view, _, refreshing, _, _) =
-                build_compose_post_wired(&manager, &client);
+                build_compose_post_wired(&manager, &client, &gtk::Label::new(None));
 
             // `render_posts`'s paint, with `own_tiers` still empty.
             refreshing.set(true);
@@ -5771,6 +5885,162 @@ mod tests {
                 ],
                 "an unlisted token stays an unknown source"
             );
+        });
+    }
+
+    // ── Form validity (`ui/feed.md` § Errors & edge cases; `ui/README.md`
+    // § Offer only what is possible, rules 4 and 7) ─────────────────────
+
+    /// Pump `ctx` until `done` holds, bounded by a count (never asserted on
+    /// time); a quiet context yields briefly so the client's runtime can run.
+    fn pump_settled(ctx: &glib::MainContext, done: impl Fn() -> bool) -> bool {
+        for _ in 0..12_000 {
+            if done() {
+                return true;
+            }
+            if !ctx.iteration(false) {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        done()
+    }
+
+    fn reason_of(key: &str) -> String {
+        fauna_core::localized::LocalizedText::key(key).resolve(crate::i18n::strings::lookup)
+    }
+
+    fn found<T: IsA<gtk::Widget>>(root: &impl IsA<gtk::Widget>, id: &str) -> T {
+        crate::testid::find_by_test_id(root, id)
+            .unwrap_or_else(|| panic!("{id} not built"))
+            .downcast::<T>()
+            .unwrap_or_else(|_| panic!("{id} has another widget type"))
+    }
+
+    /// Counts close requests without letting the window go.
+    fn count_closes(window: &impl IsA<gtk::Window>) -> Rc<Cell<u32>> {
+        let closes = Rc::new(Cell::new(0));
+        let c = Rc::clone(&closes);
+        window.connect_close_request(move |_| {
+            c.set(c.get() + 1);
+            glib::Propagation::Stop
+        });
+        closes
+    }
+
+    /// Reply dialog: blank → submit disabled with `feed.reply_empty`; a
+    /// submit anyway refuses with that reason on the dialog's
+    /// `error-message`; a FAILED save keeps the dialog open with the typed
+    /// text and the error shown.
+    #[test]
+    fn form_gate_reply_dialog_paints_refuses_and_stays_open_on_failure() {
+        on_private_context(|ctx| {
+            crate::offline_gate::reset_for_test("connected");
+            let manager = offline_manager();
+            let (client, _rx) = offline_client();
+            let dialog = build_reply_dialog(&client, &manager, "aa");
+            dialog.present();
+            let closes = count_closes(&dialog);
+            let submit: gtk::Button = found(&dialog, ids::FEED_REPLY_SUBMIT_BUTTON);
+            let text: gtk::TextView = found(&dialog, ids::FEED_REPLY_TEXT_FIELD);
+            let error: gtk::Label = found(&dialog, ids::ERROR_MESSAGE);
+            let reason = reason_of("feed.reply_empty");
+
+            assert!(!submit.is_sensitive(), "a blank reply is not offered");
+            assert_eq!(submit.tooltip_text().as_deref(), Some(reason.as_str()));
+            submit.emit_clicked();
+            assert!(error.is_visible());
+            assert_eq!(error.text().as_str(), reason);
+
+            text.buffer().set_text("yes");
+            assert!(submit.is_sensitive());
+            submit.emit_clicked();
+            assert!(
+                pump_settled(ctx, || error.is_visible() && submit.is_sensitive()),
+                "the failed save reports back"
+            );
+            assert_eq!(closes.get(), 0, "a failed reply keeps the dialog open");
+            dialog.destroy();
+            assert_eq!(crate::form_gate::text_of(&text), "yes");
+            assert!(!error.text().is_empty());
+            crate::offline_gate::reset_for_test("disconnected");
+        });
+    }
+
+    /// Compose dialog: the same three rules over `feed.compose_empty`.
+    #[test]
+    fn form_gate_compose_dialog_paints_refuses_and_stays_open_on_failure() {
+        on_private_context(|ctx| {
+            crate::offline_gate::reset_for_test("connected");
+            let manager = offline_manager();
+            let (client, _rx) = offline_client();
+            let dialog = build_feed_compose_dialog(&manager, &client);
+            dialog.present();
+            let closes = count_closes(&dialog);
+            let submit: gtk::Button = found(&dialog, ids::POST_SUBMIT_BUTTON);
+            let text: gtk::TextView = found(&dialog, ids::COMPOSE_TEXT_FIELD);
+            let error: gtk::Label = found(&dialog, ids::ERROR_MESSAGE);
+            let reason = reason_of("feed.compose_empty");
+
+            assert!(!submit.is_sensitive());
+            assert_eq!(submit.tooltip_text().as_deref(), Some(reason.as_str()));
+            submit.emit_clicked();
+            assert_eq!(error.text().as_str(), reason);
+
+            // A save that FAILS without a nest: a tier-gated draft whose tier
+            // is not loaded fails closed (`feed.compose_gate_no_key`) — the
+            // fixture `a_restored_tier_draft_…_never_posts_public` uses.
+            manager.update_compose_gate(Some("Gold".into()), "a teaser".into());
+            text.buffer().set_text("hello");
+            assert!(submit.is_sensitive());
+            submit.emit_clicked();
+            // The manager's own stamped refusal, resolved, is what the dialog
+            // shows (it names the tier, so it is read off the snapshot).
+            let failure = || {
+                manager
+                    .snapshot()
+                    .compose
+                    .error
+                    .filter(|e| e.key == "feed.compose_gate_no_key")
+                    .map(|e| e.resolve(crate::i18n::strings::lookup))
+            };
+            assert!(
+                pump_settled(ctx, || failure()
+                    .is_some_and(|f| error.text().as_str() == f)
+                    && submit.is_sensitive()),
+                "the failed post reports back on error-message: shown {:?}, compose error {:?}",
+                error.text(),
+                manager.snapshot().compose.error.map(|e| e.key),
+            );
+            assert!(error.is_visible());
+            assert_eq!(closes.get(), 0, "a failed post keeps the dialog open");
+            dialog.destroy();
+            assert_eq!(crate::form_gate::text_of(&text), "hello");
+            crate::offline_gate::reset_for_test("disconnected");
+        });
+    }
+
+    /// The inline composer: blank → disabled with the reason, and a submit
+    /// anyway refuses on the page's `error-message`.
+    #[test]
+    fn form_gate_inline_composer_paints_and_refuses_on_error_message() {
+        on_private_context(|_ctx| {
+            crate::offline_gate::reset_for_test("connected");
+            let manager = offline_manager();
+            let (client, _rx) = offline_client();
+            let page_error = gtk::Label::new(None);
+            let (compose_box, _, _, text_view, _, _, _, _) =
+                build_compose_post_wired(&manager, &client, &page_error);
+            let submit: gtk::Button = found(&compose_box, ids::POST_SUBMIT_BUTTON);
+            let reason = reason_of("feed.compose_empty");
+            assert!(!submit.is_sensitive());
+            assert_eq!(submit.tooltip_text().as_deref(), Some(reason.as_str()));
+            submit.emit_clicked();
+            assert!(page_error.is_visible());
+            assert_eq!(page_error.text().as_str(), reason);
+            text_view.buffer().set_text("x");
+            assert!(submit.is_sensitive());
+            assert_eq!(submit.tooltip_text(), None);
+            crate::offline_gate::reset_for_test("disconnected");
         });
     }
 }

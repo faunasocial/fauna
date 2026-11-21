@@ -18,6 +18,12 @@ struct OnboardingContainerView: View {
                 MacIdentityImportView(vm: vm)
             case .handleEntry:
                 MacHandleEntryView(vm: vm)
+            // The choose-providers page (onboarding-provisioning.md § 3d) — shared
+            // FaunaKit view; `setRendersProviderChoice(true)` declared at
+            // `OnboardingVM.init`, so the handle check lands here in place of
+            // dnsConfig → vpsConfig (which stay for the cloud-recovery path).
+            case .providerChoice:
+                ProviderChoiceView(vm: vm)
             case .dnsConfig:
                 MacDnsConfigView(vm: vm)
             case .vpsConfig:
@@ -70,9 +76,12 @@ struct OnboardingContainerView: View {
     private var doneRouter: some View {
         switch doneExit {
         case .feed:
-            // Already handed off — onboarding window closes after the
-            // app router swaps to the authenticated UI.
-            Color.clear
+            // Handed off: the launch runs and the router swaps this surface to
+            // the app in place. Until it does, the launch progress view — never
+            // a bare `Color.clear`, which painted nothing on the one window
+            // (`onboarding.md` § Wizard exit handling → *The wizard becomes the
+            // app in place*).
+            LaunchProgressView()
         // ⚠ There is deliberately no `.inviteSubmitted` arm (retired 2026-08-12).
         // It rendered a dead-end placeholder under an UNDECLARED test id
         // (`invite-submitted-placeholder` — a rule-A deviation), and that whole
@@ -90,7 +99,9 @@ struct OnboardingContainerView: View {
                 doneExit = .unknown
             }
         case .unknown:
-            Color.clear.onAppear {
+            // The launch progress view from the wizard's first `.done` frame:
+            // the handoff and the launch that follow it take this frame's place.
+            LaunchProgressView().onAppear {
                 // First entry to the .done step — run the handoff once.
                 doneExit = vm.completeOnboarding(
                     sessionState: appState.session, append: appState.isAddingAccount)

@@ -1,8 +1,12 @@
 import Foundation
+#if os(macOS)
+import AppKit
+#endif
 
 /// The loud surfaces' e2e seams on macOS + iOS — `fauna_e2e_agent::
 /// {ALERT_SWEEP_WAKE, RECONNECT_BACKOFF, CONNECTION_REPORTS_KEY,
-/// PAINTED_ERRORS_KEY, PAINTED_TEXT_AREA_KEY, KNOCK_NOTICES_KEY}`, which own the cross-app contracts. Every one is a thin
+/// PAINTED_ERRORS_KEY, PAINTED_TEXT_AREA_KEY, KNOCK_NOTICES_KEY, ROOT_SURFACE_KEY,
+/// TOPLEVEL_WINDOWS_KEY}`, which own the cross-app contracts. Every one is a thin
 /// call into `fauna-ffi`'s `test-helpers` exports (`e2e_seams.rs`,
 /// `critical_alerts.rs`), so apple counts, parses and wakes with the same Rust
 /// as tui, linux, web and windows (windows' `E2eLoudSurfaces.cs` is the sibling
@@ -23,8 +27,22 @@ public enum E2eLoudSurfaces {
     private static let paintedErrors = FfiPaintedErrorTallyForTest()
     private static let paintedTextArea = FfiPaintedTextAreaForTest()
     private static let knockNotices = FfiKnockNoticesForTest()
+    private static let rootSurface = FfiRootSurfaceJournalForTest()
     private static var paintedFrameQueued = false
     private static var lastShown = ""
+    private static var lastRoot: String?? = .none
+
+    /// The name of the launch surface the app's root shows now — one of the
+    /// `fauna_e2e_contract::ROOT_SURFACE_*` names (`wizard`, `launch_progress`,
+    /// `app`) or another launch surface's ui.yaml page name — read once per
+    /// painted frame for `fauna_e2e_agent::ROOT_SURFACE_KEY`'s journal
+    /// (`onboarding.md` § Wizard exit handling → *The wizard becomes the app in
+    /// place*). Each target installs its own reading of its root's branch
+    /// (`ContentView.rootSurfaceName`) through `TestAgentBootstrap.
+    /// bindInProcessAgent`; until it does, `root_surface` is not published, so
+    /// a consumer refuses loudly (convention 11) rather than read a journal
+    /// of nothing.
+    public static var rootSurfaceName: (@MainActor () -> String)?
 
     /// Count one connection-state value the indicator received — EVERY value,
     /// repeats included: a repeat is a report and never a transition, which is
@@ -59,6 +77,9 @@ public enum E2eLoudSurfaces {
     public static func installPaintedErrorObserver() {
         AutomationRegistry.shared.onChange = { schedulePaintedFrame() }
         observePaintedFrame()
+        #if os(macOS)
+        WindowJournal.install()
+        #endif
     }
 
     private static func schedulePaintedFrame() {
@@ -92,6 +113,27 @@ public enum E2eLoudSurfaces {
             lastShown = shown
             logMessage(level: .info, target: "fauna.e2e", message: "[painted-errors] \(shown)")
         }
+        observeRootSurface()
+        #if os(macOS)
+        WindowJournal.record()
+        #endif
+    }
+
+    /// `fauna_e2e_agent::ROOT_SURFACE_KEY` — what this frame showed at the
+    /// root: the target's reading of its root branch, or `nil` when no
+    /// element was visible at all — nothing a person could read, which
+    /// `onboarding.md` § Wizard exit handling forbids from the wizard's exit
+    /// to the app (a bare `Color.clear` registers nothing). One log line per
+    /// change.
+    private static func observeRootSurface() {
+        guard let rootSurfaceName else { return }
+        let showing: String? = AutomationRegistry.shared.paintsAnything() ? rootSurfaceName() : nil
+        rootSurface.observe(showing: showing)
+        if lastRoot != .some(showing) {
+            lastRoot = .some(showing)
+            logMessage(level: .info, target: "fauna.e2e",
+                       message: "[root-surface] \(showing ?? "nothing")")
+        }
     }
 
     /// The `connection_reports`, `painted_errors`, `painted_text_area` and `knock_notices` state
@@ -104,10 +146,18 @@ public enum E2eLoudSurfaces {
     public static var stateFragment: [String: Any] {
         observePaintedFrame()
         var fragment: [String: Any] = [:]
-        for (key, json) in [("connection_reports", connectionReports.json()),
-                            ("painted_errors", paintedErrors.json()),
-                            ("painted_text_area", paintedTextArea.json()),
-                            ("knock_notices", knockNotices.json())] {
+        var published = [("connection_reports", connectionReports.json()),
+                         ("painted_errors", paintedErrors.json()),
+                         ("painted_text_area", paintedTextArea.json()),
+                         ("knock_notices", knockNotices.json())]
+        // Only once the target has installed its root reading (convention 11).
+        if rootSurfaceName != nil {
+            published.append(("root_surface", rootSurface.json()))
+        }
+        #if os(macOS)
+        published.append(("toplevel_windows", WindowJournal.json()))
+        #endif
+        for (key, json) in published {
             if let data = json.data(using: .utf8),
                let value = try? JSONSerialization.jsonObject(with: data) {
                 fragment[key] = value
@@ -158,6 +208,68 @@ public enum E2eLoudSurfaces {
             return "\(action): not a loud-surface seam"
         }
     }
+
+    #if os(macOS)
+    /// `fauna_e2e_agent::TOPLEVEL_WINDOWS_KEY` on macOS — the app's visible
+    /// windows, so the in-place witness can tell the window that showed the
+    /// wizard from one opened after it (a close and a reopen lands the same
+    /// elements in a new window, which no element read can see). Each
+    /// `NSWindow` gets a serial for its whole life; recorded on every
+    /// application update (once per processed event), on a window's close,
+    /// and on every painted frame — the shared journal keeps changes only.
+    /// A window counts when it is visible, can be a main window and is no
+    /// sheet (a sheet rides its parent window); its name is its scene
+    /// identifier, else its class.
+    @MainActor
+    private enum WindowJournal {
+        private final class Tagged {
+            weak var window: NSWindow?
+            let id: UInt64
+            init(_ window: NSWindow, _ id: UInt64) { self.window = window; self.id = id }
+        }
+
+        private static let journal = FfiToplevelWindowJournalForTest()
+        private static var tagged: [Tagged] = []
+        private static var nextId: UInt64 = 0
+        private static var installed = false
+
+        static func install() {
+            guard !installed else { return }
+            installed = true
+            let center = NotificationCenter.default
+            center.addObserver(forName: NSApplication.didUpdateNotification, object: nil, queue: .main) { _ in
+                MainActor.assumeIsolated { record() }
+            }
+            center.addObserver(forName: NSWindow.willCloseNotification, object: nil, queue: .main) { _ in
+                // The closing window is still visible here: record once it is gone.
+                Task { @MainActor in record() }
+            }
+            record()
+        }
+
+        private static func serial(of window: NSWindow) -> UInt64 {
+            tagged.removeAll { $0.window == nil }
+            if let known = tagged.first(where: { $0.window === window }) { return known.id }
+            nextId += 1
+            tagged.append(Tagged(window, nextId))
+            return nextId
+        }
+
+        static func record() {
+            let visible = NSApplication.shared.windows
+                .filter { $0.isVisible && $0.canBecomeMain && !$0.isSheet }
+                .map { FfiToplevelWindow(
+                    id: serial(of: $0),
+                    name: $0.identifier?.rawValue ?? String(describing: type(of: $0))) }
+            journal.observe(visible: visible)
+        }
+
+        static func json() -> String {
+            record()
+            return journal.json()
+        }
+    }
+    #endif
 
     #else
 

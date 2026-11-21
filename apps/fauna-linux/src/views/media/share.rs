@@ -60,26 +60,31 @@ pub fn open_create(
     machine.open_share_create(folder, path);
 }
 
-/// The `share-link-button` for a detail surface, or `None` when the file is not
-/// eligible — the control is ABSENT then, never painted-but-inert
-/// (`share-links.md` § Which files can be linked; the verdict is the machine's
-/// `MediaItemSummary::share_link_eligible`, which is already `false` for a
-/// followed browse scope's items).
+/// The `share-link-button` for a detail surface, painted from `answer` — the
+/// shared `share_link_possibility` over the machine's
+/// `MediaItemSummary::share_link_eligible` verdict (already `false` for a
+/// followed browse scope's items). `None` when the answer is *absent*: the
+/// control is not built then, never painted-but-inert (`share-links.md`
+/// § Which files can be linked).
 pub fn detail_button(
-    eligible: bool,
+    answer: fauna_core::possibility::Possibility,
     machine: &Arc<MediaMachine>,
     folder: &str,
     path: &str,
 ) -> Option<gtk::Button> {
-    if !eligible {
+    if !answer.is_shown() {
         return None;
     }
     let button = gtk::Button::with_label(sl::BUTTON);
     set_test_id(&button, ids::SHARE_LINK_BUTTON);
+    crate::possible::paint(&button, None, answer);
     let machine = Arc::clone(machine);
     let folder = folder.to_string();
     let path = path.to_string();
     button.connect_clicked(move |btn| {
+        if !crate::possible::painted_possible(btn) {
+            return;
+        }
         let parent = btn.root().and_downcast::<gtk::Window>();
         open_create(parent.as_ref(), &machine, folder.clone(), path.clone());
     });
@@ -604,6 +609,7 @@ fn modal_window(parent: Option<&gtk::Window>, title: &str) -> adw::Window {
         .modal(true)
         .default_width(420)
         .build();
+    crate::modal_escape::close_on_escape(&window);
     if let Some(p) = parent {
         window.set_transient_for(Some(p));
         if let Some(app) = p.application() {
@@ -709,5 +715,30 @@ mod tests {
         assert_eq!(expiry_label("2w"), "2w");
         assert_eq!(state_label("revoked"), sl::STATE_REVOKED);
         assert_eq!(state_label("paused"), "paused");
+    }
+
+    /// `share-link-button` follows the shared `share_link_possibility`: an
+    /// ineligible file gets no button at all (absent, never inert); an
+    /// eligible one a live button painted from the answer.
+    #[test]
+    fn share_link_button_is_absent_or_live_by_the_shared_answer() {
+        crate::testid::run_on_gtk_thread(|| {
+            let api = Arc::new(fauna_media_machine::FakeMediaNestApi::new());
+            let machine = MediaMachine::new(
+                Arc::new(fauna_media_machine::observer::NullObserver),
+                api,
+                None,
+                None,
+                None,
+            );
+            let absent = fauna_media_machine::share_link_possibility(false);
+            assert!(detail_button(absent, &machine, "f", "f/a.jpg").is_none());
+
+            let possible = fauna_media_machine::share_link_possibility(true);
+            let button = detail_button(possible.clone(), &machine, "f", "f/a.jpg")
+                .expect("an eligible file is offered the link");
+            assert!(button.is_visible() && button.is_sensitive());
+            assert_eq!(crate::possible::painted_answer(&button), Some(possible));
+        });
     }
 }

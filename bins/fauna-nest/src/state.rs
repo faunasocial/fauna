@@ -972,6 +972,8 @@ impl crate::routes::AppState {
             #[cfg(feature = "test-hooks")]
             mail_health_state_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
             #[cfg(feature = "test-hooks")]
+            starttls_probe_script: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(feature = "test-hooks")]
             rescore_worklist_serves: std::sync::Arc::new(Default::default()),
             #[cfg(feature = "test-hooks")]
             post_fanout_initiations: std::sync::Arc::new(Default::default()),

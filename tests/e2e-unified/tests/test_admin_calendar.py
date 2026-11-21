@@ -26,6 +26,7 @@ import time
 import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
+from helpers.draft_validity import refused_before_or_at_the_press
 from i18n.strings import S
 
 pytestmark = [
@@ -158,16 +159,16 @@ def test_caldav_port_invalid_surfaces_error(admin_app, nest_instance):
         before = _caldav_port(client)
 
         admin_app.admin.set_caldav_port("70000")  # > 65535 → invalid u16
-        admin_app.admin.save_caldav_port()
 
-        # The page-level error-message surfaces the invalid-port string. Read the
-        # element directly (the build-once settings shell can shadow error_text()).
-        assert _wait(
-            lambda: S.admin.calendar_page.caldav_port_invalid
-            in (admin_app.driver.get_text("error-message") or "")
-        ), (
-            "invalid-port message not surfaced on error-message. got: "
-            f"{admin_app.driver.get_text('error-message')!r}"
+        # Painted blocked on an app that has built the form case, else refused
+        # at the press on the page-level error-message (`admin.md` § Errors &
+        # edge cases → *A form's submit is live only for a draft the nest would
+        # accept*).
+        refused_before_or_at_the_press(
+            admin_app,
+            submit_id="admin-calendar-caldav-port-save-button",
+            press=admin_app.admin.save_caldav_port,
+            reason=S.admin.calendar_page.caldav_port_invalid,
         )
 
         # And no write happened — the persisted port is unchanged.

@@ -110,6 +110,27 @@ class OnboardingActions:
         self.driver.click("create-identity-button")
         self.driver.wait_for("secret-key-display", timeout=10)
 
+    def create_identity_to_handle_entry(self) -> str:
+        """The Create path a new person walks, by gestures, up to `handle_entry`:
+        Create → Continue on `identity_created` → "I've saved it" on
+        `recovery_kit`. Returns the identity's secret (hex), read off
+        `secret-key-display` where the person reads it — a read, not a gesture,
+        so a test that needs the key later takes it from the screen rather than
+        importing one it made (`main-use-cases.md` § The journeys, point 5).
+
+        The catalogue's `join-a-nest`, `claim-a-nest` and `save-recovery-kit`
+        use cases all start with exactly these three gestures."""
+        self.navigate_to_status()
+        self.generate_identity()
+        secret_hex = self.driver.get_text("secret-key-display").strip()
+        assert len(secret_hex) == 64, (
+            f"identity_created shows the 64-hex seed, got {secret_hex!r}"
+        )
+        self.driver.click("identity-continue-button")
+        self.driver.wait_for("recovery-kit-confirm-button", timeout=30)
+        self.confirm_recovery_kit()
+        return secret_hex
+
     def import_key(self, secret_hex: str) -> None:
         """Import an existing secret key via the UI.
 
@@ -232,12 +253,18 @@ class OnboardingActions:
         `account` is the handle including its domain — the only thing that
         locates the nest for a secret that names no handle. Does not wait for an
         outcome: a landed lock returns to `identity_choice`, every refusal
-        stays and speaks on `error-message`.
+        stays and speaks on `error-message`. A draft the shared
+        `emergency_lockout_possibility` answers blocked leaves the lock
+        painted disabled (`docs/goal/ui/README.md` § Offer only what is
+        possible, rule 4's form case) — that is the refusal, and a disabled
+        control is never driven, so the press is skipped.
         """
         self.driver.fill("paste-secret-field", secret_hex)
         if account is not None:
             self.driver.fill("recovery-entry-account-field", account)
         self.driver.fill("sessions-lockout-confirm-field", confirm)
+        if not self.driver.is_enabled("sessions-lockout-button"):
+            return
         self.driver.click("sessions-lockout-button")
 
     # ── The recovery-kit offer (`onboarding.md` § 1 Identity) ─────────────
@@ -672,6 +699,7 @@ class OnboardingActions:
         Uses a non-routable IANA-reserved test domain that the machine's
         DoH probe reliably reports as Unregistered / DomainAvailable.
         """
+        self.require_old_setup_path()
         # Use a domain with a valid TLD that the handle-check probe will
         # return as DomainAvailable (unregistered). The `.example` TLD is
         # rejected by the probe as TldInvalid. Use `.io` which is in the
@@ -724,6 +752,32 @@ class OnboardingActions:
         # and uses CheckButton, which has a definite accessible role.
         self.driver.wait_for("dns-buy-domain-checkbox", timeout=15)
 
+    def renders_provider_choice(self) -> bool:
+        """Whether this app's set-up path walks the choose-providers page
+        (``onboarding-provisioning.md`` § 3d) instead of ``dns_config`` →
+        ``vps_config`` — the ``provider-choice`` surface."""
+        from helpers.app_surface import app_name, surface_built
+
+        return surface_built("provider-choice", app_name(self.driver))
+
+    def require_old_setup_path(self) -> None:
+        """Skip, declared, on an app whose set-up path no longer has
+        ``dns_config`` / ``vps_config``: the choose-providers page replaced
+        both there (``vps_config`` stays for cloud recovery alone), and its
+        journeys are ``test_provider_choice*.py``. The old-path modules are
+        marked for windows alone, so the catalog never counts them on another
+        column; this guard is the backstop for a run that selects one there
+        anyway."""
+        if self.renders_provider_choice():
+            from helpers.app_surface import declared_absence
+
+            declared_absence(
+                self.driver,
+                capability="dns_config / vps_config on the set-up path "
+                "(the choose-providers page replaces both)",
+                doc="onboarding-provisioning.md § 3d *What becomes of §§ 4, 5 and 6*",
+            )
+
     def fill_dns_contact(self, contact: dict[str, str]) -> None:
         """Type a WHOIS contact into the dns_config contact form.
 
@@ -775,8 +829,9 @@ class OnboardingActions:
         the machine bridge: toggles ``same_provider_for_vps``, selects the
         provider, fills creds, runs a real ``verify_dns`` against the
         ``fake_cloud`` stub, then ``continue_from_dns`` — which mirrors the
-        provider (creds + verified) onto the VPS stage, so vps_config shows
-        it preselected.
+        provider and its token onto the VPS stage and checks it there in the
+        background, listing the locations and offers, so vps_config shows it
+        preselected and, once the check lands, its plans.
 
         The provider *selection* is driven via ``call_machine_method`` rather
         than UI clicks because the dns_config UI gates provider buttons on
@@ -798,15 +853,23 @@ class OnboardingActions:
         from helpers.app_surface import require_surface
 
         require_surface(self.driver, "dns-provider-machine-dispatch")
-        # Override ONLY "dns" — pointed at the provider-shaped stub (Hetzner
-        # DNS has a different wire envelope than Cloudflare). Do NOT override
+        # Override "dns" — pointed at the provider-shaped stub (Hetzner
+        # DNS has a different wire envelope than Cloudflare) — and "vps"
+        # (below). Do NOT override
         # "nest": the anonymous WsNestApi makes a "nest" override win for every
         # anonymous call, so the handle-check probe in go_to_dns_config would
         # try to WS-connect the (non-WS) fake nest and fail transiently. This
         # helper never provisions, so it doesn't need the nest redirect. The
         # reload re-mounts the wizard WITH the override before any verify probe.
+        # "vps" too: the mirror checks the carried-over token and lists the
+        # locations and offers itself (onboarding-provisioning.md § 3d → *Why
+        # one provider's token was asked for twice*), so that check must hit
+        # the fake, never the live provider.
         self.driver.set_provider_base_urls(
-            {"dns": fake_cloud.dns_base_for(provider_id)}
+            {
+                "dns": fake_cloud.dns_base_for(provider_id),
+                "vps": fake_cloud.url_map()["vps"],
+            }
         )
 
         self.go_to_dns_config()

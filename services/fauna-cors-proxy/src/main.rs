@@ -30,6 +30,10 @@ const BASE_URLS: Bases = &[
     ("linode", "https://api.linode.com"),
     ("gandi", "https://api.gandi.net"),
     ("namecheap", "https://api.namecheap.com"),
+    // Spaceship authenticates with the X-Api-Key / X-Api-Secret header pair,
+    // which the forwarder relays like any header; its registration answers a
+    // `spaceship-async-operationid` header, relayed back unchanged.
+    ("spaceship", "https://spaceship.dev"),
     // Let's Encrypt ACME directories — the browser (wasm) DNS-01 cert order
     // (`fauna-client-dns::acme_pure`) can't reach these cross-origin (no CORS), so
     // it routes every ACME request (and the absolute follow-up URLs the CA

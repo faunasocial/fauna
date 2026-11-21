@@ -17,6 +17,8 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
 import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.util.askForm
+import com.fauna.app.ui.util.faunaFormGate
 import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.resolveLocalized
@@ -48,8 +50,16 @@ import uniffi.fauna_client_pair.grantBoundNote
 import uniffi.fauna_client_pair.mintOptionDefaultDuration
 import uniffi.fauna_client_pair.mintOptionLabel
 import uniffi.fauna_client_pair.mintOptionNote
+import uniffi.fauna_client_pair.mintDraftPossibility
+import uniffi.fauna_client_pair.mintHolder
+import uniffi.fauna_client_pair.linkInputPossibility
 import uniffi.fauna_client_pair.statusLabel
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.DropdownMenuItem
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.ExposedDropdownMenuBox
 
 /**
  * The user-facing "Nests" page — per-user nest pairing (multi-homing) + the v1
@@ -152,7 +162,7 @@ fun LinkedNestsScreen(
 fun LinkedNestsContent(
     snapshot: LinkedNestsSnapshot,
     onBack: () -> Unit,
-    onLink: (String) -> Unit,
+    onLink: (String, (Boolean) -> Unit) -> Unit,
     onUnlink: (String) -> Unit,
     onSetLens: (String, TrustLens) -> Unit,
     onRenew: (ByteArray) -> Unit,
@@ -160,7 +170,7 @@ fun LinkedNestsContent(
     // Mint a scope-first trust grant to one of the nest's content-processor
     // holders: (nestId, holderBridgeId, scope). The holder is derived shell-side
     // from the scope choice (nests.md § Mint).
-    onMint: (String, String, List<TrustScope>, TrustGrantDuration) -> Unit,
+    onMint: (String, String, List<TrustScope>, TrustGrantDuration, (Boolean) -> Unit) -> Unit,
     // The two backup-trust revokes (`nest-trust-backup-revoke`). Kept as separate
     // callbacks — one per shared `LinkedNestsAction` variant — because they land
     // on DIFFERENT nests: the seal press freezes the home nest's ability to seal
@@ -296,18 +306,19 @@ fun LinkedNestsContent(
                                 modifier = Modifier.fillMaxWidth().testTag(Ids.NESTS_ADD_INPUT),
                             )
                             // The commit gates, not the buffer: the input above and
-                            // the cancel beside it stay live with no nest, and the
-                            // form's own non-empty predicate is handed over rather
-                            // than re-tested next to the verdict.
-                            val addGate = faunaGate(
-                                "fauna.pair.add",
-                                enabled = addInput.isNotBlank(),
+                            // the cancel beside it stay live with no nest. The draft
+                            // answer is the shared `link_input_possibility`
+                            // (`ui/nests.md` § Errors & edge cases); the VM asks it
+                            // again on press, and the form closes only once the link
+                            // went through.
+                            val addGate = faunaFormGate(
+                                askForm { linkInputPossibility(addInput) },
+                                faunaGate("fauna.pair.add"),
                             )
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Button(
                                     onClick = {
-                                        onLink(addInput)
-                                        showForm = false
+                                        onLink(addInput) { linked -> if (linked) showForm = false }
                                     },
                                     enabled = addGate.enabled,
                                     modifier = Modifier.testTag(Ids.NESTS_ADD_SUBMIT_BUTTON),
@@ -381,7 +392,7 @@ fun LinkedNestsContent(
                         onSetLens = { lens -> onSetLens(row.nestId, lens) },
                         onRenew = onRenew,
                         onRevoke = onRevoke,
-                        onMint = { holder, scope, duration -> onMint(row.nestId, holder, scope, duration) },
+                        onMint = { holder, scope, duration, done -> onMint(row.nestId, holder, scope, duration, done) },
                         onSetBlessed = { blessed -> onSetBlessed(row.nestId, blessed) },
                         durationOptions = durationOptions,
                         durationLabel = durationLabel,
@@ -631,7 +642,7 @@ private fun NestItemRow(
     onSetLens: (TrustLens) -> Unit,
     onRenew: (ByteArray) -> Unit,
     onRevoke: (ByteArray) -> Unit,
-    onMint: (String, List<TrustScope>, TrustGrantDuration) -> Unit,
+    onMint: (String, List<TrustScope>, TrustGrantDuration, (Boolean) -> Unit) -> Unit,
     onRevokeBackupSeal: () -> Unit,
     onRevokeBackupWriter: (String) -> Unit,
     onRestoreGeneration: (String, String, String, String) -> Unit,
@@ -736,7 +747,7 @@ private fun TrustFacet(
     onSetLens: (TrustLens) -> Unit,
     onRenew: (ByteArray) -> Unit,
     onRevoke: (ByteArray) -> Unit,
-    onMint: (String, List<TrustScope>, TrustGrantDuration) -> Unit,
+    onMint: (String, List<TrustScope>, TrustGrantDuration, (Boolean) -> Unit) -> Unit,
     onRevokeBackupSeal: () -> Unit,
     onRevokeBackupWriter: (String) -> Unit,
     onRestoreGeneration: (String, String, String, String) -> Unit,
@@ -1214,7 +1225,7 @@ private fun MintFlow(
     defaultDuration: TrustGrantDuration,
     durationOptions: () -> List<TrustGrantDuration>,
     durationLabel: (TrustGrantDuration) -> uniffi.fauna_core.LocalizedText,
-    onMint: (String, List<TrustScope>, TrustGrantDuration) -> Unit,
+    onMint: (String, List<TrustScope>, TrustGrantDuration, (Boolean) -> Unit) -> Unit,
 ) {
     var showForm by remember { mutableStateOf(false) }
     // How long the new trust lasts — the row's default until the owner picks.
@@ -1230,7 +1241,13 @@ private fun MintFlow(
 
     // ARMING IS LOCAL: the mint button below only opens the form, so it stays
     // live with no nest — only the confirm commits (`fauna.capabilities.mint`).
-    val mintGate = faunaGate("fauna.capabilities.mint", enabled = selected != null)
+    // The confirm's draft answer is the shared `mint_draft_possibility`: blocked
+    // until a use — and, for a use several services can hold, its holder — is
+    // picked (`ui/nests.md` § Errors & edge cases).
+    val mintGate = faunaFormGate(
+        askForm { mintDraftPossibility(selected, holderPick) },
+        faunaGate("fauna.capabilities.mint"),
+    )
 
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Button(
@@ -1361,15 +1378,18 @@ private fun MintFlow(
             Button(
                 onClick = {
                     val option = selected ?: return@Button
-                    // Derived holder: the single candidate; ambiguity → the
-                    // holder select's pick (visible iff >1 candidate).
-                    val holder =
-                        if (option.holderCandidates.size > 1) holderPick ?: return@Button
-                        else option.holderCandidates.first()
-                    showForm = false
-                    selected = null
-                    holderPick = null
-                    onMint(holder, option.scope, duration)
+                    // The shared `mint_holder`: the single candidate, else the
+                    // holder select's pick — the one the confirm was painted from.
+                    val holder = mintHolder(option, holderPick) ?: return@Button
+                    // The form closes only once the mint went through; a refused
+                    // or failed mint keeps it open with what was picked.
+                    onMint(holder, option.scope, duration) { minted ->
+                        if (minted) {
+                            showForm = false
+                            selected = null
+                            holderPick = null
+                        }
+                    }
                 },
                 enabled = mintGate.enabled,
                 modifier = Modifier.testTag(Ids.NEST_TRUST_MINT_CONFIRM_BUTTON),

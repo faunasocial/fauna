@@ -716,6 +716,15 @@ class _StubConfig:
             # stub's hook call runs in. `None` would let an elevated run's hook
             # re-point the process's temp.
             return "stub-basetemp"
+        if name == "acme_venue_reach":
+            # Inert: the shared ACME venue's reach (`--acme-venue-reach`,
+            # helpers/acme_pebble.py) is not the subject of any pin here. The
+            # hook hands the answer to `set_reach_override`, so the reach the
+            # run already resolves is the one answer that moves nothing a later
+            # test reads; `None` would wipe a reach the run named.
+            from helpers import acme_pebble
+
+            return acme_pebble.venue_reach()
         raise AssertionError(
             f"_StubConfig was asked for an option it has no answer for: {name!r}. "
             f"`conftest.pytest_configure` grew a new option — decide what this "
@@ -763,12 +772,30 @@ def _unbuilt_section(reporter):
 
 
 @pytest.mark.parametrize("strict", [True, False])
-def test_pytest_configure_pushes_the_flag_into_app_surface(strict):
+def test_pytest_configure_pushes_the_flag_into_app_surface(strict, monkeypatch):
     import conftest
 
+    # The hook also hands its `config` to two conftest globals — the phase
+    # line's writer (`_PHASE_CONFIG`, e2e-conventions.md point 9) and the
+    # artifact mode. Left pointing at this stub, whose plugin manager has no
+    # `getplugin`, every later `[e2e-phase]` line of the run fails inside
+    # `_phase`'s guard and is silently dropped: measured 2026-11-18, a
+    # whole-directory tier_1 run's log carried a phase line for its first 720
+    # of 11,016 tests and none after this pin. monkeypatch puts both back.
+    monkeypatch.setattr(conftest, "_PHASE_CONFIG", conftest._PHASE_CONFIG)
+    monkeypatch.setattr(conftest, "_MACOS_ARTIFACT_MODE", conftest._MACOS_ARTIFACT_MODE)
     app_surface.set_strict_app(not strict)  # start from the wrong value
     conftest.pytest_configure(_StubConfig(strict))
     assert app_surface.strict_app_enabled() is strict
+
+
+def test_the_configure_pin_leaves_the_phase_writer_on_the_real_session(request):
+    """Runs after the pin above (definition order): the phase line's writer is
+    still this run's own config, so every later test's `[e2e-phase] test` line
+    reaches the log."""
+    import conftest
+
+    assert conftest._PHASE_CONFIG is request.config
 
 
 def test_terminal_summary_reports_the_tally_and_names_the_surfaces():

@@ -35,6 +35,7 @@ pub mod caldav_policy;
 pub mod carddav_policy;
 pub mod credential;
 pub mod dmarc_reports;
+pub mod domain_forms;
 pub mod error;
 pub mod export;
 pub mod forwarders;
@@ -74,14 +75,15 @@ pub use admin_policy::{
     ImapDeleteNonempty, ImapPolicyView, MailPolicyAction, MailPolicyMachine, MailPolicyNest,
     MailPolicySnapshot, MailPolicyStatus, OutboundPolicyView, SenderDashboardLink, SpamPolicyView,
     SubmissionPolicyView, dmarc_forensic_mode_options, dmarc_forensic_retention_warns,
-    fcrdns_mode_options, imap_delete_nonempty_options, sender_dashboard_links,
+    fcrdns_mode_options, imap_delete_nonempty_options, mail_enable_toggle_possibility,
+    sender_dashboard_links,
 };
 pub use aliases::{
     ALIAS_AUDIT_LIMIT, ALIAS_EXTEND_MS, AliasAuditView, AliasHitView, AliasKind, AliasView,
     AliasesStatus, ImportAliasOutcomeView, ImportAliasStatusView, ImportResultView,
     MailAliasesAction, MailAliasesMachine, MailAliasesNest, MailAliasesSnapshot,
     alias_expiry_label, alias_hits_label, alias_is_extendable, alias_kind_badge,
-    extended_expiry_ms,
+    extended_expiry_ms, mail_aliases_create_possibility,
 };
 pub use autorespond::{
     AutorespondMessageDraftOutcome, autorespond_message_draft_outcome,
@@ -111,7 +113,7 @@ pub use export::{
     ExportConfirmEstimate, ExportFormat, ExportScope, ExportSessionState, ExportSessionView,
     ExportStatus, ExportStep, MailExportAction, MailExportMachine, MailExportNest,
     MailExportSnapshot, MailboxOption, MailboxProgressView, export_confirm_estimate,
-    export_format_label,
+    export_format_label, mail_export_next_possibility, mail_export_start_possibility,
 };
 pub use forwarders::{
     ForwarderAction, ForwarderMachine, ForwarderNest, ForwarderStatus, ForwarderView,
@@ -129,7 +131,8 @@ pub use import::{
     MicrosoftSignInState, MicrosoftSignInView, SOURCE_KINDS, SourceConnectParams,
     SourceMailboxOption, SourceMailboxView, TLS_MODES, connect_actions, import_action_starts_run,
     import_mailbox_progress_text, import_selected_totals, import_source_kind_label,
-    import_tls_mode_label, microsoft_sign_in_actions, resume_actions, scope_next_actions,
+    import_tls_mode_label, mail_import_next_possibility, mail_import_outlook_source_possibility,
+    mail_import_start_possibility, microsoft_sign_in_actions, resume_actions, scope_next_actions,
 };
 pub use inbox_scorer::{
     INBOX_SPAM_RESCORE_PER_PASS_CAP, InboxCopyVerdict, InboxSpamScorer, SpamScorerState,
@@ -139,7 +142,8 @@ pub use lists::{
     ImportResult, ListDraft, ListMembers, ListView, ListsStatus, MailListMembersAction,
     MailListMembersMachine, MailListMembersNest, MailListMembersSnapshot, MailListsAction,
     MailListsMachine, MailListsNest, MailListsSnapshot, MemberStatus, MemberView,
-    archive_url_needs_confirm, member_status_label,
+    archive_url_needs_confirm, list_submit_possibility, mail_lists_create_possibility,
+    member_add_possibility, member_import_possibility, member_status_label,
 };
 pub use local_domains::{
     DEFAULT_CERT_MODE, DomainDmarcPolicy, LocalDomainAction, LocalDomainMachine, LocalDomainNest,
@@ -180,5 +184,7 @@ pub use fauna_mail::spam::model_write::ModelWriteOp;
 pub use state::{
     CredentialKind, MailCredentialSummary, MailSettingsAction, MailSettingsSnapshot,
     MuaInstructions, PendingRotationStatus, SettingsStatus, credential_kind_badge,
-    resolve_mua_username, settings_status_label,
+    mail_settings_credential_management_possibility, mail_settings_enable_toggle_possibility,
+    mail_settings_mail_usable, mail_settings_rotate_keys_possibility, mail_usable_unbuilt,
+    mail_usable_unread, resolve_mua_username, settings_status_label,
 };

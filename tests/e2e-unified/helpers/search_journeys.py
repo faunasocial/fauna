@@ -12,9 +12,9 @@ from the generated string table, so a copy edit is never a test edit.
 **Failing the nest arm, for real.** The Search page fires two arms at once — the
 nest's `fauna.search.query` and the local sealed index — and commits them
 TOGETHER, leaving the previous page painted until then (`SearchManager::begin` /
-`fetch_and_commit`). Holding the nest reply (`helpers/rpc_hold.py`, a
-test-hooks surface) makes the client give up on it at the kind's own deadline,
-which is a genuine nest-arm failure; while the hold is armed, EVERY row a search
+`fetch_and_commit`). Holding the nest reply unannounced (`helpers/rpc_hold.py`
+with ``client_deadline=True``, a test-hooks surface) makes the client give up
+on it at the kind's own deadline, which is a genuine nest-arm failure; while the hold is armed, EVERY row a search
 commits is therefore the local index's. Two consequences the helpers encode:
 
 * a row is only evidence once the page held nothing like it before the hold —
@@ -143,7 +143,8 @@ class FailingNestArm:
         self.port = port
 
     def __enter__(self) -> "FailingNestArm":
-        arm_rpc_hold(self.port, SEARCH_KIND)
+        # The client's own deadline giving up on the search is this hold's subject.
+        arm_rpc_hold(self.port, SEARCH_KIND, client_deadline=True)
         return self
 
     def __exit__(self, *exc) -> None:

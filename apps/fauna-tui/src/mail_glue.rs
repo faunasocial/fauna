@@ -288,7 +288,11 @@ pub fn spawn_refresh_mail_epoch_schedule(
 /// one-MSEK-mint-path companion mints — and publishes the
 /// `fauna_e2e_agent::SERVING_ENABLEMENT_KEY` completion anchor. Reached only
 /// from the wizard's `LoggedIn` handoff; a returning-user relaunch never calls
-/// it. Spawned: the handoff must not wait on the nest.
+/// it. Spawned: the handoff must not wait on the nest. The step waits for the
+/// account store and the connection and retries a passing failure itself
+/// (`onboarding.md` § 3b *The step completes; it is not fired once*); a step
+/// the nest refuses for good comes back here and is said on the page the person
+/// is on ([`crate::app::DataMessage::ServingEnablementRefused`]).
 pub fn apply_post_claim_serving_enablement(
     nest: Arc<NestClient>,
     secret_hex: &str,
@@ -296,6 +300,7 @@ pub fn apply_post_claim_serving_enablement(
     node_url: &str,
     ledger: Arc<dyn SuccessionLedgerStore>,
     intents: fauna_client_mail_settings::serving_enablement::ServingEnablementIntents,
+    tx: tokio::sync::mpsc::UnboundedSender<crate::app::UiMessage>,
 ) {
     let keypair = match ActorKeypair::from_secret_hex(secret_hex) {
         Ok(k) => k,
@@ -304,14 +309,16 @@ pub fn apply_post_claim_serving_enablement(
             return;
         }
     };
-    tokio::spawn(
-        fauna_client_mail_settings::rpc_glue::dispatch_post_claim_serving_enablement(
-            nest,
-            keypair,
-            mail,
-            node_url.to_string(),
-            ledger,
-            intents,
-        ),
-    );
+    let node_url = node_url.to_string();
+    tokio::spawn(async move {
+        let report = fauna_client_mail_settings::rpc_glue::dispatch_post_claim_serving_enablement(
+            nest, keypair, mail, node_url, ledger, intents,
+        )
+        .await;
+        if let Some(message) = report.error_message() {
+            let _ = tx.send(crate::app::UiMessage::Data(
+                crate::app::DataMessage::ServingEnablementRefused(message),
+            ));
+        }
+    });
 }

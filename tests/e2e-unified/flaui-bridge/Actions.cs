@@ -925,6 +925,10 @@ class Actions
     ///   * <c>"options"</c> — a ComboBox's items as a JSON array of their Names —
     ///     the labels they paint — in model order (<see cref="OptionsJson"/>);
     ///     <c>null</c> on a non-ComboBox.
+    ///   * <c>"reason"</c> — the element's UIA <c>FullDescription</c>, where the app's
+    ///     possibility painter publishes the reason it paints beside a blocked
+    ///     control; when that is empty (a live control, or one the painter does not
+    ///     paint), the HelpText reading below, as for any other key.
     ///   * any other key — <c>AutomationProperties.HelpText</c> (UIA exposes
     ///     a single application-supplied free-text channel per element). An element
     ///     publishing several attributes packs them there as <c>key=value</c> pairs
@@ -1198,6 +1202,22 @@ class Actions
             case "name":
                 try { return el.Properties.Name.ValueOrDefault; }
                 catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex)) { return null; }
+            case "reason":
+                // The reason painted beside a blocked control: the app's one
+                // painter (`FaunaApp/Helpers/PossibilityPaintExtensions.cs`) writes
+                // it to the control's UIA FullDescription, empty while the control
+                // is possible — not HelpText, which gated controls already use for
+                // other values. An empty FullDescription falls through to the
+                // `default` arm's HelpText reading, which is where a control the
+                // painter does not paint publishes its own `reason` (the AT Protocol
+                // depth rungs' `gated`/`ok` marker, `AtprotoPage.ApplyVm`).
+                try
+                {
+                    var full = el.Properties.FullDescription.ValueOrDefault;
+                    if (!string.IsNullOrEmpty(full)) return full;
+                }
+                catch (Exception ex) when (UiaSwallow.MayAnswerAbsent(ex)) { return null; }
+                goto default;
             default:
                 // One value, or several packed `key=value;…` (PackedAttr): a pack
                 // answers this attribute's own value, never the whole string.

@@ -44,6 +44,6 @@ public struct ContactsViewSegment: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier(id)
-        .automationActivate(id) { action() }
+        .automationActivate(id, attributes: { ["state": isSelected ? "on" : "off"] }) { action() }
     }
 }

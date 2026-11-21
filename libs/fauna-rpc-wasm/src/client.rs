@@ -364,11 +364,17 @@ struct Inner {
 /// waiting cuts a longer nap short; those extra dials neither grow the curve nor
 /// count toward `Unreachable`. Single-threaded, so a `Cell` count; the wake-up
 /// is a `Notify`, whose stored permit covers a waiter arriving while the loop is
-/// not parked on it.
+/// not parked on it. A gap one request has outlasted is not waited out again:
+/// `outlasted` is set when a request spends its whole deadline in the gap and
+/// cleared by a connection, and while it stands a request that finds no
+/// connection fails at the next refused attempt (`refusals` moving) instead of
+/// its deadline — the native twin's second paragraph.
 #[derive(Default)]
 struct DialDemand {
     waiting: Cell<usize>,
     arrived: tokio::sync::Notify,
+    outlasted: Cell<bool>,
+    refusals: Cell<u64>,
 }
 
 impl DialDemand {
@@ -884,6 +890,10 @@ async fn dispatcher_within_deadline(
     // held the reconnect loop dials for this request at the initial pace
     // ([`DialDemand`]), the twin of native `NestClient::wait_for_connected`.
     let mut waiting: Option<DialDemandGuard> = None;
+    // In a gap an earlier request outlasted, the next refused attempt is the
+    // answer ([`DialDemand`]).
+    let outlasted = inner.demand.outlasted.get();
+    let refusals = inner.demand.refusals.get();
 
     let dispatcher = loop {
         // A closed or stopped client's dispatcher never comes back — fail
@@ -896,6 +906,10 @@ async fn dispatcher_within_deadline(
             break d;
         }
         if waited_ms >= deadline_ms {
+            inner.demand.outlasted.set(true);
+            return Err(WsRpcError::NotConnected);
+        }
+        if outlasted && inner.demand.refusals.get() > refusals {
             return Err(WsRpcError::NotConnected);
         }
         waiting.get_or_insert_with(|| DialDemandGuard::begin(inner));
@@ -1124,6 +1138,7 @@ fn set_state(inner: &Inner, state: ConnectionState) {
 /// before invocation so we never hold the `RefCell` borrow across the JS call
 /// (it re-enters wasm via the surface re-fetches).
 fn mark_connected(inner: &Inner) {
+    inner.demand.outlasted.set(false);
     set_state(inner, ConnectionState::Connected);
     if inner.has_connected.replace(true) || inner.failed_before_first.get() {
         inner.reconnects.send_modify(|n| *n = n.wrapping_add(1));
@@ -1354,6 +1369,7 @@ async fn run_reconnect_loop(inner: Rc<Inner>, mut close_rx: oneshot::Receiver<()
     // a dial reads as refused.
     macro_rules! refused_nap {
         ($what:expr) => {{
+            inner.demand.refusals.set(inner.demand.refusals.get() + 1);
             let due = match curve_due {
                 Some(due) if extra_dial => {
                     tracing::debug!("{} for a waiting request", $what);
@@ -2917,6 +2933,40 @@ mod tests {
         assert!(
             !inner.demand.is_waiting(),
             "a request that stopped waiting must stop counting"
+        );
+    }
+
+    /// **A gap one request outlasted is answered at the next refused attempt,
+    /// not the deadline**: the wasm twin of native
+    /// `client::tests::a_request_in_a_gap_another_outlasted_fails_at_the_next_refused_dial`.
+    /// With the mark standing, a parked request ends `NotConnected` within a
+    /// poll step of the loop's next refused attempt, far inside its own
+    /// deadline; a connection clears the mark.
+    #[wasm_bindgen_test]
+    async fn a_request_in_a_gap_another_outlasted_fails_at_the_next_refused_attempt() {
+        let client = loopless_client();
+        let inner = inner_of(&client);
+        inner.demand.outlasted.set(true);
+        let mut parked = Box::pin(echo(&client));
+        assert!(
+            (&mut parked).now_or_never().is_none(),
+            "nothing is connected and nothing was refused yet, so the request must park"
+        );
+        inner.demand.refusals.set(inner.demand.refusals.get() + 1);
+        let ended = futures_util::future::select(parked, Box::pin(TimeoutFuture::new(2_000))).await;
+        match ended {
+            futures_util::future::Either::Left((Err(WsRpcError::NotConnected), _)) => {}
+            futures_util::future::Either::Left((other, _)) => {
+                panic!("expected NotConnected at the refused attempt, got {other:?}")
+            }
+            futures_util::future::Either::Right(_) => {
+                panic!("a request in an outlasted gap was still parked 2 s after a refused attempt")
+            }
+        }
+        mark_connected(&inner);
+        assert!(
+            !inner.demand.outlasted.get(),
+            "a connection must clear the outlasted mark"
         );
     }
 }

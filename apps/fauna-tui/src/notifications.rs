@@ -43,6 +43,12 @@ pub struct NotificationsState {
     nest: Option<Arc<NestClient>>,
     pub items: Vec<NotifItem>,
     pub unread: i64,
+    /// Whether the page's list read has answered at least once (`ui/README.md`
+    /// § List pages: loading is not empty) — what *Mark all read* and *Clear
+    /// all* wait on (`fauna_client_notifications::mark_all_read_possibility`,
+    /// `clear_all_possibility`). `Failed` until a later read succeeds, after a
+    /// first read that came back with an error.
+    pub read: fauna_core::possibility::ReadState,
     /// Rows the user revealed past their muted-word collapse — per-row and
     /// session-local, the mute stays (`behavior/notifications.md` § Muted words
     /// rule 3; the `crate::conversations` `revealed_muted` shape).
@@ -140,6 +146,18 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         app.notifications.revealed_muted.insert(id);
         return None;
     }
+    // The two page-wide actions ask the answers their buttons are painted
+    // from (`ui/README.md` § Offer only what is possible, rule 6).
+    let answer = match action {
+        Action::MarkAllRead => Some(mark_read_answer(&app.notifications)),
+        Action::ClearAll => Some(clear_answer(&app.notifications)),
+        _ => None,
+    };
+    if let Some(answer) = answer
+        && app.errors.refuse(Page::Notifications, &answer)
+    {
+        return None;
+    }
     let st = &app.notifications;
     match action {
         Action::MarkAllRead => Some(Op::MarkAllRead {
@@ -158,6 +176,22 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         }),
         Action::RevealMuted(_) => None,
     }
+}
+
+/// `notification-mark-read`'s answer — the shared predicate over the page's
+/// read state and the nest-reported unread count (never a count of the page's
+/// rows: unread rows past the loaded page still count).
+fn mark_read_answer(st: &NotificationsState) -> fauna_core::possibility::Possibility {
+    fauna_client_notifications::mark_all_read_possibility(
+        st.read,
+        usize::try_from(st.unread).unwrap_or(0),
+    )
+}
+
+/// `notification-clear`'s answer — the shared predicate over the read state
+/// and the rows the page holds.
+fn clear_answer(st: &NotificationsState) -> fauna_core::possibility::Possibility {
+    fauna_client_notifications::clear_all_possibility(st.read, st.items.len())
 }
 
 /// The `up_to` a clear-all sends: the newest `created_at` the page has shown,
@@ -297,9 +331,15 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             }
             app.notifications.items = items;
             app.notifications.unread = unread;
+            app.notifications.read = fauna_core::possibility::ReadState::Resolved;
             app.errors.remove(&Page::Notifications);
         }
         Outcome::Failed(message) => {
+            // A failure after a resolved read (a mutation's, or a later
+            // refetch's) keeps the rows already shown actionable.
+            if app.notifications.read != fauna_core::possibility::ReadState::Resolved {
+                app.notifications.read = fauna_core::possibility::ReadState::Failed;
+            }
             app.errors.insert(Page::Notifications, message);
         }
     }
@@ -428,13 +468,15 @@ pub fn elements(app: &App) -> Vec<Element> {
             t::MARK_ALL_READ,
             true,
             Gesture::Notifications(Action::MarkAllRead),
-        ),
+        )
+        .possible(mark_read_answer(st)),
         Element::gesture_button(
             ids::NOTIFICATION_CLEAR,
             fauna_i18n::strings::notifications::CLEAR_ALL,
-            !st.items.is_empty(),
+            true,
             Gesture::Notifications(Action::ClearAll),
-        ),
+        )
+        .possible(clear_answer(st)),
     ];
     for item in &st.items {
         out.push(Element::label(
@@ -521,6 +563,71 @@ pub fn state_json(state: &NotificationsState) -> serde_json::Value {
 mod tests {
     use super::*;
 
+    /// Unknown is not possible (`notifications.md` § Errors & edge cases):
+    /// before the first list read answers, *Mark all read* and *Clear all*
+    /// are blocked still loading and their presses refuse; once read, an empty
+    /// page blocks *Clear all* with its reason and a row enables it.
+    #[test]
+    fn the_page_wide_actions_wait_for_the_first_read() {
+        let mut app = crate::app::tests::authed_app();
+        app.page = Page::Notifications;
+        app.connection = fauna_ws_substrate::supervisor::ConnectionState::Connected;
+        app.notifications.nest = Some(NestClient::new(
+            "http://127.0.0.1:9".to_string(),
+            fauna_core::identity::ActorKeypair::from_secret([7u8; 32]),
+        ));
+        let find = |app: &App, id: &str| {
+            app.page_elements()
+                .into_iter()
+                .find(|e| e.id == id)
+                .unwrap()
+        };
+        for id in [ids::NOTIFICATION_MARK_READ, ids::NOTIFICATION_CLEAR] {
+            let button = find(&app, id);
+            assert!(!button.enabled, "{id}");
+            assert_eq!(button.label.as_deref(), Some(t::STILL_LOADING), "{id}");
+        }
+        assert!(apply_local(&mut app, Action::MarkAllRead).is_none());
+        assert!(apply_local(&mut app, Action::ClearAll).is_none());
+
+        let query_gen = claim_read_gen(&app.notifications);
+        apply_outcome(
+            &mut app,
+            Outcome::Loaded {
+                items: Vec::new(),
+                unread: 0,
+                query_gen,
+            },
+        );
+        // Read and empty, nothing unread: mark-read is blocked with its
+        // reason, never left live to do nothing.
+        let mark = find(&app, ids::NOTIFICATION_MARK_READ);
+        assert!(!mark.enabled);
+        assert_eq!(
+            mark.label.as_deref(),
+            Some(fauna_i18n::strings::notifications::NOTHING_UNREAD)
+        );
+        assert!(apply_local(&mut app, Action::MarkAllRead).is_none());
+        let clear = find(&app, ids::NOTIFICATION_CLEAR);
+        assert!(!clear.enabled);
+        assert_eq!(
+            clear.label.as_deref(),
+            Some(fauna_i18n::strings::notifications::NOTHING_TO_CLEAR)
+        );
+
+        let query_gen = claim_read_gen(&app.notifications);
+        apply_outcome(
+            &mut app,
+            Outcome::Loaded {
+                items: vec![item("like", "A liked your post", false)],
+                unread: 1,
+                query_gen,
+            },
+        );
+        assert!(find(&app, ids::NOTIFICATION_CLEAR).enabled);
+        assert!(find(&app, ids::NOTIFICATION_MARK_READ).enabled);
+    }
+
     /// A read superseded by a newer one is dropped when it lands late — the
     /// spawned login hydration (or a push resync) landing after the agent's
     /// awaited nav-to-tab read must not repaint the older rows.
@@ -601,8 +708,10 @@ mod tests {
             ],
             "the empty page paints the four chrome elements and no rows"
         );
+        app.notifications.read = fauna_core::possibility::ReadState::Resolved;
+        let els = elements(&app);
         assert!(
-            !els[3].enabled,
+            !els[3].possibility.as_ref().unwrap().is_possible(),
             "clear-all on an empty page has no shown row to bound it"
         );
 
@@ -623,10 +732,38 @@ mod tests {
             ],
         );
         assert!(els[1].text.contains('1'), "badge shows the nest count");
-        assert!(els[3].enabled, "clear-all is live once a row is shown");
+        assert!(
+            els[3].possibility.as_ref().unwrap().is_possible(),
+            "clear-all is live once a row is shown"
+        );
         assert_eq!(els[4].text, "♥");
         assert!(els[5].text.starts_with("A liked your post"));
         assert_eq!(els[6].text, fauna_i18n::strings::notifications::DISMISS);
+    }
+
+    /// A read page with nothing unread paints `notification-mark-read`
+    /// disabled with `notifications.nothing_unread` (`notifications.md` §
+    /// Errors & edge cases); the nest's unread count — not the loaded rows —
+    /// brings it alive, and the press asks the same answer.
+    #[test]
+    fn mark_read_is_blocked_while_nothing_is_unread() {
+        use fauna_core::localized::LocalizedText;
+        use fauna_core::possibility::Possibility;
+        let mut app = crate::app::tests::test_app();
+        app.notifications.read = fauna_core::possibility::ReadState::Resolved;
+        let blocked = Possibility::blocked(LocalizedText::key("notifications.nothing_unread"));
+        assert_eq!(elements(&app)[2].possibility.as_ref(), Some(&blocked));
+        assert_eq!(mark_read_answer(&app.notifications), blocked);
+
+        // An unread row past the loaded page still counts.
+        app.notifications.unread = 3;
+        assert!(
+            elements(&app)[2]
+                .possibility
+                .as_ref()
+                .unwrap()
+                .is_possible()
+        );
     }
 
     // ── Muted words (`behavior/notifications.md` § Muted words) ────────────

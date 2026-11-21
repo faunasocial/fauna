@@ -69,7 +69,7 @@ pub use fauna_protocol::features::{AuthoredPolicyItem, FeaturePolicyReadReply};
 pub use fauna_protocol::features::{FeatureStatusItem, FeaturesStatusReply as StatusReply};
 pub use row::{
     CellMagnitudes, FeatureRow, RowCell, cell_value_text, dimension_label, feature_row,
-    feature_rows, gate_reason, gated_feature_keys, window_label,
+    feature_rows, gate_possibility, gated_feature_keys, window_label,
 };
 pub use view_model::{
     Affordance, FeatureLimits, LimitCell, affordance, capability_token, counterparty_headroom,

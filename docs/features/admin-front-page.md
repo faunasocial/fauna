@@ -47,9 +47,9 @@ Stamped 2026-10-01 at e129e78aa0.
 | linux | ✅ full | 0.1.5-dev+cbd813be standalone |
 | windows | ⚠ partial | 0.1.2-dev+c04c2468 standalone |
 | macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
-| ios | ✅ full | 0.1.6 docker |
+| ios | ✅ full | 0.1.7-dev+00c1f744 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.6 docker |
+| tui | ✅ full | 0.1.7-dev+00c1f744 standalone |
 | android-kids | — absent | |
 | ios-kids | — absent | |
 

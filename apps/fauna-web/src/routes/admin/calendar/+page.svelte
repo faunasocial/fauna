@@ -21,8 +21,16 @@
   // UX/IDs: tests/e2e-unified/ui.yaml `admin-calendar` page.
   import { identity } from '#lib/store';
   import { caldavPolicyMachine } from '#lib/rpc';
-  import { ensureWasm, parsePort } from '#lib/wasm';
-  import { onMount } from 'svelte';
+  import { caldavPortDraftPossibility, ensureWasm, parsePort, readPossibility } from '#lib/wasm';
+  import { afterGate, askPossibility, formGate, formRefusal } from '#lib/form-gate';
+  import {
+    dispatchPainted,
+    machineAnswer,
+    reasonAttr,
+    type Possibility,
+    type ReadWord,
+  } from '#lib/admin-read-gate';
+  import { readOnEntryAndReconnect } from '#lib/admin-reread';
   import MessageBanner from '#lib/components/MessageBanner.svelte';
   import { t } from '#lib/i18n/strings';
   import { IDS } from '#lib/generated/uiIds';
@@ -49,8 +57,42 @@
 
   const busy = $derived(snap?.status === 'Working' || snap?.status === 'Loading');
 
+  /** The toggle's answer — `CaldavPolicyMachine::toggle_possibility` over wasm
+   *  (`admin.md` § Errors & edge cases, *Controls wait for their read*): still
+   *  loading before the `get_mail_config` read, failed to load after a failed
+   *  one, still saving while a change is on its way. One answer paints the
+   *  toggle and refuses its press. */
+  let toggleAnswer = $state<Possibility | null>(null);
+  const toggleGate = $derived(formGate(toggleAnswer));
+  /** Whether a read ever resolved: until then the toggle's state is a guess
+   *  and is not painted as `on`/`off`. */
+  let readResolved = $state(false);
+
+  /** The read that builds the machine: failed once its connect or first
+   *  read threw, so the toggle says failed to load, never nothing. */
+  let machineBuild: ReadWord = 'pending';
+
+  function repaint(): void {
+    toggleAnswer = machineAnswer(
+      machine,
+      (m) => m.togglePossibility() as Possibility,
+      machineBuild,
+      readPossibility,
+    );
+  }
+  /** The port save's answer — the toggle's read gate first (a page still
+   *  loading says so first), then the shared
+   *  `CaldavPolicyMachine::port_draft_possibility` (a port in [1, 65535]),
+   *  unreadable until the policy read hydrated. It never blocks on a CalDAV
+   *  served behind the nest's domain: the save stays offered there. One answer
+   *  paints the save and refuses at its press. */
+  const portAnswer = $derived(
+    afterGate(toggleAnswer, () => caldavPortDraftPossibility(caldavPort)),
+  );
+
   function applySnapshot(): void {
     if (!machine) return;
+    repaint();
     snap = machine.snapshot() as unknown as CaldavPolicySnapshot;
     error = snap?.error ?? '';
     if (!snap) return;
@@ -58,24 +100,49 @@
     caldavPort = String(snap.caldav_port);
   }
 
-  onMount(async () => {
+  /** The read: build the machine (once) and hydrate it — painted from the
+   *  moment the wasm core is up: still loading while the machine is built
+   *  and hydrated, failed to load after, never disabled with nothing beside
+   *  it. */
+  async function readMachine(): Promise<void> {
     const id = $identity;
     if (!id?.secretHex) return;
     try {
       await ensureWasm();
-      machine = await caldavPolicyMachine(id.secretHex);
+      repaint();
+      if (!machine) machine = await caldavPolicyMachine(id.secretHex);
+      repaint();
       await machine.hydrate();
+      readResolved = true;
       applySnapshot();
     } catch (e) {
+      if (!machine) machineBuild = 'failed';
+      repaint();
       error = e instanceof Error ? e.message : String(e);
     }
+  }
+
+  // Read on every entry (a `goto()` of this route does not remount it) and,
+  // while the read is unanswered, again when the nest comes back.
+  readOnEntryAndReconnect(readMachine, async () => {
+    if (!readResolved) await readMachine();
   });
 
   async function handleToggleEnabled(e: Event): Promise<void> {
-    if (!machine) return;
-    const enabled = (e.currentTarget as HTMLInputElement).checked;
+    const input = e.currentTarget as HTMLInputElement;
+    const enabled = input.checked;
+    // The press asks the painted answer again: before the read, after a
+    // failed one or while a change is on its way it is refused with that
+    // reason on `error-message`, the checkbox put back, nothing sent.
+    const m = machine;
+    const refusal = formRefusal(m ? askPossibility(() => m.togglePossibility() as Possibility) : null);
+    if (refusal !== null || !m) {
+      input.checked = !enabled;
+      if (refusal) error = refusal;
+      return;
+    }
     try {
-      await machine.dispatch({ SetCaldavEnabled: { enabled } });
+      await dispatchPainted(() => m.dispatch({ SetCaldavEnabled: { enabled } }), repaint);
     } catch {
       /* the snapshot carries the error */
     }
@@ -83,17 +150,20 @@
   }
 
   async function handleSavePort(): Promise<void> {
-    if (!machine) return;
-    // Validate locally before dispatching — fauna_core::format::parse_port
-    // (a u16 in [1, 65535]), the same validator android/apple/windows already
-    // consume via UniFFI.
-    const port = parsePort(caldavPort);
-    if (port === undefined) {
-      error = t.admin.calendar_page.caldav_port_invalid;
+    repaint();
+    // The read gate, then the shared draft answer, refuses a malformed port on `error-message` with
+    // its reason, before any dispatch (the same predicate tui and the UniFFI
+    // apps read); once possible, `parse_port` names the port.
+    const refusal = formRefusal(portAnswer);
+    if (refusal !== null) {
+      if (refusal) error = refusal;
       return;
     }
+    const port = parsePort(caldavPort);
+    const m = machine;
+    if (port === undefined || !m) return;
     try {
-      await machine.dispatch({ SetCaldavPort: { port } });
+      await dispatchPainted(() => m.dispatch({ SetCaldavPort: { port } }), repaint);
     } catch {
       /* the snapshot carries the error */
     }
@@ -116,9 +186,11 @@
     <input
       type="checkbox"
       data-testid={IDS.ADMIN_CALENDAR_ENABLED_TOGGLE}
-      checked={caldavEnabled}
-      data-state={caldavEnabled ? 'on' : 'off'}
-      disabled={busy && !snap}
+      checked={readResolved && caldavEnabled}
+      data-state={readResolved ? (caldavEnabled ? 'on' : 'off') : undefined}
+      disabled={toggleGate.disabled}
+      title={toggleGate.reason}
+      data-reason={reasonAttr(toggleGate)}
       onchange={handleToggleEnabled}
     />
   </label>
@@ -138,12 +210,16 @@
         class="port-input"
         data-testid={IDS.ADMIN_CALENDAR_CALDAV_PORT_INPUT}
         bind:value={caldavPort}
-        disabled={busy && !snap}
+        disabled={toggleGate.disabled}
+        title={toggleGate.reason}
+        data-reason={reasonAttr(toggleGate)}
       />
       <button
         type="button"
         data-testid={IDS.ADMIN_CALENDAR_CALDAV_PORT_SAVE_BUTTON}
-        disabled={busy}
+        disabled={busy || formGate(portAnswer).disabled}
+        title={formGate(portAnswer).reason}
+        data-reason={reasonAttr(formGate(portAnswer))}
         onclick={handleSavePort}
       >
         {t.admin.calendar_page.caldav_port_save}

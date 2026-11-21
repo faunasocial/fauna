@@ -227,6 +227,32 @@ impl MailImportState {
         fauna_client_mail_settings::scope_next_actions(&self.date_from_input, &self.max_size_input)
     }
 
+    /// The machine's snapshot with the scope step's date draft folded in —
+    /// what it will hold once Next commits it, so the painted answer is the
+    /// one the machine then asks.
+    fn projected(&self) -> Option<MailImportSnapshot> {
+        self.snapshot
+            .as_ref()
+            .map(|s| s.with_scope_draft(&self.date_from_input))
+    }
+
+    /// `wizard-next-button`'s answer (`MailImportSnapshot::next_possibility`);
+    /// not possible before the machine's first snapshot (rule 5).
+    pub(crate) fn next_answer(&self) -> fauna_core::possibility::Possibility {
+        self.projected().map_or_else(
+            || fauna_core::possibility::Possibility::once_read(false),
+            |s| s.next_possibility(),
+        )
+    }
+
+    /// `mail-import-start-button`'s answer (`start_possibility`).
+    pub(crate) fn start_answer(&self) -> fauna_core::possibility::Possibility {
+        self.projected().map_or_else(
+            || fauna_core::possibility::Possibility::once_read(false),
+            |s| s.start_possibility(),
+        )
+    }
+
     /// Step 5's Resume: on a session adopted after a restart, commit the
     /// credential the Progress step painted first. The wire-action shape is
     /// `fauna_client_mail_settings::resume_actions`; this side's own job is
@@ -251,8 +277,26 @@ fn source_kind_label(kind: ImportSourceKind) -> String {
     crate::wizard::localized(&import_source_kind_label(kind))
 }
 
-fn source_kind_options() -> Vec<String> {
-    SOURCE_KINDS.into_iter().map(source_kind_label).collect()
+/// The source picker's options: every kind, except the Outlook source on a build
+/// whose shared answer is absent (no Microsoft sign-in transport — `ui/README.md`
+/// § Offer only what is possible, rule 2: what can never work here is not shown).
+fn source_kind_options(snapshot: Option<&MailImportSnapshot>) -> Vec<String> {
+    let outlook_shown = outlook_answer(snapshot).is_shown();
+    SOURCE_KINDS
+        .into_iter()
+        .filter(|kind| *kind != ImportSourceKind::Outlook || outlook_shown)
+        .map(source_kind_label)
+        .collect()
+}
+
+/// The Outlook source's shared answer
+/// (`MailImportSnapshot::outlook_source_possibility`); before the first
+/// snapshot it is not known yet (rule 5).
+fn outlook_answer(snapshot: Option<&MailImportSnapshot>) -> fauna_core::possibility::Possibility {
+    snapshot.map_or(
+        fauna_core::possibility::Possibility::once_read(false),
+        |s| s.outlook_source_possibility(),
+    )
 }
 
 /// Map a picker label back to its [`ImportSourceKind`]. An unrecognized label
@@ -339,7 +383,7 @@ fn source_step_elements(
             ids::MAIL_IMPORT_SOURCE_PICKER,
             source_kind_label(kind),
             SelectTarget::MailImportSourceKind,
-            source_kind_options(),
+            source_kind_options(e.snapshot.as_ref()),
         )
         .labelled(t::SOURCE_TITLE),
     ];
@@ -438,12 +482,22 @@ pub(super) fn microsoft_sign_in_in_flight(snapshot: &MailImportSnapshot) -> bool
 fn microsoft_sign_in_elements(snapshot: Option<&MailImportSnapshot>) -> Vec<Element> {
     let available = snapshot.is_some_and(|s| s.microsoft_signin_available);
     let in_flight = snapshot.is_some_and(microsoft_sign_in_in_flight);
-    let mut els = vec![Element::gesture_button(
-        ids::MAIL_IMPORT_SOURCE_OAUTH_BUTTON,
-        t::SOURCE_OAUTH_BUTTON,
-        available && !in_flight,
-        Gesture::Settings(Action::MailImportOAuthStart),
-    )];
+    let answer = outlook_answer(snapshot);
+    if !answer.is_shown() {
+        // A build that can never sign in with Microsoft offers no Outlook
+        // source at all (the picker leaves it out); an adopted session reaching
+        // here paints nothing rather than a dead button.
+        return Vec::new();
+    }
+    let mut els = vec![
+        Element::gesture_button(
+            ids::MAIL_IMPORT_SOURCE_OAUTH_BUTTON,
+            t::SOURCE_OAUTH_BUTTON,
+            available && !in_flight,
+            Gesture::Settings(Action::MailImportOAuthStart),
+        )
+        .possible(answer),
+    ];
     if !available {
         els.push(Element::chrome(t::MICROSOFT_UNAVAILABLE));
         return els;
@@ -576,12 +630,17 @@ fn scope_step_elements(e: &MailImportState, snapshot: Option<&MailImportSnapshot
         true,
         Gesture::Settings(Action::MailImportBack),
     ));
-    els.push(Element::gesture_button(
-        ids::WIZARD_NEXT_BUTTON,
-        t::NEXT,
-        true,
-        Gesture::Settings(Action::MailImportNext),
-    ));
+    // The machine's own answer over the draft (zero mailboxes, a bad date):
+    // the seam disables Next with its reason (`mailbox-migration.md`).
+    els.push(
+        Element::gesture_button(
+            ids::WIZARD_NEXT_BUTTON,
+            t::NEXT,
+            true,
+            Gesture::Settings(Action::MailImportNext),
+        )
+        .possible(e.next_answer()),
+    );
     els
 }
 
@@ -619,7 +678,11 @@ fn confirm_step_elements(snapshot: Option<&MailImportSnapshot>) -> Vec<Element> 
             t::START_BUTTON,
             true,
             Gesture::Settings(Action::MailImportStart),
-        ),
+        )
+        .possible(snapshot.map_or_else(
+            || fauna_core::possibility::Possibility::once_read(false),
+            MailImportSnapshot::start_possibility,
+        )),
     ]
 }
 
@@ -1314,6 +1377,42 @@ mod tests {
             Some(Gesture::Settings(Action::MailImportOAuthStart))
         ));
         assert!(!els.iter().any(|e| e.text == t::MICROSOFT_UNAVAILABLE));
+    }
+
+    /// A build with no Microsoft sign-in transport offers no Outlook source:
+    /// the shared answer is absent, so the picker leaves the option out and no
+    /// sign-in button is painted (`ui/README.md` § Offer only what is
+    /// possible, rule 2).
+    #[test]
+    fn a_build_that_can_never_sign_in_offers_no_outlook_source() {
+        let outlook = source_kind_label(ImportSourceKind::Outlook);
+        let options = |els: &[Element]| -> Vec<String> {
+            match &els
+                .iter()
+                .find(|e| e.id == ids::MAIL_IMPORT_SOURCE_PICKER)
+                .expect("picker painted")
+                .role
+            {
+                crate::element::Role::Select { options, .. } => options.clone(),
+                other => panic!("the picker is a select, got {other:?}"),
+            }
+        };
+        let snap = a_snapshot(ImportStep::Source);
+        let els = mail_import_elements(&state_with(snap.clone()));
+        assert!(
+            options(&els).contains(&outlook),
+            "a native build offers Outlook"
+        );
+
+        let mut snap = snap;
+        snap.microsoft_signin_transport = false;
+        snap.source_kind = ImportSourceKind::Outlook;
+        let els = mail_import_elements(&state_with(snap));
+        assert!(!options(&els).contains(&outlook));
+        assert!(
+            !els.iter()
+                .any(|e| e.id == ids::MAIL_IMPORT_SOURCE_OAUTH_BUTTON)
+        );
     }
 
     /// Once Microsoft answered, the code and its address paint on

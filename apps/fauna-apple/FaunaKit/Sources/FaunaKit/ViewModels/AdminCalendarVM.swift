@@ -25,7 +25,7 @@ import SwiftUI
 /// whenever the snapshot read itself succeeded with no `snapshot.error` of
 /// its own — the same class of bug pass 68 fixed for `LinkedNestsVM`).
 @MainActor @Observable
-public final class AdminCalendarVM: MachineBackedVM {
+public final class AdminCalendarVM: ReadGatedToggleVM {
     /// Latest snapshot; `nil` until `configure`. The view reads `caldavEnabled`
     /// + `status` from it.
     public internal(set) var snapshot: CaldavPolicySnapshot?
@@ -33,6 +33,9 @@ public final class AdminCalendarVM: MachineBackedVM {
     /// failures and the machine's `snapshot.error` route here.
     public var errorMessage: String?
     public internal(set) var isLoading = false
+    /// The machine could not be built (``ReadGatedToggleVM``): the toggle
+    /// says *failed to load* rather than waiting for a read that never comes.
+    var machineBuildFailed = false
 
     var machine: CaldavPolicyMachine?
     /// The `APIClient` the cached ``machine`` was built from. A machine is bound to that
@@ -56,10 +59,12 @@ public final class AdminCalendarVM: MachineBackedVM {
             do {
                 let m = try await api.caldavPolicyMachine()
                 machine = m
+                machineBuildFailed = false
                 configuredApi = api
                 snapshot = m.snapshot()
             } catch {
                 errorMessage = DisplayError.message(error)
+                machineBuildFailed = true
                 return
             }
         }
@@ -87,10 +92,20 @@ public final class AdminCalendarVM: MachineBackedVM {
         await dispatch(.setCaldavPort(port: port))
     }
 
+    /// `admin-calendar-caldav-port-save-button`'s answer over the typed port:
+    /// the page's read gate first, then the shared `port_draft_possibility` (a
+    /// port in `[1, 65535]`; admin.md § Errors & edge cases, *A form's submit
+    /// is live only for a draft the nest would accept*). The Save is painted
+    /// from it and the press asks it again; a nest whose CalDAV is served behind
+    /// its domain still saves (§ 8 Calendar).
+    public func portSaveAnswer(_ draft: String) -> Possibility {
+        toggleAnswer.and(caldavPortDraftPossibility(draft: draft))
+    }
+
     // MARK: - Plumbing
 
     /// Dispatch a user action; the machine runs it to completion (or records an
     /// error on the snapshot), then we re-read.
-    public func dispatch(_ action: CaldavPolicyAction) async { await dispatchToMachine(action) }
+    public func dispatch(_ action: CaldavPolicyAction) async { await dispatchGated(action) }
 }
 #endif // !FAUNA_KIDS

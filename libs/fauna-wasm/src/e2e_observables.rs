@@ -134,3 +134,29 @@ pub fn painted_text_area_observe_for_test(
 pub fn painted_text_area_for_test() -> String {
     PAINTED_TEXT_AREA.with_borrow(|area| area.json().to_string())
 }
+
+// The web leg of `fauna_e2e_agent::ROOT_SURFACE_KEY` — what each painted frame
+// showed at the tab's root (the wizard, a launch surface, the app, or nothing),
+// the in-place witness of `onboarding.md` § Wizard exit handling. The shared
+// `fauna_e2e_contract::RootSurfaceJournal` (tui's too), fed by the SPA once per
+// painted frame (`#lib/e2e-root-surface.ts`), since only the page knows what it
+// painted.
+#[cfg(feature = "test-helpers")]
+thread_local! {
+    static ROOT_SURFACE: RefCell<fauna_e2e_contract::RootSurfaceJournal> =
+        RefCell::new(fauna_e2e_contract::RootSurfaceJournal::default());
+}
+
+/// Record one painted frame: what the root showed, `None` for nothing.
+#[cfg(feature = "test-helpers")]
+#[wasm_bindgen(js_name = rootSurfaceObserveForTest)]
+pub fn root_surface_observe_for_test(showing: Option<String>) {
+    ROOT_SURFACE.with_borrow_mut(|journal| journal.observe(showing.as_deref()));
+}
+
+/// The `root_surface` state value, as JSON text.
+#[cfg(feature = "test-helpers")]
+#[wasm_bindgen(js_name = rootSurfaceForTest)]
+pub fn root_surface_for_test() -> String {
+    ROOT_SURFACE.with_borrow(|journal| journal.json().to_string())
+}

@@ -28,7 +28,15 @@ def wait_until(predicate, budget_s, *, interval=0.3, diagnose=None):
         if value:
             return value
         time.sleep(interval)
-    detail = f": {diagnose()}" if diagnose is not None else ""
+    detail = ""
+    if diagnose is not None:
+        # A diagnose callback describes the failure; it must never replace it.
+        # One that raises (a driver 404 reading an element, say) is reported
+        # beside the timeout, so the real failure stays readable (convention 6).
+        try:
+            detail = f": {diagnose()}"
+        except Exception as exc:  # noqa: BLE001 — see above.
+            detail = f": (diagnose callback raised {type(exc).__name__}: {exc})"
     raise AssertionError(f"wait_until: timed out after {budget_s}s{detail}")
 
 
@@ -1195,9 +1203,12 @@ def await_device_removal_ready(driver):
 # The post-claim serving-enablement step's runs.
 # ``fauna_e2e_agent::SERVING_ENABLEMENT_KEY`` owns the contract (recording:
 # ``fauna_client_mail_settings::serving_enablement::apply_serving_enablement`` —
-# one ``{actor_id, decided, completed}`` record per ``LoggedIn`` handoff,
-# ``completed`` set once every planned step has answered, the decide-nothing run
-# included, by a drop guard so every started run lands).
+# one ``{actor_id, decided, completed, outcome, refused}`` record per
+# ``LoggedIn`` handoff, ``completed`` set once every planned step succeeded or
+# was refused for good, the decide-nothing run included; a passing failure is
+# tried again, so a run still trying reads ``outcome: running``, and one whose
+# session ended first ``outcome: abandoned``, never completed —
+# ``onboarding.md`` § 3b *The step completes; it is not fired once*).
 SERVING_ENABLEMENT_KEY = "serving_enablement"
 
 
@@ -1263,9 +1274,11 @@ def await_serving_enablement_for(
     read just before the second drive; the wait then releases on the run past
     those, not on the first leg's.
 
-    ⚠ Proves the glue **ran to the end**, never that a step succeeded (every
-    step logs its own failure and the run still completes). Assert the
-    deployment state itself afterwards.
+    ⚠ ``completed`` means every planned step **succeeded or was refused for
+    good** — a passing failure (store not ready, connection lost) is retried,
+    never counted. The returned run's own ``outcome`` (``succeeded`` /
+    ``refused``, with ``refused`` listing the steps) is not checked here: assert
+    the deployment state itself afterwards, which a refusal leaves visibly off.
     """
     actor_id_hex = actor_id_hex.lower()
 
@@ -1306,7 +1319,9 @@ def await_serving_enablement_for(
             f"the serving-enablement run for {actor_id_hex[:12]}… never finished "
             f"after {what} (the key now: {reading()}). No record for the actor = "
             "the LoggedIn handoff never called the step (or the app relaunched "
-            "after it); a record with completed=false = a step is parked."
+            "after it); a record with completed=false = a step is still being "
+            "tried (outcome 'running' — read the app log's 'not done yet' "
+            "lines for why) or the session ended first (outcome 'abandoned')."
         ),
     )
     return run.get("decided")

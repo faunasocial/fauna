@@ -65,10 +65,14 @@ public struct SpamPreferencesView: View {
                     .disabled(vm.spamPrefsLoading)
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier(Ids.saveSpamPrefs)
-                    .automationActivate(Ids.saveSpamPrefs,
-                                        isEnabled: { !vm.spamPrefsLoading }) {
+                    .automationActivate(Ids.saveSpamPrefs) {
                         saveSpam()
                     }
+                    // Offered only while a threshold differs from what the nest
+                    // confirmed (settings.md); outside `automation*` so the
+                    // registry reads the same enabled-ness and reason.
+                    .faunaPossible(vm.saveSpamPrefsAnswer)
+                    FaunaPossibilityReason(vm.saveSpamPrefsAnswer)
                     if vm.spamPrefsSaved {
                         Text(L.common.saved)
                             .foregroundStyle(.green)

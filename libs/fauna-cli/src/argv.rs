@@ -326,9 +326,20 @@ pub fn help(tool: &Tool) -> String {
     out
 }
 
-/// The list of commands, each with its tool's title.
+/// The list of commands, each with its tool's title — the whole catalog.
 pub fn overview() -> String {
-    let width = CATALOG
+    overview_of(&CATALOG.iter().collect::<Vec<_>>())
+}
+
+/// The list of commands a shell holding `reach` lists, as `tools/list` would
+/// (`apps/cli.md` § A tool that cannot run, rule 2): the help follows the
+/// same reach as the MCP listing.
+pub fn overview_for(reach: &crate::reach::Reach, conversations_door: bool) -> String {
+    overview_of(&crate::reach::listed(reach, conversations_door))
+}
+
+fn overview_of(tools: &[&Tool]) -> String {
+    let width = tools
         .iter()
         .map(|t| command_words(t).join(" ").len())
         .max()
@@ -338,7 +349,7 @@ pub fn overview() -> String {
          `fauna-cli mcp` serves these same commands to an LLM host over MCP.\n\
          `fauna-cli <command> --help` describes one.\n\ncommands:\n",
     );
-    for tool in CATALOG {
+    for tool in tools {
         out.push_str(&format!(
             "  {:width$}  {}\n",
             command_words(tool).join(" "),

@@ -141,3 +141,6 @@ tempfile = { workspace = true }
 # The reach-hint test reads the slot through a real registry over the in-memory
 # store.
 fauna-client-accounts = { workspace = true, features = ["test-helpers"] }
+# The small paging rule (`PagingRule::with_thresholds`), so the pull-back's
+# paged-root test needs no 64 GB file.
+fauna-core = { path = "../fauna-core", default-features = false, features = ["test-util"] }

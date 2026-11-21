@@ -20,12 +20,14 @@
 import { registerE2eCommands, type E2eCommandHandler } from './e2e-commands';
 import { installPaintedErrorObserver } from './e2e-painted-errors';
 import { installPaintedTextAreaObserver } from './e2e-painted-text-area';
+import { installRootSurfaceObserver } from './e2e-root-surface';
 import { setReconnectBackoffForTest } from './rpc';
 import {
   alertSweepWakeForTest,
   connectionReportsForTest,
   paintedErrorsForTest,
   paintedTextAreaForTest,
+  rootSurfaceForTest,
 } from './wasm';
 
 const ACTIONS = ['alert_sweep_wake', 'reconnect_backoff'] as const;
@@ -51,12 +53,16 @@ export function registerLoudSurfaceCommands(): void {
   registerE2eCommands(ACTIONS, handler);
   installPaintedErrorObserver();
   installPaintedTextAreaObserver();
+  installRootSurfaceObserver();
   const w = window as unknown as {
     __fauna_connectionReports?: () => unknown;
     __fauna_paintedErrors?: () => unknown;
     __fauna_paintedTextArea?: () => unknown;
+    __fauna_rootSurface?: () => unknown;
   };
   w.__fauna_connectionReports = connectionReportsForTest;
   w.__fauna_paintedErrors = paintedErrorsForTest;
   w.__fauna_paintedTextArea = paintedTextAreaForTest;
+  // `fauna_e2e_agent::ROOT_SURFACE_KEY` (`#lib/e2e-root-surface`).
+  w.__fauna_rootSurface = rootSurfaceForTest;
 }

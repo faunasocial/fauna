@@ -1103,7 +1103,7 @@ internal partial class OnboardingViewModel : ObservableObject
     //
     // The shared OnboardingMachine drives handle_entry through
     // HandleCheckSnapshot { phase, outcome, message, continueEnabled,
-    // controlCheckboxVisible, controlCheckboxChecked }. The view binds to
+    // termsNoticeVisible }. The view binds to
     // the derived properties below; pressing Check kicks off StartHandleCheck
     // and the observer fires PropertyChanged on every phase boundary so the
     // message panel updates as DNS → nest probe → challenge complete.
@@ -1125,7 +1125,6 @@ internal partial class OnboardingViewModel : ObservableObject
     }
 
     public bool HandleCheckContinueEnabled => _m.HandleCheckSnapshot().@continueEnabled;
-    public bool HandleControlCheckboxVisible => _m.HandleCheckSnapshot().@controlCheckboxVisible;
 
     /// <summary>The by-continuing notice shows only while Continue signs in —
     /// the shared snapshot's rule, not re-derived here.</summary>
@@ -1143,12 +1142,6 @@ internal partial class OnboardingViewModel : ObservableObject
     /// </summary>
     internal uniffi.fauna_client_policy.NestRulesSummary? JoiningNestRules
         => _m.JoiningNestRules(RegionPlaneHost.UiLang);
-
-    public bool HandleControlCheckboxChecked
-    {
-        get => _m.HandleCheckSnapshot().@controlCheckboxChecked;
-        set => _m.SetControlCheckbox(value);
-    }
 
     /// <summary>
     /// Check button is disabled while the input is empty. The machine
@@ -2320,6 +2313,44 @@ internal partial class OnboardingViewModel : ObservableObject
     public bool ProvisioningBomVpsLineVisible
         => ProvisioningBomVpsLineText.Length > 0;
 
+    /// <summary>
+    /// The DNS plan (<c>provisioning-dns-plan</c>,
+    /// <c>onboarding-provisioning.md</c> § 6 <i>The DNS plan</i>): every record
+    /// the run will keep, add, change or remove in the domain's zone, shown
+    /// under the price recap before <i>Buy and set up</i>. The machine reads the
+    /// zone itself as it enters the page and resolves every sentence
+    /// (<c>OnboardingMachine::dns_plan</c>), so these getters only render —
+    /// no row is derived and no action decided here. Hidden on the manual
+    /// path and for a bought domain's fresh zone.
+    /// </summary>
+    public bool ProvisioningDnsPlanVisible => _m.DnsPlan().@visible;
+
+    /// <summary>The plan's heading — or, while the zone is read or after a
+    /// failed read, the line that says so (then there are no rows).</summary>
+    public string ProvisioningDnsPlanHeadingText
+    {
+        get
+        {
+            var plan = _m.DnsPlan();
+            return plan.@visible ? Strings.Resolve(plan.@heading) : "";
+        }
+    }
+
+    /// <summary>One row per record, its key <c>&lt;name&gt;|&lt;type&gt;</c> —
+    /// the view keys it <c>provisioning-dns-plan-row[&lt;key&gt;]</c>.</summary>
+    public IReadOnlyList<ProvisioningDnsPlanRowItem> ProvisioningDnsPlanRows
+    {
+        get
+        {
+            var plan = _m.DnsPlan();
+            if (!plan.@visible) return Array.Empty<ProvisioningDnsPlanRowItem>();
+            var list = new List<ProvisioningDnsPlanRowItem>();
+            foreach (var row in plan.@rows)
+                list.Add(new ProvisioningDnsPlanRowItem(row.@key, Strings.Resolve(row.@text)));
+            return list;
+        }
+    }
+
     /// <summary>Visible only when overall == Idle (top-region "Buy and
     /// set up" CTA per target doc §6).</summary>
     public bool ProvisioningStartButtonVisible
@@ -2453,8 +2484,8 @@ internal partial class OnboardingViewModel : ObservableObject
     }
 
     /// <summary>Build one row from a snapshot step. Per-step row visibility is
-    /// the shared canonical projection — <c>shows_substep</c>/<c>shows_error</c>/
-    /// <c>shows_attempt_suffix</c>, computed once in
+    /// the shared canonical projection — <c>shows_substep</c>/<c>shows_error</c>,
+    /// computed once in
     /// <c>fauna_provisioning::progress::StepSnapshot::recompute_display</c> and
     /// carried on the snapshot (linux/web/android read the same booleans). This
     /// renderer reads them rather than re-deriving the rule (priority #2/#4). The
@@ -2473,24 +2504,7 @@ internal partial class OnboardingViewModel : ObservableObject
                 : (step.@substep is SubstepKey k
                     ? ValueFormat.ProvisioningSubstepLabel(k, step.@lastError)
                     : "");
-            if (step.@showsAttemptSuffix)
-            {
-                // The resw template keeps en.yaml's NAMED placeholders
-                // ({attempt}/{max_attempts}) verbatim — the windows resw
-                // format is flat, it does not renumber them to {0}/{1}.
-                // A bare string.Format here throws FormatException (can't
-                // parse "attempt" as a positional index), which aborts this
-                // getter and — since it's read from a single
-                // OnPropertyChanged(string.Empty) batch alongside every
-                // other x:Bind on the page — silently stalls sibling
-                // bindings too. Strings.Format maps each positional arg
-                // onto the i-th distinct {name} token in textual order,
-                // same as every other multi-arg key in this file (e.g.
-                // Strings.Error's errors/http_error).
-                substepText += Strings.Format(
-                    "onboarding/provision/step_attempt_template",
-                    step.@attempt, step.@maxAttempts);
-            }
+            // No attempt count is ever shown (onboarding-provisioning.md § 6).
         }
 
         return new ProvisioningStepItemViewModel

@@ -20,7 +20,6 @@ import SwiftUI
 /// `admin-nav-back` is provided by the admin shell rail (macOS), not this page;
 /// iOS reaches it via a `NavigationLink` (system back).
 public struct AdminWebView: View {
-    @Environment(FaunaClient.self) private var client: FaunaClient?
     @State private var vm = AdminWebVM()
     /// Reload trigger — macOS passes the shell's `navGeneration`; iOS leaves it 0
     /// (the NavigationLink re-mounts the view, re-running the load).
@@ -79,10 +78,15 @@ public struct AdminWebView: View {
                     // Commits on pick (no draft); designate and clear are the same
                     // kind — `actor: None` is the clear.
                     .faunaGate("fauna.web.set_apex_actor")
+                    // Not live before the apex read lands, blocked after it
+                    // failed (`admin.md` § 7 Web).
+                    .faunaPossible(vm.apexPickerAnswer)
+                    FaunaPossibilityReason(vm.apexPickerAnswer)
 
                     // `automationText` also registers the id for the in-process
-                    // driver (`/element/text`), which has no a11y tree.
-                    automationText(Ids.adminWebApexInfo, L.admin.webPage.apexInfo(url: vm.apexUrl))
+                    // driver (`/element/text`), which has no a11y tree. The
+                    // shared `apex_info_text` line: never `https:///`.
+                    automationText(Ids.adminWebApexInfo, vm.apexInfo)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -94,10 +98,7 @@ public struct AdminWebView: View {
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .task(id: reloadToken) {
-            guard let client else { return }
-            await vm.configure(api: client.api)
-        }
+        .adminReadOnEntryAndReconnect(vm, reloadToken: reloadToken)
     }
 }
 #endif // !FAUNA_KIDS

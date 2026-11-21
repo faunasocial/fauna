@@ -28,6 +28,11 @@ pub enum MailHealthState {
     /// Mail is enabled but an approved MTA or MDA bridge has no live connection
     /// (or no mail bridge is approved at all).
     BridgeDown,
+    /// The latest diagnostics run could not open a connection to a known
+    /// receiver's port 25 (its outbound-TLS probe row is `fail`): mail cannot
+    /// leave this box at all — on a fresh cloud box, most often the provider's
+    /// default block on outbound SMTP.
+    OutboundBlocked,
     /// The latest blocklist self-check lists the outbound IP.
     Blocklisted,
     /// At least one `pending` outbound row has tripped the delayed-delivery
@@ -43,9 +48,10 @@ pub enum MailHealthState {
 
 impl MailHealthState {
     /// Worst first — the fold returns the first state whose condition holds.
-    pub const ORDER: [MailHealthState; 7] = [
+    pub const ORDER: [MailHealthState; 8] = [
         Self::Off,
         Self::BridgeDown,
+        Self::OutboundBlocked,
         Self::Blocklisted,
         Self::QueueStalled,
         Self::RecordsFailing,
@@ -58,6 +64,7 @@ impl MailHealthState {
         match self {
             Self::Off => "off",
             Self::BridgeDown => "bridge_down",
+            Self::OutboundBlocked => "outbound_blocked",
             Self::Blocklisted => "blocklisted",
             Self::QueueStalled => "queue_stalled",
             Self::RecordsFailing => "records_failing",
@@ -181,6 +188,18 @@ pub fn queue_row_stalled(
     attempt_count >= 1 && now - created_at >= i64::from(delay_warning_at_hours) * 3_600
 }
 
+/// The diagnostics row of the outbound-TLS posture probe to a known receiver's
+/// port 25 (`mail-deliverability.md` § Symptom diagnostics). The nest names its
+/// row with this constant; its `fail` — the connection never opened — is the
+/// `outbound_blocked` input, while its `warn` (no probe in this build, or a
+/// banner/STARTTLS/certificate problem after the connection opened) is not.
+pub const OUTBOUND_PROBE_CHECK: &str = "Outbound TLS to gmail.com";
+
+/// The outgoing-queue row's detail while outbound port 25 is unreachable.
+pub const OUTBOUND_BLOCKED_DETAIL: &str = "outbound port 25 is unreachable, so mail cannot \
+     leave this server; most cloud providers block it by default — ask yours to lift the \
+     block, then Check again";
+
 /// Does this diagnostics row name an SPF/DKIM/DMARC/rDNS record check (the
 /// checks `records_failing` reads; MTA-STS, TLSRPT, the outbound-TLS probe and
 /// the DNSSEC resolver path are not records failures)?
@@ -246,6 +265,7 @@ fn holds(state: MailHealthState, i: &HealthInputs) -> bool {
     match state {
         MailHealthState::Off => !i.mail_enabled,
         MailHealthState::BridgeDown => bridge_down(i),
+        MailHealthState::OutboundBlocked => outbound_blocked(i),
         MailHealthState::Blocklisted => listed_on(i).next().is_some(),
         MailHealthState::QueueStalled => i.stalled_outbound > 0,
         MailHealthState::RecordsFailing => failing_records(i).next().is_some(),
@@ -256,6 +276,13 @@ fn holds(state: MailHealthState, i: &HealthInputs) -> bool {
 
 fn bridge_down(i: &HealthInputs) -> bool {
     i.mail_bridges_approved == 0 || i.mail_bridges_connected < i.mail_bridges_approved
+}
+
+fn outbound_blocked(i: &HealthInputs) -> bool {
+    i.diagnostics
+        .iter()
+        .flatten()
+        .any(|d| d.name == OUTBOUND_PROBE_CHECK && d.status == "fail")
 }
 
 fn listed_on(i: &HealthInputs) -> impl Iterator<Item = &BlocklistEntry> {
@@ -321,9 +348,17 @@ pub fn evaluate(inputs: &HealthInputs) -> HealthReport {
         },
     };
 
-    let queue = match i.stalled_outbound {
-        0 => check(2, CheckState::Pass, "no delayed messages"),
-        n => check(2, CheckState::Fail, format!("{n} message(s) delayed")),
+    // A blocked port 25 is the queue's own cause, so its row says why mail
+    // is not leaving — with the delayed count when there is one.
+    let queue = match (outbound_blocked(i), i.stalled_outbound) {
+        (true, 0) => check(2, CheckState::Fail, OUTBOUND_BLOCKED_DETAIL),
+        (true, n) => check(
+            2,
+            CheckState::Fail,
+            format!("{OUTBOUND_BLOCKED_DETAIL}; {n} message(s) delayed"),
+        ),
+        (false, 0) => check(2, CheckState::Pass, "no delayed messages"),
+        (false, n) => check(2, CheckState::Fail, format!("{n} message(s) delayed")),
     };
 
     let failing: Vec<&str> = failing_records(i).map(|d| d.name.as_str()).collect();
@@ -679,6 +714,60 @@ mod tests {
             assert!(delist_url_for(s).is_some(), "{s}");
         }
         assert_eq!(delist_url_for("unknown.example"), None);
+    }
+
+    fn with_outbound_probe(status: &str) -> HealthInputs {
+        let mut i = healthy();
+        i.diagnostics.as_mut().unwrap().push(DiagnosticEntry {
+            name: OUTBOUND_PROBE_CHECK.into(),
+            status: status.into(),
+        });
+        i
+    }
+
+    #[test]
+    fn an_unreachable_outbound_port_is_outbound_blocked_and_says_so_on_the_queue_row() {
+        let mut i = with_outbound_probe("fail");
+        i.stalled_outbound = 2;
+        let r = evaluate(&i);
+        assert_eq!(r.state, MailHealthState::OutboundBlocked);
+        assert_eq!(r.state.as_str(), "outbound_blocked");
+        assert_eq!(r.checks[2].state, CheckState::Fail);
+        assert!(
+            r.checks[2].detail.starts_with(OUTBOUND_BLOCKED_DETAIL),
+            "{:?}",
+            r.checks[2].detail
+        );
+        assert!(
+            r.checks[2].detail.contains("2 message(s) delayed"),
+            "{:?}",
+            r.checks[2]
+        );
+    }
+
+    #[test]
+    fn outbound_blocked_ranks_below_bridge_down_and_above_blocklisted() {
+        let mut i = with_outbound_probe("fail");
+        i.blocklist.as_mut().unwrap()[0].listed = true;
+        assert_eq!(fold(&i), MailHealthState::OutboundBlocked);
+        i.mail_bridges_connected = 1;
+        assert_eq!(fold(&i), MailHealthState::BridgeDown);
+    }
+
+    #[test]
+    fn a_probe_that_could_not_complete_is_not_a_block() {
+        // The probe's warn (no probe in this build, a TLS or banner problem
+        // after the connection opened) never reads as a blocked port.
+        let r = evaluate(&with_outbound_probe("warn"));
+        assert_eq!(r.state, MailHealthState::Delivering);
+        assert_eq!(r.checks[2].state, CheckState::Pass);
+    }
+
+    #[test]
+    fn mail_off_is_off_even_with_a_blocked_port() {
+        let mut i = with_outbound_probe("fail");
+        i.mail_enabled = false;
+        assert_eq!(fold(&i), MailHealthState::Off);
     }
 
     #[test]

@@ -1,4 +1,6 @@
 using System.Collections.Generic;
+using FaunaApp.Core.Helpers;
+using uniffi.fauna_devices_machine;
 
 namespace FaunaApp.Core.ViewModels;
 
@@ -47,18 +49,36 @@ public sealed class DevicesRenameEditor
         Draft = "";
     }
 
+    /// <summary>Whether <c>device-rename-button</c> is painted on the card of
+    /// <paramref name="deviceId"/>: the shared <c>RenamePossibility</c> over the
+    /// row's unchanged name (<c>DeviceName</c>, or empty when the machine knows
+    /// none), which is Absent only for a row no rename can ever reach — one the
+    /// last roster read no longer lists, or the nest's WebDAV pseudo-device,
+    /// whose rename the nest always refuses (ui/devices.md § Device names;
+    /// ui/README.md § Offer only what is possible). No machine yet → painted, as
+    /// tui's <c>settings/devices.rs::rename_offered</c> does. The page asks it
+    /// again before the button's click opens the editor.</summary>
+    internal static bool RenameOffered(IDevicesMachine? machine, string deviceId)
+        => machine is null
+            || PossibilityPaint.Of(
+                machine.RenamePossibility(deviceId, machine.DeviceName(deviceId) ?? "")).Shown;
+
     /// <summary>The rename elements one <c>device-card</c> paints, in order:
-    /// always the indexed <c>device-rename-button</c>; with the editor open over
-    /// that card, then the input, confirm and cancel (the same sequence tui's
-    /// card pins). The page's XAML paints exactly these ids.</summary>
-    public static IReadOnlyList<string> CardElementIds(bool editorOpenOnThisCard)
-        => editorOpenOnThisCard
-            ? new[]
-            {
-                "device-rename-button",
-                "device-rename-input",
-                "device-rename-confirm-button",
-                "device-rename-cancel-button",
-            }
-            : new[] { "device-rename-button" };
+    /// the indexed <c>device-rename-button</c> when the card offers a rename
+    /// (<see cref="RenameOffered"/>); with the editor open over that card, then
+    /// the input, confirm and cancel (the same sequence tui's card pins). A card
+    /// that offers no rename paints none of them — its editor cannot open. The
+    /// page's XAML paints exactly these ids.</summary>
+    public static IReadOnlyList<string> CardElementIds(bool renameOffered, bool editorOpenOnThisCard)
+        => !renameOffered
+            ? System.Array.Empty<string>()
+            : editorOpenOnThisCard
+                ? new[]
+                {
+                    "device-rename-button",
+                    "device-rename-input",
+                    "device-rename-confirm-button",
+                    "device-rename-cancel-button",
+                }
+                : new[] { "device-rename-button" };
 }

@@ -49,10 +49,12 @@ import pytest
 
 from helpers import budgets
 from helpers.waiting import wait_until
+from helpers.use_case_walk import assert_use_case_walked
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.real_conversations]
 
 
+@pytest.mark.use_case("share-a-folder")
 @pytest.mark.feature("share-a-folder")
 def test_owner_shares_a_folder_with_a_person_on_another_nest(
     logged_in_app, nest_instance, test_user, cross_nest_foreign,
@@ -90,7 +92,10 @@ def test_owner_shares_a_folder_with_a_person_on_another_nest(
     # ── The journey, through the owner's UI ──────────────────────────────────
     b = app.backups
     name = f"xnshare-{secrets.token_hex(4)}"
-    b.navigate_folders()
+    # From the feed, by the settings tab and the Folders rail row (the use
+    # case's first two steps).
+    app.feed.navigate()
+    b.navigate_folders(by_click=True)
     b.create_folder_via_wizard(name)
     b.find_and_expand_folder(name)
     assert b.shared_member_count() == 0, "a freshly-created set starts unshared"
@@ -130,3 +135,4 @@ def test_owner_shares_a_folder_with_a_person_on_another_nest(
     assert not app.has_error(), (
         f"the cross-nest share surfaced an error banner: {app.error_text()!r}"
     )
+    assert_use_case_walked(logged_in_app.driver, "share-a-folder")

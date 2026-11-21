@@ -2,7 +2,9 @@ using System;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using FaunaApp.Core.Helpers;
 using FaunaApp.Core.Services;
+using FaunaApp.Helpers;
 using uniffi.fauna_client_capabilities;
 using uniffi.fauna_ffi;
 using S = FaunaApp.Core.Services.Strings;
@@ -106,14 +108,26 @@ public sealed partial class OfflineShareSection : UserControl
         OfflineShareCodeHintText.Text = errorLabel is { } el ? S.Resolve(el) : string.Empty;
         OfflineShareCodeHintText.Visibility = errorLabel is not null ? Visibility.Visible : Visibility.Collapsed;
 
-        // Every act gate below is the shared fauna_ffi::offline_share_gates
-        // door's own answer, never a C#-side re-derivation of can_begin /
-        // can_expect / shows_cancel; mirrors
-        // android's DevicesVM and apple's OfflineShareSectionView.
-        OfflineShareBeginButtonEl.Visibility = panel == OfflineSharePanel.Initiate ? Visibility.Visible : Visibility.Collapsed;
-        OfflineShareBeginButtonEl.IsEnabled = gates.canBegin;
-        OfflineReceiveExpectButtonEl.Visibility = panel == OfflineSharePanel.Receive ? Visibility.Visible : Visibility.Collapsed;
-        OfflineReceiveExpectButtonEl.IsEnabled = gates.canExpect;
+        // Every act gate below is the shared fauna_ffi door's own answer, never a
+        // C#-side re-derivation: begin / expect paint
+        // from offline_share_begin_possibility / offline_share_expect_possibility
+        // (absent off their own panel, blocked by a ceremony in flight or a code that
+        // is empty or refused), the cancel from offline_share_gates.
+        var begin = PossibilityPaint.Of(FaunaFfiMethods.OfflineShareBeginPossibility(view));
+        var expect = PossibilityPaint.Of(FaunaFfiMethods.OfflineShareExpectPossibility(view));
+        OfflineShareBeginButtonEl.ApplyPossibility(begin);
+        OfflineReceiveExpectButtonEl.ApplyPossibility(expect);
+        // The blocked reason within eyeshot: the status line already states an
+        // in-flight ceremony and the hint line a refused code, so only a reason
+        // neither line shows (the empty code's "enter their code") takes the hint.
+        var actReason = begin.Reason ?? expect.Reason;
+        if (actReason is not null
+            && OfflineShareCodeHintText.Visibility != Visibility.Visible
+            && actReason != OfflineShareStatusText.Text)
+        {
+            OfflineShareCodeHintText.Text = actReason;
+            OfflineShareCodeHintText.Visibility = Visibility.Visible;
+        }
         OfflineShareCancelButtonEl.Visibility = gates.showsCancel ? Visibility.Visible : Visibility.Collapsed;
     }
 
@@ -146,6 +160,28 @@ public sealed partial class OfflineShareSection : UserControl
         Render();
     }
 
+    /// <summary>The act's own shared answer, asked again by its handler (the button
+    /// painted from the same one): <paramref name="act"/> is the panel whose act it is.
+    /// A read that throws is no answer — the act does not run.</summary>
+    private bool ActAnswer(OfflineSharePanel act)
+    {
+        if (_crypto is null) return false;
+        try
+        {
+            var view = FaunaFfiMethods.OfflineShareView(
+                App.CurrentOfflineSharePanel, _crypto.SecretBytes, App.CurrentOfflineShareSeat,
+                OfflineSharePeerCodeInputBox.Text, App.CurrentOfflineShareStatus);
+            var answer = act == OfflineSharePanel.Initiate
+                ? FaunaFfiMethods.OfflineShareBeginPossibility(view)
+                : FaunaFfiMethods.OfflineShareExpectPossibility(view);
+            return PossibilityPaint.Of(answer).IsPossible;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private void OfflineSharePeerCodeInput_Changed(object sender, TextChangedEventArgs e) => Render();
 
     /// <summary><c>offline-share-begin-button</c> — the initiator's dial + walk
@@ -161,6 +197,7 @@ public sealed partial class OfflineShareSection : UserControl
     private async void OfflineShareBegin_Click(object sender, RoutedEventArgs e)
     {
         if (_rpc is null || App.CurrentOfflineShareSeat is not { } seat) return;
+        if (!ActAnswer(OfflineSharePanel.Initiate)) return;
         var peerCode = OfflineSharePeerCodeInputBox.Text;
         CeremonyStatus status;
         try
@@ -191,6 +228,7 @@ public sealed partial class OfflineShareSection : UserControl
     private void OfflineReceiveExpect_Click(object sender, RoutedEventArgs e)
     {
         if (_crypto is null || App.CurrentOfflineShareSeat is not { } seat) return;
+        if (!ActAnswer(OfflineSharePanel.Receive)) return;
         var parsed = FaunaFfiMethods.OfflineShareParsePeerCode(OfflineSharePeerCodeInputBox.Text, _crypto.SecretBytes);
         if (parsed.actor.Length == 0) return;
         try

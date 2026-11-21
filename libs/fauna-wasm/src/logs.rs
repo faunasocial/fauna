@@ -257,6 +257,19 @@ pub fn log_rows(entries: JsValue, tz_offset_secs: i32) -> Result<JsValue, JsValu
     crate::rpc::to_js(&rows)
 }
 
+/// Whether `log-copy-button` / `log-clear-button` can do anything now, in
+/// `Possibility`'s serde form for `#lib/possibility`'s `paintPossibility`
+/// (`fauna_log::format::ring_action_possibility`; the UniFFI
+/// `log_ring_action_possibility` twin): blocked with the page's own empty line
+/// (`logs.empty` / `admin.logs_page.empty`) when the filter shows no entry.
+#[wasm_bindgen(js_name = logRingActionPossibility)]
+pub fn log_ring_action_possibility(shown: u32, empty_reason_key: &str) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_log::format::ring_action_possibility(
+        shown as usize,
+        empty_reason_key,
+    ))
+}
+
 // ── Browser-console layer ───────────────────────────────────────────────────
 
 /// A `tracing` layer that mirrors each event to the browser console, routed by

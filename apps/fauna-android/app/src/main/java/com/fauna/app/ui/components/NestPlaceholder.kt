@@ -5,7 +5,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Modifier
@@ -17,6 +16,7 @@ import com.fauna.app.core.NestRulesHost
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.ffi.FfiNestPlaceholder
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.TextButton
 
 /**
  * The nest placeholder painted **in place of** an item a rule of the nest it was

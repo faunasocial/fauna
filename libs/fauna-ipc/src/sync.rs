@@ -1681,6 +1681,16 @@ pub enum CustodianReseedSetOutcome {
         code: String,
         detail: String,
     },
+    /// A lived-in segment set the driver handed to the recovery leg, which
+    /// copied in `records` beside what the target held (`SetOutcome::Recovered`;
+    /// `backup-destinations.md` § Third destination kind → *A lived-in segment
+    /// set is completed by record in the same gesture*, rule (1)). An older app
+    /// reads it as [`Self::Unknown`].
+    Recovered {
+        records: u64,
+        unplaceable: u64,
+        duties_unfinished: Option<String>,
+    },
     /// An outcome a newer agent names that this build does not, carried whole
     /// (`transport.md` § Rule 3 in full). It reads as [`Self::Refused`] —
     /// nothing is claimed for the set. Never written by this build.
@@ -1867,8 +1877,24 @@ pub struct Event {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EventKind {
     SyncProgress(SyncProgressInfo),
-    FileStatusChanged { path: String, status: FileStatus },
+    /// A file's presence state moved — the overlay/badge feed. Pushed for
+    /// every settle, whichever way the bytes went: an upload, a download, an
+    /// on-demand hydration, a dehydration. Never a notification trigger on
+    /// its own (see [`Self::UploadComplete`]).
+    FileStatusChanged {
+        path: String,
+        status: FileStatus,
+    },
     ConnectionStateChanged(ConnectionState),
+    /// A file finished UPLOADING from this device — the one event the desktop
+    /// apps' "{filename} uploaded" notice keys on (`file-sync.md` § Files
+    /// Appear Automatically; `fauna_ipc::events::uploaded_filename`). Pushed
+    /// beside the upload's `FileStatusChanged{Synced}`, never for a download
+    /// or hydration. Added additively: an older app skips a kind it does not
+    /// name (`sync_pipe_client`'s reader, `transport.md` § Rule 3).
+    UploadComplete {
+        path: String,
+    },
 }
 
 // ── Data types ──

@@ -459,10 +459,10 @@ def onboard_and_enable(
     # The post-claim serving-enablement step runs on the session's own
     # connection (on windows the app's `_rpcClient`), and step 2's re-assert
     # replaces that connection on an app that rebuilds its nest clients for any
-    # session patch naming a `node_url` — so a step still in flight there loses
-    # its `set_caldav_enabled(true)`, the run still reads completed, and the
-    # derived default reads False. Let the run finish first; step 3's own wait
-    # then releases at once.
+    # session patch naming a `node_url` — so a step still in flight there may
+    # lose its connection mid-call (the step retries it, but only once the
+    # rebuilt session's run is the one being watched). Let the run finish
+    # first; step 3's own wait then releases at once.
     await_serving_enablement_for(app.driver, _admin_keys(admin_secret_hex)[0].hex())
 
     # ── 2. (Re-)assert the admin session so the admin shell is built (the same

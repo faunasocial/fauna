@@ -67,6 +67,7 @@ use fauna_client_mail_settings::{
     AliasKind, AliasView, ImportAliasStatusView, MailAliasesAction, MailAliasesMachine,
     MailAliasesSnapshot,
 };
+use fauna_core::possibility::Possibility;
 
 use crate::async_helper::spawn_with_snapshot;
 use crate::i18n::strings::mail_aliases as S;
@@ -178,6 +179,13 @@ struct AliasesCtx {
 /// the settings shell calls on the navigation edge (mirrors
 /// `build_mail_lists_page`).
 pub fn build_mail_aliases_page() -> (adw::PreferencesPage, Rc<dyn Fn()>) {
+    let (page, widgets) = build_page_parts();
+    let refresh = wire_machine(widgets);
+    (page, refresh)
+}
+
+/// The page and its widget handles, unwired (the tests paint them directly).
+fn build_page_parts() -> (adw::PreferencesPage, AliasesWidgets) {
     let page = adw::PreferencesPage::builder()
         .title(S::TITLE)
         .icon_name("mail-message-new-symbolic")
@@ -446,9 +454,10 @@ pub fn build_mail_aliases_page() -> (adw::PreferencesPage, Rc<dyn Fn()>) {
         import_cancel,
         import_result,
     };
-    let refresh = wire_machine(widgets);
+    // Not known before the first snapshot (rule 5): every create path waits.
+    paint_create(&widgets, &Possibility::once_read(false), false);
 
-    (page, refresh)
+    (page, widgets)
 }
 
 /// Connect the page to the shared `MailAliasesMachine`, hydrate on mount, and
@@ -458,9 +467,18 @@ pub fn build_mail_aliases_page() -> (adw::PreferencesPage, Rc<dyn Fn()>) {
 fn wire_machine(widgets: AliasesWidgets) -> Rc<dyn Fn()> {
     let client = match crate::settings::get_client() {
         Some(c) => c,
-        // No client (unit test / pre-auth): the page stays at its placeholder,
-        // so becoming visible later has nothing to refresh.
-        None => return Rc::new(|| {}),
+        // No client (unit test / pre-auth): no machine, so every create path
+        // — the page's only machine gestures before a list exists — is
+        // blocked with the unbuilt reason (rule 7: never silent). Becoming
+        // visible later has nothing to refresh.
+        None => {
+            paint_create(
+                &widgets,
+                &fauna_client_mail_settings::mail_usable_unbuilt(),
+                false,
+            );
+            return Rc::new(|| {});
+        }
     };
     let machine = Arc::new(crate::mail_glue::build_mail_aliases_machine(&client));
 
@@ -556,7 +574,7 @@ fn wire_machine(widgets: AliasesWidgets) -> Rc<dyn Fn()> {
     // The settings shell's on-visible hook (`views/settings_shell.rs`), which
     // eight sibling pages already use and which tui applies to this very page.
     // Without it this page DEADLOCKED: `render` gates add, generate AND import
-    // on `snap.default_domain.is_some()`, and `default_domain`'s only writer is
+    // on the create answer (`snap.default_domain`), and `default_domain`'s only writer is
     // the shared machine's `refresh` — reached from the list round trip those
     // very buttons perform. So a client that enabled mail after login (the page
     // having hydrated once here at settings-shell build time) had every control
@@ -588,6 +606,32 @@ fn apply_sheet_kind(w: &AliasesWidgets, kind: SheetKind, editing: bool) {
     w.uses_input.set_visible(minting);
 }
 
+/// Paint every create path — add, import, the disposable mint, and the two
+/// sheets' submits — from the shared `MailAliasesSnapshot::create_possibility`
+/// answer (`ui/README.md` § Offer only what is possible, rule 6), through the
+/// seam: blocked → inert with the reason on the tooltip (the page's own line
+/// also says why); possible → live. The add sheet's submit in Edit mode needs
+/// no domain (the row already has one), so it is possible there.
+fn paint_create(w: &AliasesWidgets, create: &Possibility, editing: bool) {
+    for button in [
+        &w.add_button,
+        &w.import_button,
+        &w.generate_button,
+        &w.import_submit,
+    ] {
+        crate::possible::paint(button, None, create.clone());
+    }
+    crate::possible::paint(
+        &w.submit_button,
+        None,
+        if editing {
+            Possibility::Possible
+        } else {
+            create.clone()
+        },
+    );
+}
+
 /// Open the add/edit sheet in `Add` mode, resetting it to an empty exact alias.
 fn open_add_sheet(ctx: &Rc<AliasesCtx>) {
     ctx.form_mode.set(FormMode::Add);
@@ -609,6 +653,7 @@ fn open_add_sheet(ctx: &Rc<AliasesCtx>) {
     w.spam_threshold_input.set_text("");
     w.rate_per_hour_input.set_text("");
     w.submit_button.set_label(S::SUBMIT);
+    paint_create(w, &ctx.machine.snapshot().create_possibility(), false);
     super::render_error_label(&w.error_label, None);
     w.sheet_group.set_visible(true);
 }
@@ -642,6 +687,7 @@ fn open_edit_sheet(ctx: &Rc<AliasesCtx>, view: &AliasView) {
             .unwrap_or_default(),
     );
     w.submit_button.set_label(S::SUBMIT);
+    paint_create(w, &ctx.machine.snapshot().create_possibility(), true);
     super::render_error_label(&w.error_label, None);
     w.sheet_group.set_visible(true);
 }
@@ -789,15 +835,13 @@ fn render(ctx: &Rc<AliasesCtx>, snap: &MailAliasesSnapshot) {
 
     super::render_error_label(&w.error_label, snap.error.as_deref());
 
-    // Create/generate require a canonical exact alias (default_domain); without
-    // one the nest would reject, so disable the add controls + say why.
-    let has_domain = snap.default_domain.is_some();
-    w.add_button.set_sensitive(has_domain);
-    w.generate_button.set_sensitive(has_domain);
-    // Import creates exact aliases too, so it needs mail enabled just like
-    // add/generate (same gate as windows' `ImportButton.IsEnabled = CanManage`).
-    w.import_button.set_sensitive(has_domain);
-    if !has_domain && snap.error.is_none() {
+    // Every create path (add, import — which creates exact aliases too — and
+    // the disposable mint) needs a domain to create on: all paint from the
+    // shared `MailAliasesSnapshot::create_possibility` answer, never an
+    // app-side derivation, and the page says why while it is blocked.
+    let create = snap.create_possibility();
+    paint_create(w, &create, ctx.form_mode.get() == FormMode::Edit);
+    if !create.is_possible() && snap.error.is_none() {
         super::render_error_label(&w.error_label, Some(S::NO_DEFAULT_DOMAIN));
     }
 
@@ -1235,6 +1279,80 @@ mod tests {
     use super::*;
 
     use crate::testid::widget_names;
+
+    /// Every create path paints from the shared create answer: before the
+    /// first snapshot it waits (rule 5); without a canonical alias it is
+    /// blocked with the domain reason; with one it is live; with no machine
+    /// it is blocked with the unbuilt reason. The edit sheet's submit needs no
+    /// domain. Red-verify by making `paint_create` a no-op.
+    #[test]
+    fn every_create_path_paints_from_the_shared_answer() {
+        crate::testid::run_on_gtk_thread(|| {
+            let _ = adw::init();
+            // Online, so the offline gate (which only ever narrows) leaves
+            // the page's own painting to be read.
+            crate::offline_gate::reset_for_test("connected");
+            let (_page, w) = build_page_parts();
+            let creates = [
+                &w.add_button,
+                &w.import_button,
+                &w.generate_button,
+                &w.import_submit,
+                &w.submit_button,
+            ];
+            let reason =
+                |a: &Possibility| a.reason().map(|r| r.resolve(crate::i18n::strings::lookup));
+
+            // Before the first snapshot: waiting, with its reason.
+            let waiting = Possibility::once_read(false);
+            for b in creates {
+                // `get_visible`: the widget's own property — the sheets'
+                // submits sit inside a sheet hidden until it opens.
+                assert!(
+                    b.get_visible() && !b.is_sensitive(),
+                    "{}: shown {} sensitive {}",
+                    b.widget_name(),
+                    b.get_visible(),
+                    b.is_sensitive()
+                );
+                assert_eq!(b.tooltip_text().map(|t| t.to_string()), reason(&waiting));
+            }
+
+            // Blocked: no canonical alias, so no domain (the shared answer's
+            // own reason, `MailAliasesSnapshot::create_possibility`).
+            let blocked = Possibility::blocked(fauna_core::localized::LocalizedText::key(
+                "mail_aliases.no_default_domain",
+            ));
+            paint_create(&w, &blocked, false);
+            for b in creates {
+                assert!(!b.is_sensitive());
+                assert_eq!(
+                    b.tooltip_text().as_deref(),
+                    Some(S::NO_DEFAULT_DOMAIN),
+                    "the domain reason rides the control"
+                );
+            }
+            // Editing an existing alias needs no domain.
+            paint_create(&w, &blocked, true);
+            assert!(w.submit_button.is_sensitive());
+            assert!(!w.add_button.is_sensitive());
+
+            // Possible once the canonical alias gives a domain.
+            paint_create(&w, &Possibility::Possible, false);
+            for b in creates {
+                assert!(b.is_sensitive());
+            }
+
+            // No machine: blocked with the unbuilt reason (rule 7).
+            let unbuilt = fauna_client_mail_settings::mail_usable_unbuilt();
+            paint_create(&w, &unbuilt, false);
+            for b in creates {
+                assert!(!b.is_sensitive());
+                assert_eq!(b.tooltip_text().map(|t| t.to_string()), reason(&unbuilt));
+            }
+            crate::offline_gate::reset_for_test("disconnected");
+        });
+    }
 
     /// The Aliases page exposes every static ui.yaml ID for the `mail-aliases`
     /// page + the add-sheet fields. The indexed `mail-aliases-list-item*` rows

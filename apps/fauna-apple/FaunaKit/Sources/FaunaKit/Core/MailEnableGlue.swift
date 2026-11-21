@@ -20,9 +20,13 @@ import Foundation
 /// itself because the wizard hands off pre-identity (see `runPostAuthGlue`'s
 /// doc for why).
 ///
-/// Shared FaunaKit (macOS + iOS). Best-effort: any failure is recoverable from
-/// the mail-settings/admin pages, so it logs and no-ops rather than surfacing
-/// an error.
+/// Shared FaunaKit (macOS + iOS). A step the nest refuses for good ends that
+/// step and is SAID on the page the person is on, not only logged
+/// (`onboarding.md` § 3b *The step completes; it is not fired once*): the
+/// shared step's refusal text lands on `session.servingEnablementRefusal`,
+/// which `ServingEnablementRefusalBanner` paints as the `error-message` at each
+/// app's authed root. Every other failure here is recoverable from the
+/// mail-settings/admin pages, so it logs.
 public enum MailEnableGlue {
 #if !FAUNA_KIDS
     /// The post-claim serving enablement (`onboarding.md` § 3b *Mechanism*) —
@@ -46,13 +50,26 @@ public enum MailEnableGlue {
         session.pendingCarddavEnable = false
         session.pendingWebdavEnable = false
         do {
-            try await api.applyPostClaimServingEnablement(
+            let refused = try await api.applyPostClaimServingEnablement(
                 email: enableEmail, caldav: enableCaldav, carddav: enableCarddav, webdav: enableWebdav)
+            applyServingEnablementRefusal(refused, session: session)
         } catch {
             logMessage(
                 level: .warn, target: "fauna.mailglue",
                 message: "post-claim serving enablement failed (recoverable via mail-settings/admin pages): \(error)")
         }
+    }
+
+    /// Put a refusal-for-good the shared step returned on the page the person
+    /// is on — `session.servingEnablementRefusal`, painted by
+    /// `ServingEnablementRefusalBanner` (tui's `ServingEnablementRefused`, the
+    /// lead). `nil` (every step succeeded) leaves whatever is shown alone.
+    @MainActor
+    static func applyServingEnablementRefusal(_ refused: String?, session: SessionState) {
+        guard let refused, !refused.isEmpty else { return }
+        logMessage(level: .warn, target: "fauna.mailglue",
+                   message: "post-claim serving enablement refused for good: \(refused)")
+        session.servingEnablementRefusal = refused
     }
 #endif
 
@@ -65,7 +82,7 @@ public enum MailEnableGlue {
     /// No-op on skip, and on a returning-user relaunch (the latch is unset —
     /// the wizard never reached this step).
     ///
-    /// **Best-effort and log-only, matching `applyPostClaimServingEnablement`**: unlike
+    /// **Best-effort and log-only**: unlike
     /// the deployment-seed custody below, a mint failure has an always-available
     /// recovery path (the same trust facet, any time, from the Nests page), so it
     /// must not paint an error over an otherwise-completed onboarding.
@@ -183,12 +200,40 @@ public enum MailEnableGlue {
     /// it raises the banner too.
     @MainActor
     public static func selfHealDeploymentSeedCustody(api: APIClient, session: SessionState) async {
-        let warning = await api.selfHealDeploymentSeedCustody()
-        if let warning {
-            logMessage(level: .warn, target: "fauna.recoveryglue",
-                       message: "deployment-seed custody unconfirmed: \(warning.key)")
+        await api.selfHealDeploymentSeedCustody(sink: CustodyWarningSink(session: session))
+    }
+
+    /// Show a custody warning on the banner (the sink's `onWarning`, on the main actor).
+    @MainActor
+    static func applyCustodyWarning(_ warning: LocalizedText, session: SessionState) {
+        logMessage(level: .warn, target: "fauna.recoveryglue",
+                   message: "deployment-seed custody unconfirmed: \(warning.key)")
+        session.recoveryCustodyWarning = renderLocalizedText(warning)
+    }
+
+    /// The cleared mark: take the banner down **only** while it still shows a custody
+    /// warning (the shared `custody_leg_warning` texts, rendered by this app's
+    /// resolver) — never an unrelated warning shown since. The twin of android's
+    /// `AppMessages.clearWarningIf`.
+    @MainActor
+    static func applyCustodyCleared(session: SessionState) {
+        guard let shown = session.recoveryCustodyWarning else { return }
+        if deploymentSeedCustodyWarnings().map(renderLocalizedText).contains(shown) {
+            session.recoveryCustodyWarning = nil
         }
-        session.recoveryCustodyWarning = warning.map(renderLocalizedText)
+    }
+
+    /// The custody leg's callback sink. Called on a runtime thread, so each mark hops
+    /// to the main actor before touching `SessionState`.
+    final class CustodyWarningSink: FfiCustodyLegSink, @unchecked Sendable {
+        private let session: SessionState
+        init(session: SessionState) { self.session = session }
+        func onWarning(warning: LocalizedText) {
+            Task { @MainActor [session] in MailEnableGlue.applyCustodyWarning(warning, session: session) }
+        }
+        func onCleared() {
+            Task { @MainActor [session] in MailEnableGlue.applyCustodyCleared(session: session) }
+        }
     }
 
     /// The full post-auth glue sequence, in the fixed order both shells' launch

@@ -44,6 +44,7 @@ from drivers import create_driver
 from helpers import budgets
 from helpers.app_surface import require_surface
 from helpers.connection import wait_until_online
+from helpers.mail_client_ui import turn_mail_on
 from helpers.mail_dedicated_nest import (
     alias_admin_to_address,
     dedicated_node_url,
@@ -237,6 +238,7 @@ def _walk_to_a_started_import(app, handle, request, source: FakeImapSource) -> M
 @pytest.mark.feature("mailbox-import")
 def test_the_import_wizard_is_reachable_and_opens_on_the_source_step(logged_in_app):
     """The page exists, is routable from Settings, and renders step 1."""
+    turn_mail_on(logged_in_app)
     wizard = MailImportActions(logged_in_app.driver)
     wizard.navigate()
     assert wizard.is_page_visible(), (
@@ -266,6 +268,7 @@ def test_selecting_a_source_kind_seeds_the_host_and_port_drafts(logged_in_app):
     next pick, Generic, keeps it. iCloud first, so a seed that never happened
     leaves iCloud's host painted — never a value that passes by accident.
     """
+    turn_mail_on(logged_in_app)
     wizard = MailImportActions(logged_in_app.driver)
     wizard.navigate()
     assert wizard.is_page_visible()
@@ -304,6 +307,7 @@ def test_a_status_size_source_is_estimated_without_reading_its_mailboxes(
     branch: a source without STATUS=SIZE, sized by enumeration.
     """
     with FakeImapSource(_mailboxes(), cert=session_cert(), status_size=True) as source:
+        turn_mail_on(logged_in_app)
         wizard = MailImportActions(logged_in_app.driver)
         wizard.navigate()
         assert wizard.is_page_visible()
@@ -352,6 +356,7 @@ def test_a_rejected_password_is_surfaced_and_the_user_retries_in_place(
     credential is the one field § Credential handling says lives only in client
     memory, so it is also the only one that *should* have to be retyped.
     """
+    turn_mail_on(logged_in_app)
     wizard = MailImportActions(logged_in_app.driver)
     wizard.navigate()
     assert wizard.is_page_visible()
@@ -403,6 +408,7 @@ def test_a_failed_connection_is_explained_in_plain_words_never_the_servers_reply
     this test proves tui paints, and outcome 16's test witnesses tui's picker
     writing the machine's kind — so this arm is the outcome's honest app proof.
     """
+    turn_mail_on(logged_in_app)
     wizard = MailImportActions(logged_in_app.driver)
     wizard.navigate()
     assert wizard.is_page_visible()
@@ -469,6 +475,7 @@ def test_discard_and_duplicate_mailboxes_start_unticked_and_are_never_hidden(
         for name, (role, _ticked) in offered.items()
     ]
     with FakeImapSource(mailboxes, cert=session_cert()) as source:
+        turn_mail_on(logged_in_app)
         wizard = MailImportActions(logged_in_app.driver)
         wizard.navigate()
         assert wizard.is_page_visible()
@@ -794,11 +801,13 @@ def test_a_full_mailbox_pauses_and_resume_after_the_admin_makes_room_brings_the_
             diagnose=lambda: f"the paused import's Progress step did not come back; "
             f"error {wizard.error_text()!r}",
         )
-        # Leaving the page drops the apple apps' and windows' in-memory import
-        # (the page owns it: windows rebuilds its machine per panel), so the page
-        # adopts the paused session cold and asks for the password again
-        # (§ Resume protocol step 2); the other apps keep it.
-        if app.driver.is_macos() or app.driver.is_ios() or app.driver.is_windows():
+        # Leaving the page drops the apple apps' in-memory import (the page owns
+        # it), so the page adopts the paused session cold and asks for the
+        # password again (§ Resume protocol step 2); the other apps keep it —
+        # windows too, whose machine is held for the app session
+        # (`MailImportMachineHolder`), so its return is the same machine's
+        # hydrate, which keeps the credential.
+        if app.driver.is_macos() or app.driver.is_ios():
             assert wait_until(
                 lambda: wizard.offers("mail-import-source-password") or None,
                 budgets.UI_SETTLE_S,
@@ -828,6 +837,7 @@ def test_the_app_never_offers_an_unencrypted_connection(logged_in_app):
     """Outcome 19 (§ The two TLS modes): the connection-security picker offers
     implicit TLS and STARTTLS and nothing else — read from every option the app
     paints, so a plaintext option added anywhere in the list is caught."""
+    turn_mail_on(logged_in_app)
     wizard = MailImportActions(logged_in_app.driver)
     wizard.navigate()
     assert wizard.is_page_visible()
@@ -852,6 +862,7 @@ def test_an_unverifiable_certificate_stops_before_the_password_is_sent(logged_in
     # No `cert=`: the instance mints its own chain, which no app was launched
     # trusting.
     with FakeImapSource(_mailboxes(), password=SOURCE_PASSWORD) as source:
+        turn_mail_on(logged_in_app)
         wizard = MailImportActions(logged_in_app.driver)
         wizard.navigate()
         assert wizard.is_page_visible()
@@ -880,6 +891,7 @@ def test_a_refused_starttls_stops_before_the_password_is_sent(logged_in_app):
         tls_mode="starttls",
         refuse_starttls=True,
     ) as source:
+        turn_mail_on(logged_in_app)
         wizard = MailImportActions(logged_in_app.driver)
         wizard.navigate()
         assert wizard.is_page_visible()
@@ -2210,6 +2222,7 @@ def test_a_provider_that_needs_an_app_password_says_so_and_where_to_make_one(
     sign-in on — and names the provider's page where it is made. Generic IMAP
     takes the server's own password and shows no app-password field."""
     _tui_first(logged_in_app, also_apple=True, also_windows=True)
+    turn_mail_on(logged_in_app)
     wizard = MailImportActions(logged_in_app.driver)
     wizard.navigate()
     assert wizard.is_page_visible()

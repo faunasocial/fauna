@@ -56,9 +56,11 @@ class ModerationActions:
         These journeys drive `flow` through TWO real GUI engines at once
         (alice's + bob's), so both need a standalone moderation queue AND a
         `second_real_faunamls_app`-capable fixture: linux (the original leg),
-        tui (joined 2026-07-29 with its own moderation queue), macos, ios and
+        tui (joined 2026-07-29 with its own moderation queue), macos, ios,
         windows (joined 2026-11-11 — its fixture seat and its queue's
-        local-detection row were already built).
+        local-detection row were already built) and android (joined
+        2026-11-18: the fixture's role swap seats the phone as bob, alice on
+        a tui seat of her own).
 
         ⚠ **Widening means widening TWO places.** Each consuming test also
         carries its app markers so collection deselects

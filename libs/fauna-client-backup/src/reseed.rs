@@ -44,10 +44,26 @@
 //!
 //! Every phase is safe to re-run from the top, which is the only retry this
 //! driver offers: the grant replaces, delivery dedups by content address, and a
-//! materialize that already succeeded answers `target_not_empty` before
-//! reading a byte. That last point is why [`SetOutcome::AlreadyLive`] is an
+//! materialize that already succeeded answers `already_materialized` on the
+//! nest's receipt. That last point is why [`SetOutcome::AlreadyLive`] is an
 //! outcome, not an error — on a retry it is the normal answer for the sets the
-//! previous attempt finished. Nothing here deletes anything, on either side.
+//! previous attempt finished — and it is read off that code alone:
+//! `target_not_empty` means live content this ceremony did not put there, a
+//! refusal ([`SetRefusal::TargetLivedIn`]) that is never whole by itself
+//! (`backup-destinations.md` § Third destination kind → *A lived-in segment set
+//! is completed by record in the same gesture*, rule (2)). Nothing here deletes
+//! anything, on either side.
+//!
+//! # A lived-in segment set goes to the recovery leg, in the same run
+//!
+//! Rule (1) of the same ruling: a segment set the target refuses as lived-in
+//! is handed to the recovery leg of the same source — the leg that copies a
+//! corpus into a lived-in account by record, the target's own history winning
+//! ([`crate::recover`]) — through [`run_reseed_with_recovery`]. The leg runs
+//! whole, its own delivery order and duties included; the driver only asks it
+//! for the set, under the copy's own reserved name, and reads the answer as
+//! [`SetOutcome::Recovered`] or as a refusal. A covered folder has no by-record
+//! recovery: a lived-in folder stays [`SetRefusal::TargetLivedIn`].
 
 use async_trait::async_trait;
 use fauna_protocol::{MaybeSendSync, RpcError, RpcErrorClass, RpcRequester};
@@ -428,6 +444,14 @@ pub enum FolderRehome {
 /// names a different next step, which is the reason they are distinct.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetRefusal {
+    /// `target_not_empty` — the target already holds live content this
+    /// ceremony did not put there (a message filed since the claim, a file
+    /// the owner added), so nothing of the set was written. Never whole, and
+    /// never *already restored*: that is `already_materialized` alone. Its
+    /// remedy names the Backups page's recovery gesture, which copies a
+    /// corpus into a lived-in account by record; the driver's own hand-over
+    /// to that leg for a segment set is rule (1) of the same ruling.
+    TargetLivedIn,
     /// `target_not_fresh` — the named folder already has an audience.
     TargetNotFresh,
     /// `custody_incomplete` — the corpus on the target is not whole yet.
@@ -459,6 +483,12 @@ pub enum SetRefusal {
     /// owner accepted at the confirm: the holder's copy moved in between.
     /// Never sent; nothing of the set was recorded.
     PreflightStale,
+    /// A lived-in segment set the driver handed to the recovery leg, which
+    /// did not finish: its delivery or connection failed before the verb
+    /// replied. Local: the nest never sends it. What did land is ordinary
+    /// custody and the verb recovers nothing twice, so running the restore
+    /// again finishes it.
+    RecoveryIncomplete,
     /// Any other rejection, by its wire code.
     Other { code: String },
 }
@@ -468,11 +498,25 @@ pub enum SetRefusal {
 pub enum SetOutcome {
     /// Materialized now: the target serves the set as a live account.
     Materialized { segments: Vec<u32>, records: u64 },
-    /// `target_not_empty` — the target already holds live records for this
-    /// scope. On a retry this is the set an earlier attempt finished; on a
-    /// first attempt it means the owner pointed at a lived-in nest. Either way
-    /// nothing was written and there is no force arm.
+    /// `already_materialized` — the nest's receipt says this copy was made
+    /// live here already: on a retry, the set an earlier attempt finished.
+    /// Nothing was written. Read off that code alone, never off
+    /// `target_not_empty` ([`SetRefusal::TargetLivedIn`]).
     AlreadyLive,
+    /// Lived-in, and completed by record: the target refused the set
+    /// `target_not_empty`, and the recovery leg copied in the `records` the
+    /// target did not hold — each filed where the copy had it, beside what the
+    /// target already held (rule (1) of the 2026-11-20 ruling). `records` is 0
+    /// when the target already held everything the copy holds (a second press).
+    /// Whole only when nothing was left unplaced and the leg's duties finished.
+    Recovered {
+        records: u64,
+        /// Calendar or contacts records the leg could not place.
+        unplaceable: u64,
+        /// A post-recovery duty that did not complete, and why: the records
+        /// are back, and a re-run finishes the duty.
+        duties_unfinished: Option<String>,
+    },
     /// Refused for a reason the owner can act on.
     Refused { refusal: SetRefusal, detail: String },
 }
@@ -501,12 +545,26 @@ impl ReseedOutcome {
         !self.sets.is_empty()
             && self.delivered.sidecarless_segments.is_empty()
             && self.delivered.folder_paths_without_seal.is_empty()
-            && self.sets.iter().all(|s| {
-                matches!(
-                    s.outcome,
-                    SetOutcome::Materialized { .. } | SetOutcome::AlreadyLive
-                )
+            && self.sets.iter().all(|s| match &s.outcome {
+                SetOutcome::Materialized { .. } | SetOutcome::AlreadyLive => true,
+                SetOutcome::Recovered {
+                    unplaceable,
+                    duties_unfinished,
+                    ..
+                } => *unplaceable == 0 && duties_unfinished.is_none(),
+                SetOutcome::Refused { .. } => false,
             })
+    }
+
+    /// Records the recovery leg copied into lived-in sets by this run.
+    pub fn records_recovered(&self) -> u64 {
+        self.sets
+            .iter()
+            .map(|s| match s.outcome {
+                SetOutcome::Recovered { records, .. } => records,
+                _ => 0,
+            })
+            .sum()
     }
 
     /// Mail records made live by this run, across every segment set.
@@ -555,7 +613,8 @@ impl std::error::Error for ReseedError {}
 fn classify(rpc: &RpcError) -> SetOutcome {
     let detail = rpc.detail_or_code();
     let refusal = match rpc.code.as_str() {
-        RpcError::CODE_BACKUP_TARGET_NOT_EMPTY => return SetOutcome::AlreadyLive,
+        RpcError::CODE_BACKUP_ALREADY_MATERIALIZED => return SetOutcome::AlreadyLive,
+        RpcError::CODE_BACKUP_TARGET_NOT_EMPTY => SetRefusal::TargetLivedIn,
         RpcError::CODE_BACKUP_TARGET_NOT_FRESH => SetRefusal::TargetNotFresh,
         RpcError::CODE_BACKUP_CUSTODY_INCOMPLETE => SetRefusal::CustodyIncomplete,
         RpcError::CODE_BACKUP_CUSTODY_UNSEALED => SetRefusal::CustodyUnsealed,
@@ -572,10 +631,13 @@ fn classify(rpc: &RpcError) -> SetOutcome {
 /// Materialize one named folder set in pages of the owner's re-home
 /// signatures, until the target owes nothing or the signatures run out.
 ///
-/// `Err` is a transport fault (the set's result unknown). A page refused
-/// `target_not_empty` on the FIRST page is the set an earlier attempt finished
-/// ([`SetOutcome::AlreadyLive`]); custody rows still owed once every signature
-/// was sent are rows this device did not sign — reported, never counted whole.
+/// `Err` is a transport fault (the set's result unknown). A page answered
+/// `already_materialized` is the set an earlier attempt finished
+/// ([`SetOutcome::AlreadyLive`]); one refused `target_not_empty`, on any page,
+/// is a folder lived in by someone other than this ceremony
+/// ([`SetRefusal::TargetLivedIn`]); custody rows still owed once every
+/// signature was sent are rows this device did not sign — reported, never
+/// counted whole.
 async fn materialize_folder_pages<R, L>(
     target: &BackupClient<R>,
     leg: &L,
@@ -608,10 +670,7 @@ where
 
     let mut records = 0;
     let mut remaining = None;
-    for (i, page) in signatures
-        .chunks(fauna_protocol::backup::MATERIALIZE_REHOME_PAGE)
-        .enumerate()
-    {
+    for page in signatures.chunks(fauna_protocol::backup::MATERIALIZE_REHOME_PAGE) {
         // A labelled set is named by its address alone, so its plaintext name
         // stays on this device (`path-sealing.md` § the set-name plane); only
         // a set the store holds no label for falls back to the name.
@@ -636,17 +695,6 @@ where
                 }
             }
             Err(e) => match e.as_rpc_error() {
-                Some(rpc) if i > 0 && rpc.code == RpcError::CODE_BACKUP_TARGET_NOT_EMPTY => {
-                    // A later page cannot find foreign rows the first page's
-                    // classifier admitted unless the folder was written to in
-                    // between — a lived-in target now, not ours to finish.
-                    return Ok(SetOutcome::Refused {
-                        refusal: SetRefusal::Other {
-                            code: rpc.code.clone(),
-                        },
-                        detail: rpc.detail_or_code(),
-                    });
-                }
                 Some(rpc) => return Ok(classify(rpc)),
                 None => return Err(e),
             },
@@ -679,6 +727,31 @@ pub async fn run_reseed<R, L>(
     target: &BackupClient<R>,
     nest_backup_key: Vec<u8>,
     leg: &L,
+) -> Result<ReseedOutcome, ReseedError>
+where
+    R: RpcRequester,
+    R::Error: RpcErrorClass,
+    L: ReseedDeliveryLeg + ?Sized,
+{
+    run_reseed_with_recovery(target, nest_backup_key, leg, None).await
+}
+
+/// [`run_reseed`], with the source's recovery leg to hand a lived-in segment
+/// set to (`backup-destinations.md` § Third destination kind → *A lived-in
+/// segment set is completed by record in the same gesture*, rule (1)).
+///
+/// `recovery` is the same source's leg — the store end for this device's own
+/// copy, the nest end for a pulled-back nest destination — composed by the
+/// host over the same connection and grant. A segment set refused
+/// `target_not_empty` is asked of it under the copy's reserved name
+/// ([`recovery_set_name`]) and runs there whole, delivery order and duties
+/// included; never a `recover` call over this ceremony's own delivery. `None`
+/// keeps the refusal, as does a covered folder in every case.
+pub async fn run_reseed_with_recovery<R, L>(
+    target: &BackupClient<R>,
+    nest_backup_key: Vec<u8>,
+    leg: &L,
+    recovery: Option<&dyn crate::recover::RecoveryLeg>,
 ) -> Result<ReseedOutcome, ReseedError>
 where
     R: RpcRequester,
@@ -753,6 +826,23 @@ where
                 }
             },
         };
+        let outcome = match (outcome, set.axis, recovery) {
+            (
+                SetOutcome::Refused {
+                    refusal: SetRefusal::TargetLivedIn,
+                    detail,
+                },
+                SetAxis::Segment,
+                Some(recovery),
+            ) => match recovery_set_name(&set.set_name) {
+                Some(copy_set) => hand_over(recovery, &copy_set).await,
+                None => SetOutcome::Refused {
+                    refusal: SetRefusal::TargetLivedIn,
+                    detail,
+                },
+            },
+            (outcome, _, _) => outcome,
+        };
         sets.push(SetResult {
             set: set.clone(),
             outcome,
@@ -760,6 +850,53 @@ where
     }
 
     Ok(ReseedOutcome { delivered, sets })
+}
+
+/// The copy's own reserved set name for a delivered segment set — what the
+/// recovery leg is asked for. The re-seed delivers a set into its landing name
+/// (`__landing/<kind>`), the recovery reads the copy under the reserved one
+/// (`__<kind>`); both are parsed and re-derived, never trusted. `None` for a
+/// name that is neither.
+pub fn recovery_set_name(set_name: &str) -> Option<String> {
+    use fauna_protocol::segments::{
+        parse_landing_set_name, parse_reserved_backup_set_name, reserved_backup_set_name,
+    };
+    let (kind, scope) =
+        parse_landing_set_name(set_name).or_else(|| parse_reserved_backup_set_name(set_name))?;
+    reserved_backup_set_name(kind, &scope)
+}
+
+/// Run the recovery leg for one lived-in segment set, and read its answer as
+/// the set's outcome: a reply is [`SetOutcome::Recovered`], the verb's refusal
+/// keeps its own code, and a leg that failed before the verb replied is
+/// [`SetRefusal::RecoveryIncomplete`] — the restore's other sets still run.
+async fn hand_over(recovery: &dyn crate::recover::RecoveryLeg, copy_set: &str) -> SetOutcome {
+    use crate::recover::{RecoveryError, RecoverySetOutcome, run_recovery};
+    match run_recovery(recovery, &[copy_set.to_string()]).await {
+        Ok(mut out) => match out.sets.pop() {
+            Some(set) => match set.outcome {
+                RecoverySetOutcome::Recovered { counts }
+                | RecoverySetOutcome::NothingToRecover { counts } => SetOutcome::Recovered {
+                    records: counts.recovered,
+                    unplaceable: counts.unplaceable,
+                    duties_unfinished: set.duties_unfinished,
+                },
+                RecoverySetOutcome::Refused { refusal, detail } => {
+                    SetOutcome::Refused { refusal, detail }
+                }
+            },
+            None => SetOutcome::Refused {
+                refusal: SetRefusal::RecoveryIncomplete,
+                detail: format!("the recovery reported nothing for {copy_set}"),
+            },
+        },
+        Err(RecoveryError::Transport { detail, .. } | RecoveryError::Grant(detail)) => {
+            SetOutcome::Refused {
+                refusal: SetRefusal::RecoveryIncomplete,
+                detail,
+            }
+        }
+    }
 }
 
 impl SetRefusal {
@@ -771,6 +908,7 @@ impl SetRefusal {
     /// classify through one table.
     pub fn code(&self) -> &str {
         match self {
+            Self::TargetLivedIn => RpcError::CODE_BACKUP_TARGET_NOT_EMPTY,
             Self::TargetNotFresh => RpcError::CODE_BACKUP_TARGET_NOT_FRESH,
             Self::CustodyIncomplete => RpcError::CODE_BACKUP_CUSTODY_INCOMPLETE,
             Self::CustodyUnsealed => RpcError::CODE_BACKUP_CUSTODY_UNSEALED,
@@ -781,6 +919,7 @@ impl SetRefusal {
             Self::RehomeUnsigned => REHOME_UNSIGNED_CODE,
             Self::NotAccepted => NOT_ACCEPTED_CODE,
             Self::PreflightStale => PREFLIGHT_STALE_CODE,
+            Self::RecoveryIncomplete => RECOVERY_INCOMPLETE_CODE,
             Self::Other { code } => code,
         }
     }
@@ -789,6 +928,7 @@ impl SetRefusal {
     /// [`Self::Other`], never guessed into a known remedy.
     pub fn from_code(code: &str) -> Self {
         match code {
+            RpcError::CODE_BACKUP_TARGET_NOT_EMPTY => Self::TargetLivedIn,
             RpcError::CODE_BACKUP_TARGET_NOT_FRESH => Self::TargetNotFresh,
             RpcError::CODE_BACKUP_CUSTODY_INCOMPLETE => Self::CustodyIncomplete,
             RpcError::CODE_BACKUP_CUSTODY_UNSEALED => Self::CustodyUnsealed,
@@ -799,6 +939,7 @@ impl SetRefusal {
             REHOME_UNSIGNED_CODE => Self::RehomeUnsigned,
             NOT_ACCEPTED_CODE => Self::NotAccepted,
             PREFLIGHT_STALE_CODE => Self::PreflightStale,
+            RECOVERY_INCOMPLETE_CODE => Self::RecoveryIncomplete,
             other => Self::Other {
                 code: other.to_string(),
             },
@@ -812,6 +953,7 @@ impl SetRefusal {
     /// steps.
     pub(crate) fn remedy_key(&self) -> &'static str {
         match self {
+            Self::TargetLivedIn => "backups.reseed_refused_target_lived_in",
             Self::TargetNotFresh => "backups.reseed_refused_target_not_fresh",
             Self::CustodyIncomplete => "backups.reseed_refused_custody_incomplete",
             Self::CustodyUnsealed => "backups.reseed_refused_custody_unsealed",
@@ -822,6 +964,7 @@ impl SetRefusal {
             Self::RehomeUnsigned => "backups.reseed_refused_rehome_unsigned",
             Self::NotAccepted => "backups.reseed_refused_not_accepted",
             Self::PreflightStale => "backups.reseed_refused_preflight_stale",
+            Self::RecoveryIncomplete => "backups.reseed_refused_recovery_incomplete",
             Self::Other { .. } => "backups.reseed_refused_other",
         }
     }
@@ -839,6 +982,10 @@ pub const NOT_ACCEPTED_CODE: &str = "not_accepted";
 
 /// [`SetRefusal::PreflightStale`]'s code. Local: the pull-back holds the set.
 pub const PREFLIGHT_STALE_CODE: &str = "preflight_stale";
+
+/// [`SetRefusal::RecoveryIncomplete`]'s code. Local: the driver's hand-over
+/// to the recovery leg did not reach the verb's reply.
+pub const RECOVERY_INCOMPLETE_CODE: &str = "recovery_incomplete";
 
 /// How a delivered set is named to the owner: a reserved segment set by
 /// [`segment_set_label`]; a covered folder by its display name, else its set
@@ -896,6 +1043,13 @@ pub fn result_lines(outcome: &ReseedOutcome) -> Vec<fauna_core::localized::Local
             SetOutcome::AlreadyLive => {
                 LocalizedText::key_arg("backups.reseed_set_already_restored", "set", name)
             }
+            SetOutcome::Recovered { records: 0, .. } => {
+                LocalizedText::key_arg("backups.reseed_set_recovered_nothing", "set", name)
+            }
+            SetOutcome::Recovered { records, .. } => LocalizedText::key_args(
+                "backups.reseed_set_recovered",
+                [("set", name), ("count", records.to_string())],
+            ),
             SetOutcome::Refused { refusal, .. } => LocalizedText::key_args(
                 "backups.reseed_set_refused",
                 [
@@ -905,6 +1059,29 @@ pub fn result_lines(outcome: &ReseedOutcome) -> Vec<fauna_core::localized::Local
                 ],
             ),
         });
+    }
+    for set in &outcome.sets {
+        let SetOutcome::Recovered {
+            unplaceable,
+            duties_unfinished,
+            ..
+        } = &set.outcome
+        else {
+            continue;
+        };
+        let name = set_label(&set.set);
+        if *unplaceable > 0 {
+            lines.push(LocalizedText::key_args(
+                "backups.recover_gap_unplaceable",
+                [("set", name.clone()), ("count", unplaceable.to_string())],
+            ));
+        }
+        if let Some(reason) = duties_unfinished {
+            lines.push(LocalizedText::key_args(
+                "backups.recover_gap_duties",
+                [("set", name), ("reason", reason.clone())],
+            ));
+        }
     }
     let delivered = &outcome.delivered;
     if !delivered.sidecarless_segments.is_empty() {
@@ -1557,11 +1734,52 @@ mod tests {
         assert_eq!(log(&l), ["grant:32"]);
     }
 
-    /// `target_not_empty` is an outcome, not a failure — it is what a retry
-    /// hears for a set the earlier attempt finished — and one set's refusal
-    /// does not stop the next set: freshness is per scope.
+    /// `already_materialized` is an outcome, not a failure — it is what a
+    /// retry hears for a set the earlier attempt finished, on the nest's
+    /// receipt — and one set's answer does not stop the next set: freshness
+    /// is per scope (`backup-destinations.md` § Third destination kind → *A
+    /// lived-in segment set is completed by record in the same gesture*,
+    /// rule (2)).
     #[test]
-    fn target_not_empty_reads_as_already_live_and_later_sets_still_run() {
+    fn already_materialized_reads_as_already_live_and_later_sets_still_run() {
+        let l = Log::default();
+        let target = FakeTarget {
+            log: &l,
+            owed: Default::default(),
+            grant_ok: true,
+            materialize: BTreeMap::from([
+                (
+                    "__mail".to_string(),
+                    Some(Err(RpcError::CODE_BACKUP_ALREADY_MATERIALIZED)),
+                ),
+                (FOLDER.to_string(), Some(Ok(0))),
+            ]),
+        };
+        let leg = FakeLeg {
+            log: &l,
+            rows: 1,
+            unsigned: None,
+            result: Ok(corpus(vec![
+                set("__mail", SetAxis::Segment),
+                named(FOLDER, "Photos"),
+            ])),
+        };
+        let out = block_on(run_reseed(&BackupClient::new(&target), vec![7; 32], &leg)).unwrap();
+        assert_eq!(out.sets[0].outcome, SetOutcome::AlreadyLive);
+        assert!(matches!(
+            out.sets[1].outcome,
+            SetOutcome::Materialized { .. }
+        ));
+        assert!(out.is_whole());
+        assert_eq!(out.records_materialized(), 0);
+    }
+
+    /// `target_not_empty` is never whole by itself: the target holds live
+    /// content this ceremony did not put there, so nothing of the set was
+    /// written. It is a refusal with its remedy — never *already restored* —
+    /// and the next set still runs (rule (2) of the 2026-11-20 ruling).
+    #[test]
+    fn target_not_empty_is_a_lived_in_refusal_and_never_whole() {
         let l = Log::default();
         let target = FakeTarget {
             log: &l,
@@ -1585,13 +1803,322 @@ mod tests {
             ])),
         };
         let out = block_on(run_reseed(&BackupClient::new(&target), vec![7; 32], &leg)).unwrap();
-        assert_eq!(out.sets[0].outcome, SetOutcome::AlreadyLive);
+        assert!(
+            matches!(
+                &out.sets[0].outcome,
+                SetOutcome::Refused {
+                    refusal: SetRefusal::TargetLivedIn,
+                    ..
+                }
+            ),
+            "{:?}",
+            out.sets[0].outcome
+        );
         assert!(matches!(
             out.sets[1].outcome,
             SetOutcome::Materialized { .. }
         ));
-        assert!(out.is_whole());
-        assert_eq!(out.records_materialized(), 0);
+        assert!(!out.is_whole());
+        let lookup = |key: &str| fauna_i18n::strings::lookup(key).map(str::to_string);
+        let lines: Vec<String> = result_lines(&out)
+            .iter()
+            .map(|l| l.resolve_nested(lookup))
+            .collect();
+        let remedy = lookup("backups.reseed_refused_target_lived_in").unwrap();
+        assert!(lines[1].contains(&remedy), "{lines:?}");
+        let already = lookup("backups.reseed_set_already_restored")
+            .unwrap()
+            .replace("{set}", &lookup("backups.reseed_set_mail").unwrap());
+        assert!(
+            !lines.contains(&already),
+            "a lived-in set never reads already restored: {lines:?}"
+        );
+    }
+
+    // ── rule (1): the hand-over to the recovery leg ─────────────────────────
+
+    /// A recovery leg scripted with one answer, logging every set asked into
+    /// the ceremony's own log so the order across both legs is asserted.
+    struct ScriptedRecovery<'a> {
+        log: &'a Log,
+        answer: crate::recover::LegAnswer,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl crate::recover::RecoveryLeg for ScriptedRecovery<'_> {
+        async fn recover_set(&self, set_name: &str) -> crate::recover::LegAnswer {
+            self.log.lock().unwrap().push(format!("recover:{set_name}"));
+            self.answer.clone()
+        }
+    }
+
+    fn recovered(recovered: u64, unplaceable: u64) -> crate::recover::LegAnswer {
+        crate::recover::LegAnswer::Replied {
+            reply: fauna_protocol::backup::CustodyRecoverReply {
+                recovered,
+                filed: recovered,
+                unplaceable,
+                ..Default::default()
+            },
+            duties: Ok(()),
+        }
+    }
+
+    /// The lived-in mail set and a lived-in folder, beside a folder that
+    /// flips: the target `target_not_empty`s both lived-in sets.
+    fn lived_in_target(l: &Log) -> FakeTarget<'_> {
+        FakeTarget {
+            log: l,
+            owed: Default::default(),
+            grant_ok: true,
+            materialize: BTreeMap::from([
+                (
+                    "__landing/mail".to_string(),
+                    Some(Err(RpcError::CODE_BACKUP_TARGET_NOT_EMPTY)),
+                ),
+                (
+                    FOLDER.to_string(),
+                    Some(Err(RpcError::CODE_BACKUP_TARGET_NOT_EMPTY)),
+                ),
+            ]),
+        }
+    }
+
+    fn lived_in_leg(l: &Log) -> FakeLeg<'_> {
+        FakeLeg {
+            log: l,
+            rows: 1,
+            unsigned: None,
+            result: Ok(corpus(vec![
+                set("__landing/mail", SetAxis::Segment),
+                named(FOLDER, "Photos"),
+            ])),
+        }
+    }
+
+    /// **The hand-over.** A segment set refused lived-in goes to the recovery
+    /// leg in the same run — asked under the copy's reserved name, after the
+    /// set's materialize and before the next set — and reads as recovered, its
+    /// count on the result line; a lived-in folder stays a refusal with its
+    /// remedy, because a folder has no by-record recovery.
+    #[test]
+    fn a_lived_in_segment_set_is_handed_to_the_recovery_leg_and_a_folder_stays_refused() {
+        let l = Log::default();
+        let target = lived_in_target(&l);
+        let leg = lived_in_leg(&l);
+        let recovery = ScriptedRecovery {
+            log: &l,
+            answer: recovered(3, 0),
+        };
+        let out = block_on(run_reseed_with_recovery(
+            &BackupClient::new(&target),
+            vec![7; 32],
+            &leg,
+            Some(&recovery),
+        ))
+        .unwrap();
+        assert_eq!(
+            log(&l),
+            [
+                "grant:32",
+                "deliver",
+                "materialize:__landing/mail:-",
+                "recover:__mail",
+                "sign:__folder/aa/7",
+                "materialize:__folder/aa/7:Photos:1sig",
+            ]
+        );
+        assert_eq!(
+            out.sets[0].outcome,
+            SetOutcome::Recovered {
+                records: 3,
+                unplaceable: 0,
+                duties_unfinished: None
+            }
+        );
+        assert!(matches!(
+            out.sets[1].outcome,
+            SetOutcome::Refused {
+                refusal: SetRefusal::TargetLivedIn,
+                ..
+            }
+        ));
+        assert_eq!(out.records_recovered(), 3);
+        assert!(!out.is_whole(), "the lived-in folder keeps it from whole");
+
+        let lookup = |key: &str| fauna_i18n::strings::lookup(key).map(str::to_string);
+        let lines: Vec<String> = result_lines(&out)
+            .iter()
+            .map(|l| l.resolve_nested(lookup))
+            .collect();
+        let want = lookup("backups.reseed_set_recovered")
+            .unwrap()
+            .replace("{set}", &lookup("backups.reseed_set_mail").unwrap())
+            .replace("{count}", "3");
+        assert_eq!(lines[1], want, "{lines:?}");
+    }
+
+    /// A set recovered whole counts toward whole, and a second press — the
+    /// target already holding everything — is a whole outcome that says so.
+    #[test]
+    fn a_set_recovered_whole_is_whole_and_a_second_press_reports_nothing_new() {
+        for (count, key) in [
+            (2, "backups.reseed_set_recovered"),
+            (0, "backups.reseed_set_recovered_nothing"),
+        ] {
+            let l = Log::default();
+            let target = FakeTarget {
+                log: &l,
+                owed: Default::default(),
+                grant_ok: true,
+                materialize: BTreeMap::from([(
+                    "__landing/mail".to_string(),
+                    Some(Err(RpcError::CODE_BACKUP_TARGET_NOT_EMPTY)),
+                )]),
+            };
+            let leg = FakeLeg {
+                log: &l,
+                rows: 1,
+                unsigned: None,
+                result: Ok(corpus(vec![set("__landing/mail", SetAxis::Segment)])),
+            };
+            let recovery = ScriptedRecovery {
+                log: &l,
+                answer: recovered(count, 0),
+            };
+            let out = block_on(run_reseed_with_recovery(
+                &BackupClient::new(&target),
+                vec![7; 32],
+                &leg,
+                Some(&recovery),
+            ))
+            .unwrap();
+            assert!(out.is_whole(), "{count}: {:?}", out.sets);
+            let lines = result_lines(&out);
+            assert_eq!(
+                lines[0],
+                fauna_core::localized::LocalizedText::key("backups.reseed_result_whole")
+            );
+            assert_eq!(lines[1].key, key);
+        }
+    }
+
+    /// A recovery that left records unplaced, or did not finish its duties,
+    /// is never whole, and says which.
+    #[test]
+    fn an_unplaced_record_or_an_unfinished_duty_is_not_whole() {
+        for answer in [
+            recovered(2, 1),
+            crate::recover::LegAnswer::Replied {
+                reply: fauna_protocol::backup::CustodyRecoverReply {
+                    recovered: 2,
+                    ..Default::default()
+                },
+                duties: Err("store busy".into()),
+            },
+        ] {
+            let l = Log::default();
+            let target = lived_in_target(&l);
+            let leg = FakeLeg {
+                log: &l,
+                rows: 1,
+                unsigned: None,
+                result: Ok(corpus(vec![set("__landing/mail", SetAxis::Segment)])),
+            };
+            let recovery = ScriptedRecovery { log: &l, answer };
+            let out = block_on(run_reseed_with_recovery(
+                &BackupClient::new(&target),
+                vec![7; 32],
+                &leg,
+                Some(&recovery),
+            ))
+            .unwrap();
+            assert!(!out.is_whole(), "{:?}", out.sets);
+            let keys: Vec<String> = result_lines(&out).iter().map(|l| l.key.clone()).collect();
+            assert!(
+                keys.iter()
+                    .any(|k| k == "backups.recover_gap_unplaceable"
+                        || k == "backups.recover_gap_duties"),
+                "{keys:?}"
+            );
+        }
+    }
+
+    /// **A recovery failure is a refusal, never a stopped ceremony.** A leg
+    /// that failed before the verb replied reads as `recovery_incomplete`
+    /// with its remedy, and the run goes on to the next set; the verb's own
+    /// refusal keeps its code.
+    #[test]
+    fn a_recovery_failure_is_rendered_as_a_refusal_and_the_run_goes_on() {
+        for (answer, want) in [
+            (
+                crate::recover::LegAnswer::Failed("connection reset".into()),
+                SetRefusal::RecoveryIncomplete,
+            ),
+            (
+                crate::recover::LegAnswer::Refused(RpcError::new(
+                    RpcError::CODE_SYNC_STORAGE_QUOTA_EXCEEDED,
+                    "full",
+                )),
+                SetRefusal::QuotaExceeded,
+            ),
+        ] {
+            let l = Log::default();
+            let target = lived_in_target(&l);
+            let leg = lived_in_leg(&l);
+            let recovery = ScriptedRecovery { log: &l, answer };
+            let out = block_on(run_reseed_with_recovery(
+                &BackupClient::new(&target),
+                vec![7; 32],
+                &leg,
+                Some(&recovery),
+            ))
+            .unwrap();
+            assert!(
+                matches!(&out.sets[0].outcome, SetOutcome::Refused { refusal, .. } if *refusal == want),
+                "{:?}",
+                out.sets[0].outcome
+            );
+            assert_eq!(out.sets.len(), 2, "the folder still ran");
+            assert!(!out.is_whole());
+            let remedy = result_lines(&out)[1].clone();
+            assert_eq!(remedy.key, "backups.reseed_set_refused");
+        }
+        assert_eq!(
+            SetRefusal::from_code(SetRefusal::RecoveryIncomplete.code()),
+            SetRefusal::RecoveryIncomplete
+        );
+    }
+
+    /// No recovery leg keeps the lived-in refusal, as before rule (1).
+    #[test]
+    fn without_a_recovery_leg_a_lived_in_segment_set_stays_refused() {
+        let l = Log::default();
+        let target = lived_in_target(&l);
+        let leg = lived_in_leg(&l);
+        let out = block_on(run_reseed(&BackupClient::new(&target), vec![7; 32], &leg)).unwrap();
+        assert!(!log(&l).iter().any(|e| e.starts_with("recover:")));
+        assert!(matches!(
+            out.sets[0].outcome,
+            SetOutcome::Refused {
+                refusal: SetRefusal::TargetLivedIn,
+                ..
+            }
+        ));
+    }
+
+    /// The copy's reserved name is read off a landing name or a reserved one,
+    /// and nothing else.
+    #[test]
+    fn the_recovery_set_name_is_the_copys_reserved_name() {
+        assert_eq!(
+            recovery_set_name("__landing/mail").as_deref(),
+            Some("__mail")
+        );
+        assert_eq!(recovery_set_name("__card").as_deref(), Some("__card"));
+        assert_eq!(recovery_set_name("__folder/aa/7"), None);
+        assert_eq!(recovery_set_name("__landing/nope"), None);
     }
 
     /// Each typed refusal maps to its own remedy, and none is whole.
@@ -1993,6 +2520,7 @@ mod shared_view_tests {
     #[test]
     fn every_refusal_round_trips_through_its_code() {
         for refusal in [
+            SetRefusal::TargetLivedIn,
             SetRefusal::TargetNotFresh,
             SetRefusal::CustodyIncomplete,
             SetRefusal::CustodyUnsealed,

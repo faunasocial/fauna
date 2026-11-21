@@ -238,26 +238,36 @@ pub fn build_settings_shell(
         Some("mail-settings"),
         mail_settings::TITLE,
     );
+    // The six mail sub-pages sit behind the mail-usable gate
+    // (`crate::settings::mail_gate`; `ui/mail-settings.md` § Errors & edge
+    // cases): each is wrapped so a visit while mail is not possible shows only
+    // its heading and the reason, whichever door it came through.
+    let mut mail_gated: Vec<crate::settings::mail_gate::GatedPage> = Vec::new();
+    let mut add_mail_subpage = |page: &gtk::Widget, name: &str, title: &str| {
+        let gated = crate::settings::mail_gate::GatedPage::wrap(page, title);
+        stack.add_titled(&gated.stack, Some(name), title);
+        mail_gated.push(gated);
+    };
     let (mail_aliases_page, mail_aliases_refresh) =
         crate::settings::mail_aliases::build_mail_aliases_page();
-    stack.add_titled(
-        &mail_aliases_page,
-        Some("mail-aliases"),
+    add_mail_subpage(
+        mail_aliases_page.upcast_ref(),
+        "mail-aliases",
         mail_aliases::TITLE,
     );
-    stack.add_titled(
-        &crate::settings::mail_spam::build_mail_spam_page(),
-        Some("mail-spam"),
+    add_mail_subpage(
+        crate::settings::mail_spam::build_mail_spam_page().upcast_ref(),
+        "mail-spam",
         mail_spam::TITLE,
     );
-    stack.add_titled(
-        &crate::settings::mail_export::build_mail_export_page(),
-        Some("mail-export"),
+    add_mail_subpage(
+        crate::settings::mail_export::build_mail_export_page().upcast_ref(),
+        "mail-export",
         mail_export::TITLE,
     );
-    stack.add_titled(
-        &crate::settings::mail_import::build_mail_import_page(),
-        Some("mail-import"),
+    add_mail_subpage(
+        crate::settings::mail_import::build_mail_import_page().upcast_ref(),
+        "mail-import",
         mail_import::TITLE,
     );
     // Import from other services follows Import mailbox (`settings.md`
@@ -283,10 +293,14 @@ pub fn build_settings_shell(
     };
     let (mail_lists_page, mail_lists_refresh) =
         crate::settings::mail_lists::build_mail_lists_page(on_navigate_to_members);
-    stack.add_titled(&mail_lists_page, Some("mail-lists"), mail_lists::TITLE);
-    stack.add_titled(
-        &mail_list_members_page,
-        Some("mail-list-members"),
+    add_mail_subpage(
+        mail_lists_page.upcast_ref(),
+        "mail-lists",
+        mail_lists::TITLE,
+    );
+    add_mail_subpage(
+        mail_list_members_page.upcast_ref(),
+        "mail-list-members",
         mail_lists::MEMBERS_TITLE,
     );
     let (web_page, web_refresh) = crate::settings::web::build_web_page();
@@ -343,7 +357,31 @@ pub fn build_settings_shell(
     // edge live in `settings::stolen_hold`. A fresh shell starts a fresh visit.
     crate::settings::reset_account_visit();
     let knock_list_client = Rc::clone(client);
-    let quota_client = Rc::clone(client);
+    // The Status sub-page's per-visit reads (`status.md` § State & data shape:
+    // one read per visit), ONE door for every arrival: the map hook below
+    // covers arriving at Settings from another page while Status already
+    // shows (the shell's default child, so the commonest arrival), the
+    // visible-child notify covers selecting it — or re-selecting it, which
+    // `nav_rail::set_visible_child_forced` re-notifies. Before this the map
+    // arrival re-read nothing and the node and MLS legs were re-read only by
+    // the test agent's nav, so Settings showed the login-time figures (a
+    // fresh account's device count `0 / 64` and starter keys `0`, both read
+    // before its own registration and replenish landed). Each read is a
+    // tracked `spawn_bg`, so linux's `reads_owed` holds a frame until they
+    // resolve.
+    let status_visit: Rc<dyn Fn()> = {
+        let client = Rc::clone(client);
+        Rc::new(move || {
+            client.fetch_quota();
+            client.fetch_features();
+            client.fetch_node_leg();
+            client.fetch_key_package_count();
+        })
+    };
+    {
+        let status_visit = Rc::clone(&status_visit);
+        status_page.connect_map(move |_| status_visit());
+    }
     let devices_machine = Arc::clone(&devices_folders_handles.devices_machine);
     let devices_runtime = client.runtime_handle();
     // The Devices/Folders pages' `DevicesMachine` re-read: their map hook covers
@@ -426,11 +464,10 @@ pub fn build_settings_shell(
             }
             Some("subscription-settings") => subscriptions_refresh(),
             Some("general") => general_refresh(),
-            // The storage allowance is nest state read on every visit, tui's
-            // per-visit `spawn_quota_refresh`: a folder filled since sign-in (an
-            // archive import, a large upload) must move the figure without a
-            // re-login. The login-time read alone left it frozen at sign-in.
-            Some("status") => quota_client.fetch_quota(),
+            // The storage allowance, the feature limits, the node and MLS legs:
+            // nest state read on every visit (tui's per-visit
+            // `spawn_quota_refresh`), through the one door above.
+            Some("status") => status_visit(),
             // The starter-key count is nest state read on every visit.
             Some("encryption") => crate::settings::encryption::refresh_on_visit(),
             Some("nests") => linked_nests_refresh(),
@@ -662,6 +699,8 @@ pub fn build_settings_shell(
         },
     );
 
+    paint_mail_gate(&settings_sidebar, &nav, mail_gated);
+
     let handles = SettingsShellHandles {
         nav_back,
         sub_stack: stack.clone(),
@@ -672,4 +711,51 @@ pub fn build_settings_shell(
     };
 
     (content, settings_sidebar, handles)
+}
+
+/// Paint the six mail rail rows and sub-pages from the one shared mail-usable
+/// answer (`crate::settings::mail_gate`), now and whenever it changes: the
+/// answer reads the mail machine's LIVE snapshot, so turning mail on lights the
+/// rows at once (`ui/mail-settings.md` § Errors & edge cases, the mail-usable
+/// gate). The Mail & Calendar page built and hydrated the machine above, so the
+/// rows are decided before the person reaches them.
+fn paint_mail_gate(
+    rail: &gtk::Box,
+    nav: &[(&'static str, &'static str, &'static str, bool)],
+    gated: Vec<crate::settings::mail_gate::GatedPage>,
+) {
+    use crate::settings::mail_gate::{MAIL_SUBPAGES, mail_usable, paint_rail_row};
+    let list = crate::views::nav_rail::rail_list(rail);
+    let rows: Vec<gtk::ListBoxRow> = MAIL_SUBPAGES
+        .iter()
+        .filter_map(|name| nav.iter().position(|e| e.0 == *name))
+        .filter_map(|idx| list.row_at_index(idx as i32))
+        .collect();
+    debug_assert_eq!(
+        rows.len(),
+        MAIL_SUBPAGES.len(),
+        "every mail sub-page has a rail row"
+    );
+    let paint = move |answer: &fauna_core::possibility::Possibility| {
+        for row in &rows {
+            paint_rail_row(row, answer);
+        }
+        for page in &gated {
+            page.paint(answer);
+        }
+    };
+    let mut last = mail_usable();
+    paint(&last);
+    let alive = list.downgrade();
+    gtk::glib::timeout_add_local(std::time::Duration::from_millis(400), move || {
+        if alive.upgrade().is_none() {
+            return gtk::glib::ControlFlow::Break;
+        }
+        let now = mail_usable();
+        if now != last {
+            paint(&now);
+            last = now;
+        }
+        gtk::glib::ControlFlow::Continue
+    });
 }

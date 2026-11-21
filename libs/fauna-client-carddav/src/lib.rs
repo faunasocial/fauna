@@ -41,6 +41,12 @@ use serde::{Deserialize, Serialize};
 // directly (priority #2).
 pub use fauna_protocol::bridge_routing;
 
+// The Address Book segment's book read and its two answers — a missing key is
+// a wait, never an empty address book (contacts.md § Errors & edge cases). See
+// `addressbooks_read.rs`.
+pub mod addressbooks_read;
+pub use addressbooks_read::{AddressbooksRead, AddressbooksReadState};
+
 /// The deterministic `uid_hash` of a vCard's plaintext `UID`: `blake3(uid)`
 /// (256-bit), so a card a Fauna app writes and one a CardDAV MUA's PUT stores
 /// dedup onto the same row. The plaintext UID stays inside the sealed body; only

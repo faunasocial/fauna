@@ -14,6 +14,7 @@ using FaunaApp.Core.Logs;
 using FaunaApp.Core.Models;
 using FaunaApp.Core.Services;
 using FaunaApp.Core.ViewModels;
+using FaunaApp.Helpers;
 using FaunaApp.Services;
 using S = FaunaApp.Core.Services.Strings;
 using FaunaApp.UiIds;
@@ -199,6 +200,9 @@ public sealed partial class EventsPage : Page
             _clients = clients;
             _viewModel = new EventsViewModel(clients.Rpc!);
             _viewModel.PropertyChanged += ViewModel_PropertyChanged;
+            // The VM starts in agenda, and no ViewMode change fires for the
+            // initial mode, so the pan pair takes its first paint here.
+            PaintPanPair();
             _viewModel.CalendarRows.CollectionChanged += (s, args) =>
             {
                 CalendarList.Visibility = _viewModel.CalendarRows.Count > 0
@@ -404,6 +408,7 @@ public sealed partial class EventsPage : Page
                 if (_viewModel.ViewMode == FfiCalendarViewMode.Month) BuildMonthGrid();
                 else if (_viewModel.ViewMode == FfiCalendarViewMode.Week) BuildWeekGrid();
                 else if (_viewModel.ViewMode == FfiCalendarViewMode.Day) BuildDayTimeline();   // body added in Task 5
+                PaintPanPair();
                 break;
             case nameof(EventsViewModel.ComposeStartPrefill):
                 // Outlook double-click-empty-day → open the new-event compose with
@@ -439,6 +444,8 @@ public sealed partial class EventsPage : Page
     // range*). These used to pass ±1 to a month-only command, which stepped a
     // whole month in every view: ~4 weeks per click in week view, ~30 days in
     // day view, and an anchor move the date-unfiltered agenda ignores entirely.
+    // In agenda the pair is disabled (PaintPanPair), and a press that still
+    // arrives is refused by NavigateAsync with the same reason.
     private async void PrevMonth_Click(object sender, RoutedEventArgs e)
     {
         if (_viewModel is null) return;
@@ -449,6 +456,20 @@ public sealed partial class EventsPage : Page
     {
         if (_viewModel is null) return;
         await _viewModel.NavigateCommand.ExecuteAsync(1);
+    }
+
+    /// <summary>Both pan buttons from the one shared answer
+    /// (<see cref="EventsViewModel.PanPossibility"/>; <c>events.md</c> § User
+    /// actions): live wherever the pan moves; in agenda shown, disabled, with the
+    /// reason on each button's tooltip and once on <c>PanReasonText</c> beneath
+    /// the pair — the reason within eyeshot that <c>ui/README.md</c> § Offer only
+    /// what is possible, rule 2, owes.</summary>
+    private void PaintPanPair()
+    {
+        if (_viewModel is null) return;
+        var pan = _viewModel.PanPossibility();
+        PrevMonthButton.ApplyPossibility(pan, PanReasonText);
+        NextMonthButton.ApplyPossibility(pan);
     }
 
     private async void RsvpGoing_Click(object sender, RoutedEventArgs e)

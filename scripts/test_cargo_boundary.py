@@ -108,10 +108,12 @@ def outside(monkeypatch):
     ("cargo build -p fauna-nest --features test-hooks,nostr --lib",
      "cargo fetch", "cargo build -p fauna-nest --features test-hooks,nostr --lib", None),
     ("cargo +nightly -Zunstable-options check --locked --target wasm32-unknown-unknown -p x",
-     "cargo +nightly fetch -Zunstable-options --locked --target wasm32-unknown-unknown",
+     "cargo +nightly fetch -Zunstable-options --locked --target wasm32-unknown-unknown"
+     " --target aarch64-unknown-linux-gnu",
      "cargo +nightly -Zunstable-options check --locked --target wasm32-unknown-unknown -p x", None),
     ("cargo build --manifest-path=a/Cargo.toml --target=x86_64-unknown-linux-gnu --offline -Z build-std",
-     "cargo fetch --manifest-path=a/Cargo.toml --target=x86_64-unknown-linux-gnu --offline -Z build-std",
+     "cargo fetch --manifest-path=a/Cargo.toml --target=x86_64-unknown-linux-gnu --offline -Z build-std"
+     " --target aarch64-unknown-linux-gnu",
      "cargo build --manifest-path=a/Cargo.toml --target=x86_64-unknown-linux-gnu --offline -Z build-std",
      None),
     ("cargo run -p fauna-tui --release -- --nest http://x --frozen",
@@ -138,9 +140,50 @@ def outside(monkeypatch):
     ("cargo doc -p x --no-deps", "cargo fetch", "cargo doc -p x --no-deps", None),
     ("cargo metadata --format-version 1", "cargo fetch", "cargo metadata --format-version 1", None),
 ])
-def test_the_plan_is_prelude_inside_and_outside_per_subcommand(cmd, fetch, inside, outside):
+def test_the_plan_is_prelude_inside_and_outside_per_subcommand(cmd, fetch, inside, outside, monkeypatch):
+    monkeypatch.setattr(cb, "host_triple", lambda: "aarch64-unknown-linux-gnu")
     plan = cb.plan(cmd.split())
     assert plan == (fetch.split(), inside.split(), outside.split() if outside else None), plan
+
+
+@pytest.mark.parametrize("cmd,fetch", [
+    # a cross build compiles its build scripts and proc-macros for the HOST, whose
+    # platform-gated crates a `--target <ios>` fetch leaves out; the compile inside has
+    # no network, so the prelude fetches the host's too (0.1.7: the App Store FFI's
+    # `cargo build --target aarch64-apple-ios` on a cold hosted runner died on
+    # objc2-core-wlan, a macOS-only crate the iOS-filtered fetch had skipped)
+    ("cargo build --locked -p fauna-ffi --target aarch64-apple-ios",
+     "cargo fetch --locked --target aarch64-apple-ios --target aarch64-apple-darwin"),
+    ("cargo build --target=aarch64-apple-ios-sim -p x",
+     "cargo fetch --target=aarch64-apple-ios-sim --target aarch64-apple-darwin"),
+    # the host's own target needs nothing more
+    ("cargo build --target aarch64-apple-darwin -p x", "cargo fetch --target aarch64-apple-darwin"),
+    ("cargo build --target=aarch64-apple-darwin -p x", "cargo fetch --target=aarch64-apple-darwin"),
+    # no target: an unfiltered fetch already holds every platform
+    ("cargo build -p x", "cargo fetch"),
+])
+def test_a_cross_build_prelude_fetches_the_host_platform_too(cmd, fetch, monkeypatch):
+    monkeypatch.setattr(cb, "host_triple", lambda: "aarch64-apple-darwin")
+    assert cb.plan(cmd.split())[0] == fetch.split()
+
+
+def test_an_unknown_host_adds_no_target(monkeypatch):
+    monkeypatch.setattr(cb, "host_triple", lambda: None)
+    assert cb.plan("cargo build --target aarch64-apple-ios".split())[0] == \
+        "cargo fetch --target aarch64-apple-ios".split()
+
+
+@pytest.mark.parametrize("system,machine,triple", [
+    ("Darwin", "arm64", "aarch64-apple-darwin"),
+    ("Darwin", "x86_64", "x86_64-apple-darwin"),
+    ("Linux", "aarch64", "aarch64-unknown-linux-gnu"),
+    ("Linux", "x86_64", "x86_64-unknown-linux-gnu"),
+    ("Windows", "ARM64", None),
+])
+def test_the_host_triple_is_read_from_the_platform(system, machine, triple, monkeypatch):
+    monkeypatch.setattr(cb.platform, "system", lambda: system)
+    monkeypatch.setattr(cb.platform, "machine", lambda: machine)
+    assert cb.host_triple() == triple
 
 
 @pytest.mark.parametrize("args,own", [

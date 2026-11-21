@@ -1,7 +1,6 @@
 package com.fauna.app.ui.screen
 
 import androidx.compose.foundation.layout.*
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -18,6 +17,7 @@ import androidx.compose.ui.unit.dp
 import com.fauna.app.R
 import social.fauna.generated.Ids
 import uniffi.fauna_launch_machine.AccountIndexRefusal
+import com.fauna.app.ui.controls.Button
 
 /**
  * Launch-screen `launch_account_index_unreadable` surface: the saved account

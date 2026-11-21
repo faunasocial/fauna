@@ -38,12 +38,14 @@ struct CalendarListView: View {
                     Button { vm.previousPeriod() } label: { Image(systemName: "chevron.left") }
                         .accessibilityIdentifier(Ids.eventsPrevMonth)
                         .automationActivate(Ids.eventsPrevMonth) { vm.previousPeriod() }
+                        .faunaPossible(vm.panPossibility)
                     Spacer()
                     automationText(Ids.calendarDateLabel, vm.currentDateLabel)
                     Spacer()
                     Button { vm.nextPeriod() } label: { Image(systemName: "chevron.right") }
                         .accessibilityIdentifier(Ids.eventsNextMonth)
                         .automationActivate(Ids.eventsNextMonth) { vm.nextPeriod() }
+                        .faunaPossible(vm.panPossibility)
                 }
                 .padding(.horizontal)
 
@@ -127,11 +129,14 @@ struct CalendarListView: View {
                                                 // local); Create is the commit,
                                                 // and Cancel beside it is local.
                                                 .faunaGate("fauna.bridges.provision_calendar")
+                                                .faunaPossible(vm.calendarWriteGate)
                                                 Button(L.common.cancel) { vm.showNewCalendar = false }
                                                     .controlSize(.small)
                                             }
                                         }
                                     }
+
+                                    CalendarListEmptyState(vm: vm)
 
                                     ForEach(vm.calendars) { cal in
                                         HStack {
@@ -245,7 +250,10 @@ struct CalendarListView: View {
                         .accessibilityIdentifier(mode.accessibilityId)
                         // The driver clicks the per-mode id (calendar-view-*),
                         // not the segmented control's own id, to switch views.
-                        .automationActivate(mode.accessibilityId) { vm.viewMode = mode }
+                        .automationActivate(
+                            mode.accessibilityId,
+                            attributes: { ["state": vm.viewMode == mode ? "on" : "off"] }
+                        ) { vm.viewMode = mode }
                     }
                 }
                 .accessibilityElement(children: .contain)
@@ -294,20 +302,26 @@ struct CalendarListView: View {
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     HStack(spacing: 12) {
-                        Button { vm.showNewCalendar.toggle() } label: {
+                        // Painted from the shared write predicate (events.md
+                        // § The other calendar writes); an open form can
+                        // always be closed.
+                        Button { vm.toggleNewCalendar() } label: {
                             Image(systemName: "calendar.badge.plus")
                         }
                         .accessibilityIdentifier(Ids.newCalendarBtn)
-                        .automationActivate(Ids.newCalendarBtn) { vm.showNewCalendar.toggle() }
+                        .automationActivate(Ids.newCalendarBtn) { vm.toggleNewCalendar() }
+                        .faunaPossible(vm.showNewCalendar ? .possible : vm.calendarWriteGate)
 
-                        // Always shown (matching macOS' toolbar) so a new event can
-                        // be created without a prior calendar select — createEvent
-                        // falls back to the first available calendar.
-                        Button { vm.showNewEvent.toggle() } label: {
+                        // Shown without a prior calendar select — createEvent falls
+                        // back to the first loaded calendar — but painted from the
+                        // shared create predicate (ruling 3): disabled with the
+                        // reason while no calendar can hold an event.
+                        Button { vm.toggleNewEvent() } label: {
                             Image(systemName: "plus")
                         }
                         .accessibilityIdentifier(Ids.newEventBtn)
-                        .automationActivate(Ids.newEventBtn) { vm.showNewEvent.toggle() }
+                        .automationActivate(Ids.newEventBtn) { vm.toggleNewEvent() }
+                        .faunaPossible(vm.showNewEvent ? .possible : vm.createPossibility)
                     }
                 }
             }

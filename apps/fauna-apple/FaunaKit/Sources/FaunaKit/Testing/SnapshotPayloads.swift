@@ -11,17 +11,13 @@ public struct HandleCheckSnapshotPayload: Decodable {
     public let outcome: HandleCheckOutcomePayload
     public let message: LocalizedTextPayload
     public let continue_enabled: Bool
-    public let control_checkbox_visible: Bool
-    public let control_checkbox_checked: Bool
 
     public func intoSnapshot() -> HandleCheckSnapshot {
         HandleCheckSnapshot(
             phase: parsePhase(phase),
             outcome: outcome.intoOutcome(),
             message: message.intoLocalizedText(),
-            continueEnabled: continue_enabled,
-            controlCheckboxVisible: control_checkbox_visible,
-            controlCheckboxChecked: control_checkbox_checked
+            continueEnabled: continue_enabled
         )
     }
 }

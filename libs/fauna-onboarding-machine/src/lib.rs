@@ -7,6 +7,9 @@ uniffi::setup_scaffolding!("fauna_onboarding_machine");
 
 pub mod admin_nat_mode;
 pub(crate) mod cancel;
+/// The credential forms' Verify / Connect / sign-in answers.
+pub(crate) mod credential_gate;
+pub mod drafts;
 pub mod error;
 pub mod helpers;
 /// The `hosted-auth` field's device-authorization flow, shared by the wizard
@@ -17,6 +20,8 @@ pub mod nest_api;
 pub mod observer;
 pub mod outcome;
 pub mod poll;
+/// The choose-providers page (`behavior/onboarding-provisioning.md` § 3d).
+pub mod provider_choice;
 pub(crate) mod recovery_config;
 /// Retiring an app-provisioned nest (`behavior/nest-retirement.md`).
 pub mod retire;
@@ -24,6 +29,10 @@ pub mod snapshots;
 pub mod state;
 
 pub use admin_nat_mode::AdminNatModeMachine;
+pub use drafts::{
+    claim_code_draft_possibility, emergency_lockout_possibility, handle_draft_possibility,
+    identity_import_possibility, invite_code_draft_possibility, recovery_entry_possibility,
+};
 pub use error::OnboardingError;
 pub use helpers::{
     format_price, handle_tld, qualify_reclaim_handle, server_type_allowed_for_mail,

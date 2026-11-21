@@ -337,6 +337,27 @@ impl CacheDb {
         Ok(results)
     }
 
+    /// The one superadmin, when exactly one exists — the actor whose removal
+    /// the superadmin floor refuses ([`Self::can_remove_admin`] answers `false`
+    /// for it and `true` for every other target). One batch read for the users
+    /// page's per-row `last_superadmin` flag, so a page asks no per-row query.
+    /// `None` with two or more superadmins (any one may go) and with none.
+    pub async fn sole_superadmin(&self) -> Result<Option<Vec<u8>>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare("SELECT actor_id FROM admin_actor_ids WHERE role = 'superadmin' LIMIT 2")
+            .context("prepare list superadmins")?;
+        let ids = stmt
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .context("query superadmins")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("read superadmin row")?;
+        Ok(match ids.as_slice() {
+            [only] => Some(only.clone()),
+            _ => None,
+        })
+    }
+
     /// Count the number of admin actors.
     pub async fn admin_count(&self) -> Result<i64> {
         let conn = self.conn.lock().await;

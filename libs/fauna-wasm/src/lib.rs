@@ -1197,6 +1197,54 @@ pub fn refused_as_not_ready(reason: &str) -> bool {
     fauna_account_plane::preference_surfaces::refused_as_not_ready(reason)
 }
 
+/// `muted-word-add-button` and the input's Enter:
+/// `fauna_client_config::muted_word_add_possibility` — a term to mute and no
+/// change still on its way (`docs/goal/ui/settings.md` § Errors & edge cases,
+/// *Personal form submits paint from their draft*). The web twin of the FFI
+/// face of the same name.
+#[wasm_bindgen(js_name = mutedWordAddPossibility)]
+pub fn muted_word_add_possibility(term: &str, busy: bool) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_config::muted_word_add_possibility(term, busy))
+}
+
+/// `personalization-trained-factor-create-button` (create and save-name):
+/// `fauna_client_personalization::drafts::factor_name_possibility`.
+#[wasm_bindgen(js_name = trainedFactorNamePossibility)]
+pub fn trained_factor_name_possibility(name: &str, busy: bool) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_personalization::drafts::factor_name_possibility(name, busy))
+}
+
+/// `personalization-trained-factor-publish-button` on one row:
+/// `fauna_client_personalization::drafts::publish_open_possibility` — absent
+/// with no addressable model, blocked while the live feed manager is not up.
+#[wasm_bindgen(js_name = trainedFactorPublishOpenPossibility)]
+pub fn trained_factor_publish_open_possibility(
+    has_factor_key: bool,
+    manager_ready: bool,
+    busy: bool,
+) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(
+        &fauna_client_personalization::drafts::publish_open_possibility(
+            has_factor_key,
+            manager_ready,
+            busy,
+        ),
+    )
+}
+
+/// `personalization-trained-factor-publish-submit-button`:
+/// `fauna_client_personalization::drafts::publish_submit_possibility`.
+#[wasm_bindgen(js_name = trainedFactorPublishSubmitPossibility)]
+pub fn trained_factor_publish_submit_possibility(
+    name: &str,
+    any_kept: bool,
+    busy: bool,
+) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(
+        &fauna_client_personalization::drafts::publish_submit_possibility(name, any_kept, busy),
+    )
+}
+
 /// `fauna_core::scoring::MutedKeywordLevel::of` → the level the muted-words
 /// page's level picker shows for a row's stored `weight`: `"hide"` iff the
 /// weight collapses (the full penalty), else `"show-less"`. The web twin of
@@ -1208,41 +1256,466 @@ pub fn muted_keyword_level(weight: f64) -> Result<JsValue, JsValue> {
     crate::rpc::to_js(&fauna_core::scoring::MutedKeywordLevel::of(weight as i64))
 }
 
-/// `fauna_protocol::offline_class::affordance` → `{ available: boolean, reason?:
-/// LocalizedText }` — W4 (account-data-plane.md § Workstreams) phase 4's UI-desensitizing decision, the ONE rule that
-/// says whether a surface may offer an affordance right now
+/// `fauna_protocol::offline_class::affordance(..).possibility()` → W4
+/// (account-data-plane.md § Workstreams) phase 4's UI-desensitizing decision,
+/// the ONE rule that says whether a surface may offer an affordance right now
 /// (`account-data-plane.md` § The offline-mutation contract → *How a surface
-/// asks*). `kind` is the wire kind the gesture issues; `connection_state` is the
-/// same lowercase word `connectionStateLabel` takes, so the SPA's
-/// `connection-status` indicator and its gate cannot disagree about what
-/// "connected" means.
-///
-/// The SPA calls this instead of testing a class itself: the rule makes three
-/// rulings that are easy to get subtly backwards (only class 3 desensitizes; an
-/// unregistered kind stays *available*; only the *known* offline words count as
-/// offline), and `reason` is per affordance — the charter forbids expressing it
-/// as a global "you are offline" banner (§ R11). `reason` is `undefined`
-/// exactly when `available` is `true`; resolve it through `resolveLocalized`.
-/// The wasm twin of the native `offlineAffordance()` UniFFI free fn.
-#[wasm_bindgen(js_name = offlineAffordance)]
-pub fn offline_affordance(kind: &str, connection_state: &str) -> Result<JsValue, JsValue> {
-    #[derive(serde::Serialize)]
-    struct Affordance {
-        available: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        reason: Option<fauna_core::localized::LocalizedText>,
+/// asks*), in the shared answer type every gated affordance's predicate gives (`docs/goal/ui/README.md` § Offer only what is
+/// possible, rule 6): `{state: "possible"}`, `{state: "blocked", reason:
+/// LocalizedText}` or `{state: "absent"}` (`fauna_core::possibility::Possibility`'s
+/// serde form). It is the seam a page folds its own predicate into, so the
+/// SPA paints enabled, disabled-with-reason or nothing from one value. `kind` is
+/// the wire kind the gesture issues; `connection_state` is the same lowercase
+/// word `connectionStateLabel` takes. The SPA calls this instead of testing a
+/// class itself (only class 3 desensitizes; an unregistered kind stays
+/// possible; only the *known* offline words count as offline), and the reason
+/// is per affordance, never a global "you are offline" banner (§ R11). The wasm
+/// twin of the native `offline_possibility()` UniFFI free fn.
+#[wasm_bindgen(js_name = offlinePossibility)]
+pub fn offline_possibility(kind: &str, connection_state: &str) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(
+        &fauna_protocol::offline_class::affordance(kind, connection_state).possibility(),
+    )
+}
+
+/// `fauna_protocol::offline_class::carve_out_affordance` → the offline answer
+/// for a fetch that has **no wire kind** but still needs a live nest (the
+/// bulk-binary carve-out: the mail export's Download GET, a snapshot file's
+/// download), in [`offline_possibility`]'s `Possibility` serde form — the same
+/// offline words and the same reason, so the SPA never passes a made-up kind
+/// to [`offline_possibility`] nor tests the state word itself
+/// (`docs/goal/behavior/mail-export.md` § Download flow). The wasm twin of the
+/// tui's `mail_export_download_possibility`.
+#[wasm_bindgen(js_name = carveOutPossibility)]
+pub fn carve_out_possibility(connection_state: &str) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(
+        &fauna_protocol::offline_class::carve_out_affordance(connection_state).possibility(),
+    )
+}
+
+/// `fauna_core::possibility::ReadState` from the word the SPA tracks a read
+/// with: `pending` | `failed` | `resolved`. An unknown word is still pending,
+/// so a typo never enables a control on a guess (rule 5).
+fn read_state(word: &str) -> fauna_core::possibility::ReadState {
+    use fauna_core::possibility::ReadState;
+    match word {
+        "resolved" => ReadState::Resolved,
+        "failed" => ReadState::Failed,
+        _ => ReadState::Pending,
     }
-    let verdict = fauna_protocol::offline_class::affordance(kind, connection_state);
-    crate::rpc::to_js(&Affordance {
-        available: verdict.is_available(),
-        reason: verdict.reason(),
-    })
+}
+
+/// The SPA's read word for a `fauna_core::possibility::ReadState` — the
+/// inverse of [`read_state`], for a machine face that reports where its own
+/// read stands (`WasmForwarderMachine::readState`,
+/// `WasmBridgeApprovalMachine::readState`).
+pub(crate) fn read_word(read: fauna_core::possibility::ReadState) -> &'static str {
+    use fauna_core::possibility::ReadState;
+    match read {
+        ReadState::Pending => "pending",
+        ReadState::Failed => "failed",
+        ReadState::Resolved => "resolved",
+    }
+}
+
+/// The answer a control that WRITES what a read decides gives
+/// (`docs/goal/behavior/admin.md` § Errors & edge cases, *Controls wait for
+/// their read*) — `Possibility::for_write` over the page's read word and
+/// whether its own change is idle: still loading / failed to load first, then
+/// `common.in_flight` while a change is on its way. The page's own reads
+/// (admin-nest's reflective read) ask it, so the SPA never spells those
+/// reasons. The wasm twin of `write_after_read_possibility`.
+#[wasm_bindgen(js_name = writeAfterReadPossibility)]
+pub fn write_after_read_possibility(read: &str, idle: bool) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_core::possibility::Possibility::for_write(
+        read_state(read),
+        idle,
+    ))
+}
+
+/// The answer a read alone gives (rule 5) — `Possibility::from_read` over
+/// `pending` | `failed` | `resolved`, so the SPA never spells
+/// `common.still_loading` / `common.load_failed` itself (profile follow and
+/// block). The wasm twin of `read_possibility`.
+#[wasm_bindgen(js_name = readPossibility)]
+pub fn read_possibility(read: &str) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_core::possibility::Possibility::from_read(
+        read_state(read),
+    ))
+}
+
+/// `personalization-share-signals-toggle`:
+/// `fauna_client_personalization::engagement::share_signals_possibility` —
+/// blocked `errors.feed_not_ready` while the tab's feed manager is not up,
+/// then the `signal_share.status` read's answer (`pending` | `failed` |
+/// `resolved`; `docs/goal/behavior/engagement-cues.md` § Layer B). The toggle
+/// paints from it and its press asks it again. The wasm twin of the native
+/// `share_signals_possibility`.
+#[wasm_bindgen(js_name = engagementShareSignalsPossibility)]
+pub fn engagement_share_signals_possibility(
+    manager_ready: bool,
+    read: &str,
+) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(
+        &fauna_client_personalization::engagement::share_signals_possibility(
+            manager_ready,
+            read_state(read),
+        ),
+    )
+}
+
+/// `personalization-clear-engagement-data-button`:
+/// `fauna_client_personalization::engagement::clear_engagement_possibility` —
+/// blocked `errors.feed_not_ready` while the feed manager is not up. The wasm
+/// twin of the native `clear_engagement_possibility`.
+#[wasm_bindgen(js_name = engagementClearPossibility)]
+pub fn engagement_clear_possibility(manager_ready: bool) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(
+        &fauna_client_personalization::engagement::clear_engagement_possibility(manager_ready),
+    )
+}
+
+/// `member-review-remove-button`: `fauna_core::data::member_review_remove_possibility`
+/// — blocked `settings.recovery_kit.review_remove_not_ready` until the tab's
+/// conversations session is up (`docs/goal/behavior/succession-propagation.md`
+/// § Propagation). The wasm twin of the native
+/// `member_review_remove_possibility`.
+#[wasm_bindgen(js_name = memberReviewRemovePossibility)]
+pub fn member_review_remove_possibility(conversations_ready: bool) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_core::data::member_review_remove_possibility(
+        conversations_ready,
+    ))
+}
+
+/// Whether `feature`'s own affordance (the zap-signer designate, the claim
+/// redeem) can succeed now — `fauna_client_features::gate_possibility` over
+/// the `featuresStatus` rows the page holds, `null` until that read answered
+/// (`docs/goal/ui/README.md` § Offer only what is possible, rules 2, 5, 6).
+/// The restriction's `{window}` argument is an i18n key the SPA's table holds,
+/// so it crosses unresolved: paint a blocked reason with
+/// `resolveLocalizedNested`. The wasm twin of `features_gate_possibility`.
+#[wasm_bindgen(js_name = featuresGatePossibility)]
+pub fn features_gate_possibility(rows: JsValue, feature: &str) -> Result<JsValue, JsValue> {
+    let rows: Option<Vec<fauna_client_features::FeatureRow>> =
+        serde_wasm_bindgen::from_value(rows).map_err(crate::rpc::err_to_js)?;
+    crate::rpc::to_js(&fauna_client_features::gate_possibility(
+        rows.as_deref(),
+        feature,
+        |_| None::<String>,
+    ))
+}
+
+/// `notifications-mark-all-read`:
+/// `fauna_client_notifications::mark_all_read_possibility` over the page's
+/// first list read (`pending` | `failed` | `resolved`) and the app's unread
+/// count.
+#[wasm_bindgen(js_name = notificationsMarkAllReadPossibility)]
+pub fn notifications_mark_all_read_possibility(
+    read: &str,
+    unread: u32,
+) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_notifications::mark_all_read_possibility(
+        read_state(read),
+        unread as usize,
+    ))
+}
+
+/// `notifications-clear-all`: `fauna_client_notifications::clear_all_possibility`
+/// over the page's first list read and the rows it shows.
+#[wasm_bindgen(js_name = notificationsClearAllPossibility)]
+pub fn notifications_clear_all_possibility(read: &str, rows: u32) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_notifications::clear_all_possibility(
+        read_state(read),
+        rows as usize,
+    ))
+}
+
+// The form-validity predicates (`docs/goal/ui/README.md` § Offer only what is
+// possible, rule 4's form case; the page rulings in `docs/goal/ui/feed.md`,
+// `search.md` and `nostr.md` § Errors & edge cases): each forwards one shared
+// predicate and ships its `Possibility` in the same serde form as
+// [`offline_possibility`], so the SPA paints a submit disabled-with-reason from
+// one value, asks the same function on submit, and folds the offline answer in
+// beside it. The wasm twins of `libs/fauna-ffi/src/forms.rs`.
+
+/// `post-submit-button`: `fauna_feed::forms::post_submit_possibility`.
+#[wasm_bindgen(js_name = feedPostSubmitPossibility)]
+pub fn feed_post_submit_possibility(text: &str) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_feed::forms::post_submit_possibility(text))
+}
+
+/// `feed-reply-submit-button`: `fauna_feed::forms::reply_submit_possibility`.
+#[wasm_bindgen(js_name = feedReplySubmitPossibility)]
+pub fn feed_reply_submit_possibility(text: &str) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_feed::forms::reply_submit_possibility(text))
+}
+
+/// `create-feed`: `fauna_feed::forms::create_feed_possibility`.
+#[wasm_bindgen(js_name = feedCreatePossibility)]
+pub fn feed_create_possibility(name: &str) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_feed::forms::create_feed_possibility(name))
+}
+
+/// `bridge-form-subscribe-button`:
+/// `fauna_feed::forms::bridge_subscribe_possibility`.
+#[wasm_bindgen(js_name = feedBridgeSubscribePossibility)]
+pub fn feed_bridge_subscribe_possibility(kind: &str, uri: &str) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_feed::forms::bridge_subscribe_possibility(kind, uri))
+}
+
+/// `search-submit-button`: `fauna_client_search::query_possibility`.
+#[wasm_bindgen(js_name = searchQueryPossibility)]
+pub fn search_query_possibility(query: &str) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_search::query_possibility(query))
+}
+
+/// `nostr-link-button`: `fauna_client_bridges::link_possibility`.
+#[wasm_bindgen(js_name = nostrLinkPossibility)]
+pub fn nostr_link_possibility(
+    mode: &str,
+    nsec: &str,
+    bunker_url: &str,
+) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_bridges::link_possibility(
+        mode, nsec, bunker_url,
+    ))
+}
+
+/// `nostr-add-follow`: `fauna_client_bridges::add_follow_possibility`.
+#[wasm_bindgen(js_name = nostrAddFollowPossibility)]
+pub fn nostr_add_follow_possibility(pubkey: &str) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_bridges::add_follow_possibility(pubkey))
+}
+
+/// `nostr-zap-signer-add-btn`'s draft half:
+/// `fauna_client_bridges::zap_signer_add_possibility`.
+#[wasm_bindgen(js_name = nostrZapSignerAddPossibility)]
+pub fn nostr_zap_signer_add_possibility(pubkey: &str) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_bridges::zap_signer_add_possibility(pubkey))
+}
+
+/// The *Connected apps* section's gate over the stored signing mode
+/// (`undefined` with no linked account):
+/// `fauna_client_bridges::connected_apps_possibility`.
+#[wasm_bindgen(js_name = nostrConnectedAppsPossibility)]
+pub fn nostr_connected_apps_possibility(signing_mode: Option<String>) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_bridges::connected_apps_possibility(
+        signing_mode.as_deref(),
+    ))
+}
+
+/// `nostr-add-relay`: `fauna_protocol::nostr_relay::add_relay_possibility`
+/// over the relays already listed and the typed draft.
+#[wasm_bindgen(js_name = nostrAddRelayPossibility)]
+pub fn nostr_add_relay_possibility(existing: Vec<String>, input: &str) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_protocol::nostr_relay::add_relay_possibility(
+        &existing, input,
+    ))
+}
+
+/// `family-contact-add-button`: `fauna_client_family::forms::contact_add_possibility`.
+#[wasm_bindgen(js_name = familyContactAddPossibility)]
+pub fn family_contact_add_possibility(input: &str) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_family::forms::contact_add_possibility(input))
+}
+
+/// `family-transfer-button`: `fauna_client_family::forms::transfer_possibility`.
+#[wasm_bindgen(js_name = familyTransferPossibility)]
+pub fn family_transfer_possibility(input: &str) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_family::forms::transfer_possibility(input))
+}
+
+/// `family-policy-save-button` and the feature-limit editor's save:
+/// `fauna_client_family::forms::policy_save_possibility` (empty cell = unset).
+#[wasm_bindgen(js_name = familyPolicySavePossibility)]
+pub fn family_policy_save_possibility(
+    window_start: &str,
+    window_end: &str,
+    daily: &str,
+) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_family::forms::policy_save_possibility(
+        window_start,
+        window_end,
+        daily,
+    ))
+}
+
+/// The Family tab gate: `fauna_client_family::forms::has_family_surface` —
+/// never an SPA-local re-derivation.
+#[wasm_bindgen(js_name = familyHasSurface)]
+pub fn family_has_surface(supervised: bool, wards: u32, incoming_transfers: u32) -> bool {
+    fauna_client_family::forms::has_family_surface(
+        supervised,
+        wards as usize,
+        incoming_transfers as usize,
+    )
+}
+
+/// `bridge-add-follow-button`:
+/// `fauna_client_bridges::bridge_forms::bridge_follow_possibility`.
+#[wasm_bindgen(js_name = bridgeFollowPossibility)]
+pub fn bridge_follow_possibility(id: &str) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_bridges::bridge_forms::bridge_follow_possibility(id))
+}
+
+/// `bridge-plugin-install-submit`:
+/// `fauna_client_bridges::bridge_forms::plugin_install_possibility`.
+#[wasm_bindgen(js_name = bridgePluginInstallPossibility)]
+pub fn bridge_plugin_install_possibility(document_url: &str) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_bridges::bridge_forms::plugin_install_possibility(document_url))
+}
+
+/// `custody-mint-button`: `fauna_client_conversations::custody_mint_possibility`
+/// over the `custodyMintCandidatesJson` answer the page read — `null` before
+/// that read (not enabled on a guess), an empty array blocked with the
+/// start-a-conversation step (`docs/goal/ui/devices.md` § Errors & edge cases).
+#[wasm_bindgen(js_name = custodyMintPossibility)]
+pub fn custody_mint_possibility(candidates: JsValue) -> Result<JsValue, JsValue> {
+    let rows: Option<Vec<serde::de::IgnoredAny>> =
+        if candidates.is_null() || candidates.is_undefined() {
+            None
+        } else {
+            Some(serde_wasm_bindgen::from_value(candidates).map_err(crate::rpc::err_to_js)?)
+        };
+    crate::rpc::to_js(&fauna_client_conversations::custody_mint_possibility(
+        rows.as_deref(),
+    ))
+}
+
+/// `custody-mint-confirm-button`:
+/// `fauna_client_conversations::custody_mint_confirm_possibility`.
+#[wasm_bindgen(js_name = custodyMintConfirmPossibility)]
+pub fn custody_mint_confirm_possibility(host_picked: bool) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_conversations::custody_mint_confirm_possibility(host_picked))
+}
+
+/// `folder-follow-confirm`: `fauna_client_folders::forms::follow_possibility`.
+#[wasm_bindgen(js_name = folderFollowPossibility)]
+pub fn folder_follow_possibility(
+    handle: &str,
+    name: &str,
+    ready: bool,
+) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_folders::forms::follow_possibility(
+        handle, name, ready,
+    ))
+}
+
+/// `folder-share-confirm`: `fauna_client_folders::forms::share_possibility`.
+#[wasm_bindgen(js_name = folderSharePossibility)]
+pub fn folder_share_possibility(recipient: &str, ready: bool) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_folders::forms::share_possibility(
+        recipient, ready,
+    ))
+}
+
+/// `subscription-tier-form-save`:
+/// `fauna_client_subscriptions::forms::tier_form_possibility`.
+#[wasm_bindgen(js_name = subscriptionTierFormPossibility)]
+pub fn subscription_tier_form_possibility(name: &str) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_subscriptions::forms::tier_form_possibility(
+        name,
+    ))
+}
+
+/// The redeem button's draft half:
+/// `fauna_client_subscriptions::forms::redeem_code_possibility`.
+// `payments`-gated doc line — see § Gated element ids live in gated DOC LINES.
+#[cfg_attr(
+    feature = "payments",
+    doc = " Element `subscription-claim-redeem-button`."
+)]
+#[wasm_bindgen(js_name = subscriptionRedeemCodePossibility)]
+pub fn subscription_redeem_code_possibility(code: &str) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_subscriptions::forms::redeem_code_possibility(
+        code,
+    ))
+}
+
+// The own-tier and mail gates (`docs/goal/ui/folders.md` § Errors & edge
+// cases, *Own-tier and mail gates*; `docs/goal/ui/profile.md` § Errors & edge
+// cases, *A tier before what sells it*): the wasm twins of fauna-ffi's
+// `src/forms.rs` faces, the read crossing as `pending` | `failed` | `resolved`.
+
+/// `folder-paywall-tier-select`: `own_tiers_possibility`, use `Paywall`.
+#[wasm_bindgen(js_name = folderPaywallPossibility)]
+pub fn folder_paywall_possibility(read: &str, own_tiers: u32) -> Result<JsValue, JsValue> {
+    use fauna_client_subscriptions::own_tiers::{OwnTierUse, own_tiers_possibility};
+    crate::rpc::to_js(&own_tiers_possibility(
+        read_state(read),
+        own_tiers as usize,
+        OwnTierUse::Paywall,
+    ))
+}
+
+/// The claim-code mint button: `own_tiers_possibility`, use `ClaimCode`.
+// `payments`-gated doc line — see § Gated element ids live in gated DOC LINES.
+#[cfg_attr(
+    feature = "payments",
+    doc = " Element `subscription-claim-mint-button`."
+)]
+#[wasm_bindgen(js_name = subscriptionClaimMintPossibility)]
+pub fn subscription_claim_mint_possibility(read: &str, own_tiers: u32) -> Result<JsValue, JsValue> {
+    use fauna_client_subscriptions::own_tiers::{OwnTierUse, own_tiers_possibility};
+    crate::rpc::to_js(&own_tiers_possibility(
+        read_state(read),
+        own_tiers as usize,
+        OwnTierUse::ClaimCode,
+    ))
+}
+
+/// `subscription-provider-add-button`: `own_tiers_possibility`, use
+/// `PaymentProvider`.
+#[wasm_bindgen(js_name = subscriptionProviderAddPossibility)]
+pub fn subscription_provider_add_possibility(
+    read: &str,
+    own_tiers: u32,
+) -> Result<JsValue, JsValue> {
+    use fauna_client_subscriptions::own_tiers::{OwnTierUse, own_tiers_possibility};
+    crate::rpc::to_js(&own_tiers_possibility(
+        read_state(read),
+        own_tiers as usize,
+        OwnTierUse::PaymentProvider,
+    ))
+}
+
+/// `folder-webdav-toggle`: `webdav_serve_possibility` over the mail-custody
+/// read (`holds_msek` is its answer, ignored unless it resolved).
+#[wasm_bindgen(js_name = folderWebdavServePossibility)]
+pub fn folder_webdav_serve_possibility(read: &str, holds_msek: bool) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(
+        &fauna_client_folders::webdav_provision::webdav_serve_possibility(
+            read_state(read),
+            holds_msek,
+        ),
+    )
+}
+
+/// `wizard-next-button`: the folders machine's `wizard_next_possibility` over
+/// the wizard snapshot the Devices machine handed the SPA (its own JSON).
+#[wasm_bindgen(js_name = folderWizardNextPossibility)]
+pub fn folder_wizard_next_possibility(wizard: JsValue) -> Result<JsValue, JsValue> {
+    let wizard: fauna_devices_machine::FolderWizardSnapshot =
+        serde_wasm_bindgen::from_value(wizard).map_err(crate::rpc::err_to_js)?;
+    crate::rpc::to_js(
+        &fauna_devices_machine::folder_wizard_possibility::wizard_next_possibility(&wizard),
+    )
+}
+
+/// `wizard-create-button`: the folders machine's `wizard_create_possibility`.
+#[wasm_bindgen(js_name = folderWizardCreatePossibility)]
+pub fn folder_wizard_create_possibility(wizard: JsValue) -> Result<JsValue, JsValue> {
+    let wizard: fauna_devices_machine::FolderWizardSnapshot =
+        serde_wasm_bindgen::from_value(wizard).map_err(crate::rpc::err_to_js)?;
+    crate::rpc::to_js(
+        &fauna_devices_machine::folder_wizard_possibility::wizard_create_possibility(&wizard),
+    )
 }
 
 /// `fauna_protocol::offline_class::is_online` → is this transport word one the
 /// offline gate treats as **online**? The `connectionIsOnline` twin of the
 /// native `connection_is_online` UniFFI free fn, and the same rule
-/// [`offline_affordance`] applies — split out for the caller that has a
+/// [`offline_possibility`] applies — split out for the caller that has a
 /// connection state but no kind in hand.
 ///
 /// Its one consumer today is web's e2e automation surface, which publishes
@@ -2428,6 +2901,19 @@ pub fn next_sort_order(current: Option<String>) -> Result<JsValue, JsValue> {
     )
 }
 
+/// `fauna_conversations::snapshot::SortOrder::label` → the order in force, named, as a
+/// `LocalizedText` for `conversation-sort`'s tooltip (`resolveLocalized`). Takes the
+/// serde variant name the snapshot's `sort` serializes; an unknown/absent value reads
+/// as the default order, like [`next_sort_order`]. A cycle names the value in force
+/// (`e2e-systematic-ui-walks.md` § The possibility invariants, layer (c)); one owner
+/// shared with linux/tui/apple instead of a per-app three-case map.
+#[wasm_bindgen(js_name = sortOrderLabel)]
+pub fn sort_order_label(current: Option<String>) -> Result<JsValue, JsValue> {
+    let order = fauna_conversations::snapshot::SortOrder::parse(current.as_deref().unwrap_or(""))
+        .unwrap_or_default();
+    crate::rpc::to_js(&order.label())
+}
+
 /// `fauna_conversations::quickset_emojis` → the reaction quick-set as a JS array of
 /// strings, in the one shared order (`docs/goal/ui/conversations.md` § Reactions &
 /// message delete). The wasm twin of the UniFFI face the native apps read; web is the
@@ -2707,6 +3193,23 @@ pub fn bridge_card_title(name: String, glyph: Option<String>) -> String {
     fauna_client_bridges::bridge_card_title_of(&name, glyph.as_deref())
 }
 
+/// `bridge-action-button` (Link): `fauna_client_bridges::bridge_link_possibility_of`
+/// over the same three values as [`bridge_link_block`] — blocked by the reason
+/// `bridge-link-blocked-reason` paints (`bridges.md` § Errors & edge cases,
+/// rule 4).
+#[wasm_bindgen(js_name = bridgeLinkPossibility)]
+pub fn bridge_link_possibility(
+    linked: bool,
+    error: Option<String>,
+    applicable_modes: u32,
+) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_bridges::bridge_link_possibility_of(
+        linked,
+        error.as_deref(),
+        applicable_modes as usize,
+    ))
+}
+
 /// `fauna_client_bridges::link_block` — why a bridge's Link control is not
 /// actionable (`bridges.md` § Errors & edge cases). Returns `null` when it **is**
 /// actionable, else `{ kind: "provider_error", message }` (the nest's own
@@ -2899,6 +3402,16 @@ pub fn import_source_kind_label(kind: JsValue) -> Result<JsValue, JsValue> {
     crate::rpc::to_js(&fauna_client_mail_settings::import_source_kind_label(kind))
 }
 
+/// `fauna_client_mail_settings::SOURCE_KINDS` → the `mail-import-source-picker`'s
+/// options in painted order, each the serde variant-name string (`"Gmail"` / …)
+/// the snapshot's `source_kind` carries — so the SPA never keeps its own copy of
+/// the list (`ui/README.md` § Offer only what is possible, rule 6). The picker
+/// filters it through the shared Outlook answer.
+#[wasm_bindgen(js_name = importSourceKinds)]
+pub fn import_source_kinds() -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_mail_settings::SOURCE_KINDS)
+}
+
 /// `fauna_client_mail_settings::import_selected_totals` → `{ mailboxes, messages,
 /// bytes }` (`bytes` is `null` unless every selected mailbox was sized) — the
 /// `mail-import` Confirm step's sum, so the SPA never re-sums `message_count`
@@ -2987,6 +3500,25 @@ pub fn settings_status_label(status: JsValue, enabled: bool) -> Result<JsValue, 
     crate::rpc::to_js(&fauna_client_mail_settings::settings_status_label(
         status, enabled,
     ))
+}
+
+/// `fauna_client_mail_settings::mail_usable_unbuilt` → the mail-usable answer
+/// (`{state: "blocked", reason}`, `Possibility`'s serde form) for an SPA that
+/// holds no mail machine because its build failed — the twin of the UniFFI free
+/// fn (`docs/goal/ui/mail-settings.md` § Errors & edge cases, the mail-usable
+/// gate; `ui/README.md` § Offer only what is possible, rule 7).
+#[wasm_bindgen(js_name = mailUsableUnbuilt)]
+pub fn mail_usable_unbuilt() -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_mail_settings::mail_usable_unbuilt())
+}
+
+/// `fauna_client_mail_settings::mail_usable_unread` → the mail-usable answer
+/// for an SPA whose mail machine is still being built (nothing read yet):
+/// blocked with the shared "checking" reason (`ui/README.md` § Offer only what
+/// is possible, rule 5), so the SPA never spells that reason itself.
+#[wasm_bindgen(js_name = mailUsableUnread)]
+pub fn mail_usable_unread() -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_mail_settings::mail_usable_unread())
 }
 
 /// `fauna_client_search::render::clean_snippet` → display plaintext (strips the
@@ -3375,6 +3907,38 @@ pub fn spam_threshold_band(threshold: f64) -> String {
     fauna_protocol::spam::spam_threshold_band(per_mille)
         .key()
         .to_string()
+}
+
+/// `save-spam-prefs`: `fauna_client_spam::possibility::save_preferences_possibility`
+/// over the page's read word (`pending` | `failed` | `resolved`), the
+/// thresholds the nest last confirmed (`0.0–1.0`, `None` before the read) and
+/// the two slider values — blocked while the read is out and while nothing
+/// differs from the saved pair (`common.nothing_to_save`). The slider values
+/// are the drafts; the comparison is on the wire's per-mille.
+#[wasm_bindgen(js_name = spamSavePreferencesPossibility)]
+pub fn spam_save_preferences_possibility(
+    read: &str,
+    saved_spam: Option<f64>,
+    saved_phishing: Option<f64>,
+    spam: f64,
+    phishing: f64,
+) -> Result<JsValue, JsValue> {
+    let saved = match (saved_spam, saved_phishing) {
+        (Some(spam), Some(phishing)) => Some(fauna_protocol::spam::SpamPreferences {
+            spam_threshold: fauna_protocol::spam::probability_to_per_mille(spam),
+            phishing_threshold: fauna_protocol::spam::probability_to_per_mille(phishing),
+            extra: Default::default(),
+        }),
+        _ => None,
+    };
+    crate::rpc::to_js(
+        &fauna_client_spam::possibility::save_preferences_possibility(
+            read_state(read),
+            saved.as_ref(),
+            &spam.to_string(),
+            &phishing.to_string(),
+        ),
+    )
 }
 
 /// `fauna_protocol::spam::probability_to_per_mille` — the shared `0.0–1.0`
@@ -4111,6 +4675,39 @@ pub fn web_subdomain_view(
 ) -> Result<JsValue, JsValue> {
     let view = fauna_client_web::subdomain_view(enabled, handle.as_deref(), &domain);
     crate::rpc::to_js(&view)
+}
+
+/// `fauna_client_web::subdomain_toggle_possibility` → the `Possibility` the
+/// `web-settings-subdomain-toggle` paints from (`docs/goal/ui/README.md`
+/// § Offer only what is possible): `read` is `pending` | `failed` |
+/// `resolved`, `view` the `webSubdomainView` value or `null` before hydrate.
+#[wasm_bindgen(js_name = webSubdomainTogglePossibility)]
+pub fn web_subdomain_toggle_possibility(read: &str, view: JsValue) -> Result<JsValue, JsValue> {
+    let view: Option<fauna_client_web::SubdomainView> = if view.is_null() || view.is_undefined() {
+        None
+    } else {
+        Some(crate::rpc::from_js(view)?)
+    };
+    crate::rpc::to_js(&fauna_client_web::subdomain_toggle_possibility(
+        read_state(read),
+        view.as_ref(),
+    ))
+}
+
+/// `fauna_client_web::site_link_copy_possibility` → the `Possibility` both
+/// published-post copy buttons paint from, over a `webSiteLinkView` value.
+#[wasm_bindgen(js_name = webSiteLinkCopyPossibility)]
+pub fn web_site_link_copy_possibility(link: JsValue) -> Result<JsValue, JsValue> {
+    let link: fauna_client_web::SiteLinkView = crate::rpc::from_js(link)?;
+    crate::rpc::to_js(&fauna_client_web::site_link_copy_possibility(&link))
+}
+
+/// `fauna_client_web::apex_info_text` → the `admin-web-apex-info` line as a
+/// `LocalizedText`: where the apex serves, or why there is no address — never
+/// a composed `https:///` from an empty serving domain.
+#[wasm_bindgen(js_name = webApexInfoText)]
+pub fn web_apex_info_text(domain: String) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_web::apex_info_text(&domain))
 }
 
 /// `fauna_core::web::apex_url` → the `https://<domain>/` the apex serves at, for
@@ -5171,6 +5768,8 @@ fn chunk_file_inner(data: &[u8]) -> Result<String, String> {
 
 fn extract_chunks_inner(data: &[u8], manifest_json: &str) -> Result<String, String> {
     use fauna_core::chunk::ChunkManifest;
+    // Never a paged root: the manifest is the caller's own fresh chunking of
+    // `data` (the plaintext view), never one fetched from a nest.
     let manifest: ChunkManifest =
         serde_json::from_str(manifest_json).map_err(|e| format!("bad manifest JSON: {e}"))?;
     let chunks = fauna_client_core::chunking::extract_chunks(data, &manifest);
@@ -5757,6 +6356,378 @@ pub fn admin_user_guardian_label(user: JsValue) -> Result<Option<String>, JsValu
 pub fn admin_picker_option(user: JsValue) -> Result<String, JsValue> {
     let user: fauna_protocol::admin::AdminUser = crate::rpc::from_js(user)?;
     Ok(fauna_client_admin::admin_picker_option(&user))
+}
+
+// The users page's offer-only-what-is-possible answers (`admin.md` § 2 →
+// *What a row offers*, § 3 → *Removing a tier*) — the wasm twins of the UniFFI
+// `admin_*_possibility` faces. Each returns `{state: "possible"}`,
+// `{state: "blocked", reason: LocalizedText}` or `{state: "absent"}`
+// (`fauna_core::possibility::Possibility`'s serde shape, like
+// `offline_possibility`); the SPA paints the control from it and asks again
+// before the action.
+
+/// `admin-users-remove-admin-button`:
+/// `fauna_client_admin::remove_admin_possibility` — absent without the role,
+/// blocked on the nest's last superadmin. `user` is the WHOLE
+/// `fauna.admin.users.list` row.
+#[wasm_bindgen(js_name = adminRemoveAdminPossibility)]
+pub fn admin_remove_admin_possibility(user: JsValue) -> Result<JsValue, JsValue> {
+    let user: fauna_protocol::admin::AdminUser = crate::rpc::from_js(user)?;
+    crate::rpc::to_js(&fauna_client_admin::remove_admin_possibility(&user))
+}
+
+/// The admin entry points — `admin-tab`, the Bridges page's hosted-plugin
+/// section: `fauna_client_account::admin_entry_possibility` over the
+/// `fauna.account.am_i_admin` answer (`false` until it answers) — absent for a
+/// non-admin (`admin.md` § Errors & edge cases, *Role and state gates answer
+/// one `Possibility` too*).
+#[wasm_bindgen(js_name = adminEntryPossibility)]
+pub fn admin_entry_possibility(is_admin: bool) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_account::admin_entry_possibility(is_admin))
+}
+
+/// One users-row control's answer — `control` is `"suspend"`, `"evict"`,
+/// `"restore"`, `"make_admin"` or `"take_over"`: the matching
+/// `fauna_client_admin::AdminUserRowControls::*_possibility` sibling over the
+/// row decision [`admin_user_row_controls`] makes (same `user` / `viewer`
+/// contract), absent where the row does not offer it. An unknown control name
+/// is an error, never a guess.
+#[wasm_bindgen(js_name = adminUserRowControlPossibility)]
+pub fn admin_user_row_control_possibility(
+    user: JsValue,
+    viewer: Option<Vec<u8>>,
+    control: &str,
+) -> Result<JsValue, JsValue> {
+    let mut user: fauna_protocol::admin::AdminUser = crate::rpc::from_js(user)?;
+    let viewer = match viewer {
+        Some(v) => v,
+        None => {
+            user.guardian = None;
+            Vec::new()
+        }
+    };
+    let c = fauna_client_admin::admin_user_row_controls(&user, &viewer);
+    let answer = match control {
+        "suspend" => c.suspend_possibility(),
+        "evict" => c.evict_possibility(),
+        "restore" => c.restore_possibility(),
+        "make_admin" => c.make_admin_possibility(),
+        "take_over" => c.take_over_possibility(),
+        other => {
+            return Err(JsValue::from_str(&format!(
+                "adminUserRowControlPossibility: unknown control {other:?}"
+            )));
+        }
+    };
+    crate::rpc::to_js(&answer)
+}
+
+/// The two fields of an admin-nest choice view (`AdminWebAppOriginView` /
+/// `AdminUpdateChannelView`, as the SPA holds them) the `set_possibility`
+/// siblings read.
+#[derive(serde::Deserialize)]
+struct NestChoiceSettable {
+    can_set: bool,
+    status: fauna_core::localized::LocalizedText,
+}
+
+/// The fields of `AdminWebAppOriginView`, as the SPA holds it, that
+/// [`admin_web_app_origin_set_possibility`] reads. `central_possibility`
+/// defaults to absent for a view held from before the field existed.
+#[derive(serde::Deserialize)]
+struct WebAppOriginSettable {
+    can_set: bool,
+    status: fauna_core::localized::LocalizedText,
+    #[serde(default)]
+    central_possibility: Option<PossibilityState>,
+}
+
+/// The tag of a serialized `Possibility` — all a central draft's check needs
+/// (`Possibility` itself is never decoded).
+#[derive(serde::Deserialize)]
+struct PossibilityState {
+    state: String,
+}
+
+impl WebAppOriginSettable {
+    fn central_possibility(&self) -> fauna_core::possibility::Possibility {
+        match self.central_possibility.as_ref().map(|p| p.state.as_str()) {
+            Some("possible") => fauna_core::possibility::Possibility::Possible,
+            _ => fauna_core::possibility::Possibility::Absent,
+        }
+    }
+}
+
+fn nest_choice_settable(view: JsValue) -> Result<Option<NestChoiceSettable>, JsValue> {
+    if view.is_null() || view.is_undefined() {
+        Ok(None)
+    } else {
+        crate::rpc::from_js(view).map(Some)
+    }
+}
+
+/// `admin-nest-web-app-origin-{bundled,central}-radio` / `-save-button`:
+/// `fauna_client_admin::web_app_origin_set_possibility` over the view the
+/// page holds (`null` until the read lands — blocked "still loading"),
+/// blocked by the view's own status sentence where the origin cannot be set.
+///
+/// `draft` (optional, `"bundled"` / `"central"`) is the mode the save would
+/// write: a central draft is blocked by the status sentence while the view's
+/// `central_possibility` is not possible (`web-content-hosting.md` § While the
+/// central origin is not live, the choice is not offered). Omitted, the
+/// answer is the section's.
+#[wasm_bindgen(js_name = adminWebAppOriginSetPossibility)]
+pub fn admin_web_app_origin_set_possibility(
+    view: JsValue,
+    draft: Option<String>,
+) -> Result<JsValue, JsValue> {
+    let view = if view.is_null() || view.is_undefined() {
+        None
+    } else {
+        let v: WebAppOriginSettable = crate::rpc::from_js(view)?;
+        Some(fauna_client_admin::AdminWebAppOriginView {
+            central_possibility: v.central_possibility(),
+            can_set: v.can_set,
+            status: v.status,
+            ..Default::default()
+        })
+    };
+    let draft = draft
+        .as_deref()
+        .and_then(fauna_client_admin::WebAppOrigin::parse);
+    crate::rpc::to_js(&fauna_client_admin::web_app_origin_set_possibility(
+        view.as_ref(),
+        draft,
+    ))
+}
+
+/// `admin-nest-update-channel-*-radio` / `-save-button`:
+/// `fauna_client_admin::update_channel_set_possibility`, the same contract as
+/// [`admin_web_app_origin_set_possibility`].
+#[wasm_bindgen(js_name = adminUpdateChannelSetPossibility)]
+pub fn admin_update_channel_set_possibility(view: JsValue) -> Result<JsValue, JsValue> {
+    let view = nest_choice_settable(view)?.map(|v| fauna_client_admin::AdminUpdateChannelView {
+        can_set: v.can_set,
+        status: v.status,
+        ..Default::default()
+    });
+    crate::rpc::to_js(&fauna_client_admin::update_channel_set_possibility(
+        view.as_ref(),
+    ))
+}
+
+/// `admin-mail-enabled-toggle`: `MailPolicySnapshot::enable_toggle_possibility`
+/// over the two fields it reads — blocked by `mail_settings.unavailable_notice`
+/// only for a turn-on on a box that cannot enable mail.
+#[wasm_bindgen(js_name = mailEnableTogglePossibility)]
+pub fn mail_enable_toggle_possibility(
+    mail_enabled: bool,
+    mail_unavailable_here: bool,
+) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_mail_settings::mail_enable_toggle_possibility(
+        mail_enabled,
+        mail_unavailable_here,
+    ))
+}
+
+/// `mail-lists-add-sheet-submit-button`'s draft validity:
+/// `fauna_client_mail_settings::list_submit_possibility` over what is typed
+/// (`docs/goal/ui/mail-settings.md` § Errors & edge cases, *The in-page
+/// predicates*), in `Possibility`'s serde form.
+#[wasm_bindgen(js_name = mailListSubmitPossibility)]
+pub fn mail_list_submit_possibility(
+    editing: bool,
+    local_part: String,
+    domain: String,
+    per_send_cap: String,
+) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_mail_settings::list_submit_possibility(
+        editing,
+        local_part,
+        domain,
+        per_send_cap,
+    ))
+}
+
+/// `mail-list-members-add-sheet-submit-button`:
+/// `fauna_client_mail_settings::member_add_possibility` (an address typed).
+#[wasm_bindgen(js_name = mailListMemberAddPossibility)]
+pub fn mail_list_member_add_possibility(address: String) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_mail_settings::member_add_possibility(address))
+}
+
+/// `mail-list-members-import-sheet-submit-button`:
+/// `fauna_client_mail_settings::member_import_possibility` (a non-blank line
+/// pasted).
+#[wasm_bindgen(js_name = mailListMemberImportPossibility)]
+pub fn mail_list_member_import_possibility(paste: String) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_mail_settings::member_import_possibility(
+        paste,
+    ))
+}
+
+/// `device-p2p-participation-toggle`:
+/// `fauna_devices_machine::P2pParticipationPaint::possibility` over the row's
+/// published paint (`ui/devices.md` § Errors & edge cases).
+#[wasm_bindgen(js_name = p2pParticipationPossibility)]
+pub fn p2p_participation_possibility(paint: JsValue) -> Result<JsValue, JsValue> {
+    let paint: fauna_devices_machine::P2pParticipationPaint = crate::rpc::from_js(paint)?;
+    crate::rpc::to_js(&paint.possibility())
+}
+
+/// The primary-domain rename banner's controls — `control` is `"complete"`,
+/// `"extend"` or `"abort"`: the matching `PrimaryDomainRenameView::*_possibility`
+/// over the view the snapshot carries (`dns-management.md` § Errors & edge
+/// cases) — absent outside the states that take it.
+#[wasm_bindgen(js_name = primaryDomainRenamePossibility)]
+pub fn primary_domain_rename_possibility(view: JsValue, control: &str) -> Result<JsValue, JsValue> {
+    let view: fauna_client_mail_settings::primary_domain_rename::PrimaryDomainRenameView =
+        crate::rpc::from_js(view)?;
+    let answer = match control {
+        "complete" => view.complete_possibility(),
+        "extend" => view.extend_possibility(),
+        "abort" => view.abort_possibility(),
+        other => {
+            return Err(JsValue::from_str(&format!(
+                "primaryDomainRenamePossibility: unknown control {other:?}"
+            )));
+        }
+    };
+    crate::rpc::to_js(&answer)
+}
+
+/// `admin-pending-action-approve-button`:
+/// `fauna_client_admin::pending_approve_possibility` — absent on the viewer's
+/// own scheduled action and on one no longer pending. `action` is the WHOLE
+/// `fauna.admin.pending_actions.list` row; `viewer` the viewing admin's raw
+/// actor id.
+#[wasm_bindgen(js_name = adminPendingApprovePossibility)]
+pub fn admin_pending_approve_possibility(
+    action: JsValue,
+    viewer: Vec<u8>,
+) -> Result<JsValue, JsValue> {
+    let action: fauna_protocol::admin::AdminPendingActionSummary = crate::rpc::from_js(action)?;
+    crate::rpc::to_js(&fauna_client_admin::pending_approve_possibility(
+        &action, &viewer,
+    ))
+}
+
+/// The admit and invite forms' age-band selects:
+/// `fauna_client_admin::age_band_possibility` — blocked until a guardian is
+/// picked.
+#[wasm_bindgen(js_name = adminAgeBandPossibility)]
+pub fn admin_age_band_possibility(guardian_selected: bool) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_admin::age_band_possibility(guardian_selected))
+}
+
+/// `admin-settings-tier-delete-button`:
+/// `fauna_client_admin::tier_delete_possibility` — absent on `free`.
+#[wasm_bindgen(js_name = adminTierDeletePossibility)]
+pub fn admin_tier_delete_possibility(tier: &str) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_admin::tier_delete_possibility(tier))
+}
+
+/// `admin-users-admit-button`, `create-invite-code-btn` and
+/// `create-invite-confirm-btn`: `fauna_client_admin::tier_pick_possibility`
+/// — blocked, naming the Tiers page, while the tier select offers none.
+/// `tiers` is the tier names the select offers.
+#[wasm_bindgen(js_name = adminTierPickPossibility)]
+pub fn admin_tier_pick_possibility(tiers: Vec<String>) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_admin::tier_pick_possibility(&tiers))
+}
+
+/// `admin-users-prev-page` (`forward` false) / `admin-users-next-page`
+/// (`forward` true): `fauna_client_admin::users_page_step_possibility` —
+/// blocked at page 1 / the last page, saying so. Numbers, not bigints: a
+/// user count fits an f64 exactly.
+#[wasm_bindgen(js_name = adminUsersPageStepPossibility)]
+pub fn admin_users_page_step_possibility(
+    offset: f64,
+    total: f64,
+    page_size: f64,
+    forward: bool,
+) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_admin::users_page_step_possibility(
+        offset as i64,
+        total as i64,
+        page_size as i64,
+        forward,
+    ))
+}
+
+/// `admin-settings-membership-clear-button`:
+/// `fauna_client_admin::membership_clear_possibility` — blocked, saying
+/// nothing is set, while the row holds no persisted designation.
+#[wasm_bindgen(js_name = adminMembershipClearPossibility)]
+pub fn admin_membership_clear_possibility(has_existing: bool) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_admin::membership_clear_possibility(
+        has_existing,
+    ))
+}
+
+// The admin forms' draft-validity answers (`admin.md` § Errors & edge cases →
+// *A form's submit is live only for a draft the nest would accept*) — the wasm
+// twins of the UniFFI `admin_*_possibility` draft faces. The SPA paints each
+// submit from the answer folded after its read gate, and asks again at the
+// press, refusing with the reason on the page's error line.
+
+/// `admin-users-registration-save-button`:
+/// `fauna_client_admin::registration_ceiling_possibility`.
+#[wasm_bindgen(js_name = adminRegistrationCeilingPossibility)]
+pub fn admin_registration_ceiling_possibility(raw: &str) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_admin::registration_ceiling_possibility(raw))
+}
+
+/// `admin-users-admit-button`: `fauna_client_admin::admit_actor_possibility`.
+#[wasm_bindgen(js_name = adminAdmitActorPossibility)]
+pub fn admin_admit_actor_possibility(raw: &str) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_admin::admit_actor_possibility(raw))
+}
+
+/// The five cap drafts (inbox, storage, devices, blob size, feeds) as the
+/// shared predicates take them; a list of the wrong length reads as five
+/// malformed caps, so it is refused, never padded.
+fn admin_five_caps(caps: &[String]) -> [&str; 5] {
+    match caps {
+        [a, b, c, d, e] => [a, b, c, d, e],
+        _ => ["?"; 5],
+    }
+}
+
+/// A tier row's save: `fauna_client_admin::tier_caps_possibility`.
+#[wasm_bindgen(js_name = adminTierCapsPossibility)]
+pub fn admin_tier_caps_possibility(caps: Vec<String>) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_admin::tier_caps_possibility(admin_five_caps(
+        &caps,
+    )))
+}
+
+/// The add-a-tier form: `fauna_client_admin::tier_create_possibility`.
+#[wasm_bindgen(js_name = adminTierCreatePossibility)]
+pub fn admin_tier_create_possibility(name: &str, caps: Vec<String>) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_admin::tier_create_possibility(
+        name,
+        admin_five_caps(&caps),
+    ))
+}
+
+/// A membership row's save: `fauna_client_admin::membership_save_possibility`.
+#[wasm_bindgen(js_name = adminMembershipSavePossibility)]
+pub fn admin_membership_save_possibility(admin_tier: &str) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_admin::membership_save_possibility(admin_tier))
+}
+
+/// `admin-nest-serving-port-save-button`:
+/// `fauna_client_admin::serving_port_possibility`.
+#[wasm_bindgen(js_name = adminServingPortPossibility)]
+pub fn admin_serving_port_possibility(raw: &str) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_admin::serving_port_possibility(raw))
+}
+
+/// `admin-nest-region-save-button`: `fauna_client_admin::region_possibility`.
+#[wasm_bindgen(js_name = adminRegionPossibility)]
+pub fn admin_region_possibility(raw: &str) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_admin::region_possibility(raw))
 }
 
 /// `fauna_client_admin::registration_mode_options` → the

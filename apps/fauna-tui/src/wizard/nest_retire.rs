@@ -479,9 +479,9 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
     let snap = view.machine.snapshot();
     let mut out = Vec::new();
     match snap.phase {
-        RetirePhase::Credentials | RetirePhase::Listing => credentials(view, &snap, &mut out),
+        RetirePhase::Credentials | RetirePhase::Listing => credentials(view, &mut out),
         RetirePhase::List => list(view, &snap, &mut out),
-        RetirePhase::Confirm => confirm(view, &snap, &mut out),
+        RetirePhase::Confirm => confirm(view, &mut out),
         RetirePhase::Running => running(view, &snap, &mut out),
         RetirePhase::Done => done(view, &snap, &mut out),
     }
@@ -509,7 +509,7 @@ fn back_button(out: &mut Vec<Element>) {
 /// The `vps_config` provider row, credential form and verify button, by the
 /// same ids and in the same shapes that page paints them — no location or
 /// server-type controls.
-fn credentials(view: &RetireView, snap: &RetireSnapshot, out: &mut Vec<Element>) {
+fn credentials(view: &RetireView, out: &mut Vec<Element>) {
     let m = &view.machine;
     let selected = m.selected_provider();
     out.push(Element::label(ids::VPS_PROVIDER_ROW, ""));
@@ -553,9 +553,10 @@ fn credentials(view: &RetireView, snap: &RetireSnapshot, out: &mut Vec<Element>)
                     Element::gesture_button(
                         element_id,
                         m.hosted_auth_button_text(f.id.clone()),
-                        m.hosted_auth_can_begin(f.id.clone()),
+                        true,
                         Gesture::Retire(RetireAction::HostedAuth(f.id.clone())),
                     )
+                    .possible(m.hosted_auth_possibility(f.id.clone()))
                     .labelled(key(&f.label_key))
                     .within(ids::VPS_CREDENTIALS_FORM, 0),
                 );
@@ -568,12 +569,17 @@ fn credentials(view: &RetireView, snap: &RetireSnapshot, out: &mut Vec<Element>)
                     .within(ids::VPS_CREDENTIALS_FORM, 0),
             );
         }
-        out.push(gesture_button(
-            ids::VPS_VERIFY_BUTTON,
-            fauna_i18n::strings::provisioning::VERIFY_CREDENTIALS,
-            m.can_verify() && snap.phase == RetirePhase::Credentials,
-            RetireAction::Verify,
-        ));
+        // The machine's answer alone decides (its phase check included); the
+        // seam disables the button with the reason painted.
+        out.push(
+            gesture_button(
+                ids::VPS_VERIFY_BUTTON,
+                fauna_i18n::strings::provisioning::VERIFY_CREDENTIALS,
+                true,
+                RetireAction::Verify,
+            )
+            .possible(m.verify_possibility()),
+        );
     }
     back_button(out);
 }
@@ -675,17 +681,21 @@ fn list(view: &RetireView, snap: &RetireSnapshot, out: &mut Vec<Element>) {
             }
         }
     }
-    out.push(gesture_button(
-        ids::RETIRE_DELETE_BUTTON,
-        t::DELETE_BUTTON,
-        selected_row(snap).is_some(),
-        RetireAction::Delete,
-    ));
+    // The machine's answer decides (rule 6), the seam painting its reason.
+    out.push(
+        gesture_button(
+            ids::RETIRE_DELETE_BUTTON,
+            t::DELETE_BUTTON,
+            true,
+            RetireAction::Delete,
+        )
+        .possible(m.delete_possibility()),
+    );
     back_button(out);
 }
 
 /// The typed-name gate (`nest-retirement.md` § Confirm shape).
-fn confirm(view: &RetireView, snap: &RetireSnapshot, out: &mut Vec<Element>) {
+fn confirm(view: &RetireView, out: &mut Vec<Element>) {
     let summary: Vec<String> = view
         .machine
         .confirm_summary()
@@ -706,12 +716,16 @@ fn confirm(view: &RetireView, snap: &RetireSnapshot, out: &mut Vec<Element>) {
         )
         .labelled(t::CONFIRM_NAME_LABEL),
     );
-    out.push(gesture_button(
-        ids::RETIRE_CONFIRM_BUTTON,
-        t::CONFIRM_BUTTON,
-        snap.confirm_enabled,
-        RetireAction::Confirm,
-    ));
+    // The typed-name gate is the machine's answer, painted with its reason.
+    out.push(
+        gesture_button(
+            ids::RETIRE_CONFIRM_BUTTON,
+            t::CONFIRM_BUTTON,
+            true,
+            RetireAction::Confirm,
+        )
+        .possible(view.machine.confirm_possibility()),
+    );
     out.push(gesture_button(
         ids::RETIRE_CANCEL_BUTTON,
         t::CANCEL_BUTTON,
@@ -724,15 +738,11 @@ fn confirm(view: &RetireView, snap: &RetireSnapshot, out: &mut Vec<Element>) {
 /// child ids and its glyph vocabulary.
 fn step_rows(view: &RetireView, snap: &RetireSnapshot, out: &mut Vec<Element>) {
     let row = "provisioning-step-row";
+    let now = fauna_provisioning::progress::now_ms();
     for (i, step) in snap.steps.iter().enumerate() {
         out.push(Element::label(row, "").within(row, i));
-        out.push(
-            Element::label(
-                ids::PROVISIONING_STEP_CHECKBOX,
-                fauna_provisioning::progress::status_glyph(step.state.progress_status()),
-            )
-            .within(row, i),
-        );
+        // The same animated `running` paint as the provisioning page.
+        out.push(crate::spinner::step_checkbox(step.state.progress_status(), now).within(row, i));
         out.push(
             Element::label(
                 ids::PROVISIONING_STEP_LABEL,

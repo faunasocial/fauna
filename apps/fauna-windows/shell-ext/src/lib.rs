@@ -396,8 +396,8 @@ pub(crate) mod dll {
         ///
         /// Note this surfaces the verb in the **legacy** ("Show more options") menu only.
         /// The Windows 11 *default* menu takes context-menu handlers exclusively from an
-        /// MSIX/sparse-package `desktop4:FileExplorerContextMenus` registration, never
-        /// from `HKCR` — that is a separate installer track.
+        /// MSIX package's `desktop4:FileExplorerContextMenus` registration, never
+        /// from `HKCR` — the full MSIX's (`installer/store/AppxManifest.xml.in`).
         const CONTEXT_VERB_PATH: &str = "Software\\Classes\\*\\shell\\Fauna";
 
         /// `Directory\shell\Fauna` — the same verb (same CLSID, same
@@ -407,7 +407,7 @@ pub(crate) mod dll {
         /// tracked-ness gate already answers for folders via the badge fold, so
         /// no handler change is needed for visibility. Same caveat as the `*`
         /// key: this drives the **legacy** menu; the Windows 11 default menu
-        /// needs the sparse package's `desktop4:FileExplorerContextMenus` to add
+        /// needs the full MSIX's `desktop4:FileExplorerContextMenus` to add
         /// a `Directory` type (installer-owned).
         const DIR_CONTEXT_VERB_PATH: &str = "Software\\Classes\\Directory\\shell\\Fauna";
 

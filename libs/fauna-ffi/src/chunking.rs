@@ -21,10 +21,10 @@ pub struct FfiManifest {
     /// For a **content-key-sealed** (M2) folder: BLAKE3 digest of each
     /// *ciphertext* chunk — the content-addressed blob-store key the byte
     /// routes use (`manifest.store_keys()`), parallel to `chunk_hashes`. `None`
-    /// for the plaintext-chunking path (owner-only / no content key). The Go
-    /// WebDAV MDA receives it populated from `webdav_seal_file` on PUT and
-    /// reads it on GET to fetch each ciphertext chunk by store key before
-    /// handing the bodies to `webdav_open_file`.
+    /// for the plaintext-chunking path (owner-only / no content key). No
+    /// reader takes a file's store keys from here: the Go WebDAV MDA lists
+    /// them through the one manifest walk (`webdav_manifest_store_keys`),
+    /// which also reads a paged root's pages.
     pub stored_hashes: Option<Vec<Vec<u8>>>,
 }
 
@@ -84,6 +84,7 @@ impl FfiManifest {
             stored_hashes,
             sealed_hashes: None,
             min_reader: None,
+            pages: None,
         })
     }
 }
@@ -199,6 +200,13 @@ pub fn serialize_manifest(manifest: FfiManifest) -> Result<Vec<u8>, FfiError> {
 }
 
 /// Deserialize canonical dag-cbor manifest bytes to typed manifest.
+///
+/// A paged **root** (`file-sync.md` § Paged manifests) decodes with empty
+/// chunk lists — its entries ride in pages this record does not carry — so
+/// no reader learns a file's chunks from this: the WebDAV MDA walks a
+/// manifest of either shape through `webdav_manifest_page_hashes` /
+/// `webdav_manifest_store_keys` / `webdav_open_file`, and the apps through
+/// the shared download walk.
 #[uniffi::export]
 pub fn deserialize_manifest(data: Vec<u8>) -> Result<FfiManifest, FfiError> {
     let manifest: ChunkManifest =

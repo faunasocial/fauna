@@ -1,4 +1,4 @@
-import Foundation
+import SwiftUI
 
 /// The Profile's **private section** on another person's profile — the viewer's
 /// own nickname, notes and labels on them (`profile.md` § The private section).
@@ -21,6 +21,14 @@ public final class ProfilePrivateVM {
     /// A Save is in flight (the save button disables).
     public private(set) var isSaving = false
 
+    /// `profile-private-save-button`'s answer — the shared
+    /// `contact_overlays::save_possibility` over this seat (`profile.md`
+    /// § Errors & edge cases): still loading until the account store has
+    /// assembled, blocked `profile.private_save_elsewhere` on a seat hosting
+    /// no account runtime. Re-asked at every ``reload()``; the editor's save
+    /// refuses with the same answer.
+    public private(set) var saveAnswer: Possibility = readPossibility(read: .pending)
+
     /// One editor per Profile open; `nil` while no other person is shown.
     private var editor: FfiOverlayEditor?
 
@@ -40,6 +48,7 @@ public final class ProfilePrivateVM {
         editor = nil
         errorMessage = nil
         isSaving = false
+        saveAnswer = readPossibility(read: .pending)
         form = OverlayForm(nickname: "", notes: "", labels: [])
     }
 
@@ -48,6 +57,8 @@ public final class ProfilePrivateVM {
         guard let editor else { return }
         let live = editor.form()
         if live != form { form = live }
+        let answer = editor.savePossibility()
+        if answer != saveAnswer { saveAnswer = answer }
     }
 
     public func setNickname(_ value: String) {
@@ -81,6 +92,9 @@ public final class ProfilePrivateVM {
     /// screen.
     public func save() async {
         guard let editor, !isSaving else { return }
+        // Rule 6 is the shared save's own: `save_staged` asks the same
+        // `save_possibility` the button was painted from and refuses with its
+        // reason (`notReady` below) — nothing staged is a save either way.
         isSaving = true
         let outcome = await editor.save()
         // The page moved to another person (or signed out) while this was in

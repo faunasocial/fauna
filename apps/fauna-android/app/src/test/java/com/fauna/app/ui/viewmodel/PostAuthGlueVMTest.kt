@@ -2,6 +2,7 @@ package com.fauna.app.ui.viewmodel
 
 import com.fauna.app.core.AftermathProgressStore
 import com.fauna.app.core.ApiClient
+import com.fauna.app.core.AppMessages
 import com.fauna.app.core.InheritedFilterMarks
 import com.fauna.app.core.OnboardingHost
 import com.fauna.app.core.SuccessionAftermathHost
@@ -17,7 +18,7 @@ import org.mockito.Mockito.`when` as whenever
 
 /**
  * [PostAuthGlueVM]'s user-visible leg — the deployment-seed custody leg and
- * the recovery-custody warning it drives. FFI-free (mocks [ApiClient] /
+ * the recovery-custody warning its [CustodyWarningSink] paints and withdraws. FFI-free (mocks [ApiClient] /
  * [OnboardingHost] directly, mirroring [MailEnableGlueVMTest]).
  */
 @ExperimentalCoroutinesApi
@@ -39,22 +40,55 @@ class PostAuthGlueVMTest {
     // unconfirmed for an admin surfaces on the recovery-custody warning. ──
 
     @Test
-    fun runDeploymentSeedCustodyLeg_nothingOwedShowsNothing() = runTest {
+    fun runDeploymentSeedCustodyLeg_handsTheSinkToTheSignalledLeg() = runTest {
         val (vm, api) = makeVm()
-        whenever(api.selfHealDeploymentSeedCustody()).thenReturn(null)
-        assertNull(vm.runDeploymentSeedCustodyLeg())
-        verify(api).selfHealDeploymentSeedCustody()
+        val sink = CustodyWarningSink(AppMessages(), ::render, CUSTODY_WARNINGS)
+        vm.runDeploymentSeedCustodyLeg(sink)
+        verify(api).selfHealDeploymentSeedCustody(sink)
     }
 
     @Test
-    fun runDeploymentSeedCustodyLeg_passesTheSharedWarningThrough() = runTest {
+    fun custodySink_paintsTheSharedWarning() {
         // Which warning a run owes is the shared Rust mapping's call
-        // (`custody_leg_warning`, tested in fauna-client-config); the glue only
-        // hands that LocalizedText on to the resolver, untouched.
-        val warning = uniffi.fauna_core.LocalizedText("launch.recovery_custody_mismatch", emptyMap())
-        val (vm, api) = makeVm()
-        whenever(api.selfHealDeploymentSeedCustody()).thenReturn(warning)
-        assertEquals(warning, vm.runDeploymentSeedCustodyLeg())
+        // (`custody_leg_warning`, tested in fauna-client-config); the sink only
+        // hands that LocalizedText to the resolver, untouched.
+        val messages = AppMessages()
+        CustodyWarningSink(messages, ::render, CUSTODY_WARNINGS).onWarning(MISMATCH)
+        assertEquals(render(MISMATCH), messages.warning.value)
+    }
+
+    @Test
+    fun custodySink_theClearedMarkTakesTheCustodyWarningDown() {
+        // The reconnect retry confirmed custody: the warning the first run
+        // painted is withdrawn (box-recovery.md (c): a later run that confirms
+        // custody takes the warning down).
+        for (warning in CUSTODY_WARNINGS) {
+            val messages = AppMessages()
+            val sink = CustodyWarningSink(messages, ::render, CUSTODY_WARNINGS)
+            sink.onWarning(warning)
+            sink.onCleared()
+            assertNull(messages.warning.value)
+        }
+    }
+
+    @Test
+    fun custodySink_theClearedMarkLeavesAnUnrelatedWarningStanding() {
+        // A custody warning, then another producer's warning over it: the
+        // cleared mark withdraws only a custody warning, never what the banner
+        // shows by then.
+        val messages = AppMessages()
+        val sink = CustodyWarningSink(messages, ::render, CUSTODY_WARNINGS)
+        sink.onWarning(UNCONFIRMED)
+        messages.showWarning("the mail bridge is unreachable")
+        sink.onCleared()
+        assertEquals("the mail bridge is unreachable", messages.warning.value)
+    }
+
+    @Test
+    fun custodySink_theClearedMarkOnAnEmptyBannerShowsNothing() {
+        val messages = AppMessages()
+        CustodyWarningSink(messages, ::render, CUSTODY_WARNINGS).onCleared()
+        assertNull(messages.warning.value)
     }
 
     // ── identity-succession.md § The RecoveryKey → *Creation UX*: the kit the
@@ -107,6 +141,15 @@ class PostAuthGlueVMTest {
     }
 
     private companion object {
+        val MISMATCH = uniffi.fauna_core.LocalizedText("launch.recovery_custody_mismatch", emptyMap())
+        val UNCONFIRMED = uniffi.fauna_core.LocalizedText("launch.recovery_custody_failed", emptyMap())
+
+        /** What fauna-ffi `deployment_seed_custody_warnings` answers. */
+        val CUSTODY_WARNINGS = listOf(MISMATCH, UNCONFIRMED)
+
+        /** A stand-in resolver: each key renders to a distinct text. */
+        fun render(text: uniffi.fauna_core.LocalizedText): String = "rendered ${text.key}"
+
         const val KIT =
             "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
     }

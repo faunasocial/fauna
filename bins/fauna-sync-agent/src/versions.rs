@@ -564,6 +564,7 @@ mod tests {
                 list_reply,
                 record_reply: Ok(SyncChangeRecordReply {
                     seq: 77,
+                    prev_set_seq: None,
                     extra: Default::default(),
                 }),
             })

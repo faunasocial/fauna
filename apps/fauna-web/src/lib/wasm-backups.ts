@@ -5,6 +5,7 @@ import { sharedAccountPort } from './account-runtime';
 import type { BackupsMachine } from '../../static/fauna_wasm_backups.js';
 import type { LocalizedText } from '#lib/i18n/localized';
 import type { BackupOp, RowIntegrity, SnapshotState } from '#lib/backups-machine';
+import type { BackupsFaces } from '#lib/backups-possibility';
 
 // Loader for the Backups-page WASM chunk (`libs/fauna-wasm-backups`: the
 // snapshot half's `BackupsMachine`). A separate wasm module from `fauna_wasm` —
@@ -80,7 +81,26 @@ export async function createBackupsMachine(
   );
 }
 
-/** `fauna_backups_machine::busy_text` → the `in_progress_op` line for a
+/** The chunk's free possibility faces (`destinationFormPossibilityJson`,
+ *  `restoreInputsPossibilityJson`, `restorePossibilityJson`,
+ *  `carveOutPossibilityJson`), painted through `#lib/backups-possibility`.
+ *  `null` until `ensureBackupsWasm()` has resolved, which those helpers paint
+ *  as shown-but-dead. */
+export function backupsFaces(): BackupsFaces | null {
+  const mod = wasmModule;
+  if (!mod) return null;
+  return {
+    destinationFormPossibilityJson: (form, url, capacity) =>
+      mod.destinationFormPossibilityJson(form, url, capacity),
+    restoreInputsPossibilityJson: (snapshotId) =>
+      mod.restoreInputsPossibilityJson(snapshotId ?? undefined),
+    restorePossibilityJson: (running, snapshotId, kindTicked, typed) =>
+      mod.restorePossibilityJson(running, snapshotId ?? undefined, kindTicked, typed),
+    carveOutPossibilityJson: (connectionState) => mod.carveOutPossibilityJson(connectionState),
+  };
+}
+
+/** `fauna_backups_machine::busy_text` →the `in_progress_op` line for a
  *  `BackupOp`, so web renders the same text as every other app without
  *  re-deriving which key an operation maps to
  *  (`docs/goal/ui/backups.md` § Where logic lives). Call after

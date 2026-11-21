@@ -71,6 +71,9 @@ pub mod mail_warmup;
 /// The in-flight marker of a re-seed's flip (`backup-destinations.md` § *the
 /// in-flight marker*).
 pub mod materialize_in_flight;
+/// The materialize receipt (`backup-destinations.md` § *A lived-in segment set
+/// is completed by record in the same gesture*, rule (2)).
+pub mod materialize_receipts;
 pub mod membership;
 pub mod meta;
 pub mod migrations;
@@ -137,7 +140,7 @@ use crate::segments::records_db::SegmentStatsRow;
 pub use feeds::ScoreCursor;
 pub use sync_storage::{
     ConflictWinnerFacts, FolderOptions, FolderUpdate, GenerationRestore, GrantRevokeOutcome,
-    GrantStoreOutcome, ReportRowSignatures, RowSignature, VersionPruneCandidate,
+    GrantStoreOutcome, RecordedSeq, ReportRowSignatures, RowSignature, VersionPruneCandidate,
 };
 
 /// Extracted metadata from a decoded Post, used by the indexer.

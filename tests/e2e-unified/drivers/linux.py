@@ -320,6 +320,15 @@ class LinuxBridgeDriver(HttpBridgeDriver):
             raise RuntimeError(f"linux clipboard read refused: {reply['error']}")
         return reply.get("text")
 
+    # The in-process agent serves POST /element/select-text and POST
+    # /page/selection (`automation/agent.rs` ``select_text`` /
+    # ``current_selection``): the selection is made with the label's own Select
+    # All — gtk's ``selection.select-all``, its context menu's item, after the
+    # focus a click gives — since a drag cannot be made in-process (a gesture
+    # signal emitted with no input event selects nothing); a label
+    # `read_text.rs` left unselectable selects nothing and reads False.
+    _serves_select_text = True
+
     # The in-process agent serves POST /element/scroll-into-view (a targeted
     # vadjustment scroll on the nearest ScrolledWindow ancestor), so
     # `scroll_to` / offscreen-element retries take the precise path.

@@ -10,6 +10,7 @@ struct SnapshotFileListView: View {
     /// this view no longer runs a read of its own.
     let snapshotId: Int64
     var vm: BackupsMachineVM
+    @Environment(FaunaClient.self) private var client: FaunaClient?
 
     var body: some View {
         // Eager `ScrollView { VStack }`, NOT a lazy `List` (rule 6 —
@@ -54,6 +55,10 @@ struct SnapshotFileListView: View {
                             .automationActivate(Ids.snapshotFileDownloadButton) {
                                 Task { await downloadFile(file) }
                             }
+                            // The carve-out has no wire kind: its offline gate
+                            // is the shared carve-out answer, asked again by
+                            // the press.
+                            .faunaPossible(carveOutAnswer(client))
                         }
                     }
                     .padding(.vertical, 8)
@@ -94,7 +99,7 @@ struct SnapshotFileListView: View {
         // targets share one refusal instead of each dropping the command
         // silently — convention 11, see the VM's doc comment.
         guard let data = await vm.downloadSnapshotFile(
-            snapshotId: snapshotId, path: file.path)
+            snapshotId: snapshotId, path: file.path, carveOut: carveOutAnswer(client))
         else { return }
         let name = (file.path as NSString).lastPathComponent
         try? SnapshotFileSaver.save(suggestedFileName: name, data: data)

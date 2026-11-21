@@ -235,6 +235,112 @@ pub struct ArchiveImportSnapshot {
     pub profile_applied: bool,
 }
 
+/// Blocked reason: the Archive step's Next, and the run, need an opened archive.
+pub const ARCHIVE_NEEDED: &str = "archive_import.archive_needed";
+
+/// The wizard's [`Possibility`](fauna_core::possibility::Possibility) answers
+/// (`archive-import.md` § Wizard steps; `docs/goal/ui/README.md` § Offer only
+/// what is possible, rules 2, 4 and 6): every app paints Next, Start and the
+/// profile prefill from them, and the machine asks the same answer before it
+/// acts, refusing with the same reason.
+impl ArchiveImportSnapshot {
+    /// The Scope step's date drafts: blocked while either is not a real
+    /// `YYYY-MM-DD` day or the range is inverted; possible otherwise.
+    pub fn scope_possibility(&self) -> fauna_core::possibility::Possibility {
+        use fauna_core::possibility::Possibility;
+        match crate::machine::date_range_days(&self.date_from, &self.date_to) {
+            Ok(_) => Possibility::Possible,
+            Err(reason) => Possibility::blocked(reason),
+        }
+    }
+
+    /// `wizard-next-button`: on the Archive step it waits for an archive to
+    /// be opened ([`ARCHIVE_NEEDED`]); on the Scope step for
+    /// [`Self::scope_possibility`]; every other step's Next is possible.
+    pub fn next_possibility(&self) -> fauna_core::possibility::Possibility {
+        use fauna_core::possibility::Possibility;
+        match self.step {
+            ArchiveImportStep::Archive if self.summary.is_none() => {
+                Possibility::blocked(LocalizedText::key(ARCHIVE_NEEDED))
+            }
+            ArchiveImportStep::Scope => self.scope_possibility(),
+            _ => Possibility::Possible,
+        }
+    }
+
+    /// `archive-import-start-button`: an opened archive and a scope that
+    /// resolves — the checks the run's Start makes before it commits.
+    pub fn start_possibility(&self) -> fauna_core::possibility::Possibility {
+        use fauna_core::possibility::Possibility;
+        if self.summary.is_none() {
+            return Possibility::blocked(LocalizedText::key(ARCHIVE_NEEDED));
+        }
+        self.scope_possibility()
+    }
+
+    /// `archive-import-profile-prefill-button`: blocked, saying so, when the
+    /// finished run found no profile in the archive; blocked once applied,
+    /// so a second tap never re-publishes it; possible otherwise. Shown either
+    /// way: the Done step always says whether a profile can be taken over.
+    pub fn profile_prefill_possibility(&self) -> fauna_core::possibility::Possibility {
+        use fauna_core::possibility::Possibility;
+        if self.archive_profile.is_none() {
+            Possibility::blocked(LocalizedText::key("archive_import.profile_prefill_none"))
+        } else if self.profile_applied {
+            Possibility::blocked(LocalizedText::key("archive_import.profile_prefill_applied"))
+        } else {
+            Possibility::Possible
+        }
+    }
+
+    /// The snapshot with the Scope step's typed date drafts folded in
+    /// (trimmed) — what the machine will hold once Next commits them, so the
+    /// answer an app paints over its drafts is the one the machine then asks.
+    /// Off the Scope step the snapshot comes back unchanged.
+    #[must_use]
+    pub fn with_scope_drafts(&self, date_from: &str, date_to: &str) -> Self {
+        let mut s = self.clone();
+        if s.step == ArchiveImportStep::Scope {
+            s.date_from = date_from.trim().to_string();
+            s.date_to = date_to.trim().to_string();
+        }
+        s
+    }
+}
+
+/// `wizard-next-button`'s answer over FFI (a UniFFI record carries no
+/// methods): [`ArchiveImportSnapshot::next_possibility`] over the snapshot with
+/// the Scope step's typed date drafts folded in
+/// ([`ArchiveImportSnapshot::with_scope_drafts`]).
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn archive_import_next_possibility(
+    snapshot: ArchiveImportSnapshot,
+    date_from: &str,
+    date_to: &str,
+) -> fauna_core::possibility::Possibility {
+    snapshot
+        .with_scope_drafts(date_from, date_to)
+        .next_possibility()
+}
+
+/// `archive-import-start-button`'s answer over FFI
+/// ([`ArchiveImportSnapshot::start_possibility`]).
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn archive_import_start_possibility(
+    snapshot: ArchiveImportSnapshot,
+) -> fauna_core::possibility::Possibility {
+    snapshot.start_possibility()
+}
+
+/// `archive-import-profile-prefill-button`'s answer over FFI
+/// ([`ArchiveImportSnapshot::profile_prefill_possibility`]).
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn archive_import_profile_prefill_possibility(
+    snapshot: ArchiveImportSnapshot,
+) -> fauna_core::possibility::Possibility {
+    snapshot.profile_prefill_possibility()
+}
+
 impl ArchiveImportSnapshot {
     /// The page as it paints before `hydrate` has answered: step 1, nothing
     /// known about the nest or any archive.
@@ -402,6 +508,97 @@ pub enum ArchiveImportAction {
     /// and picture onto the user's own profile. Never dispatched by the
     /// machine itself — the profile changes only on this tap.
     ApplyArchiveProfile,
+}
+
+#[cfg(test)]
+mod possibility_tests {
+    use super::*;
+
+    fn key(p: fauna_core::possibility::Possibility) -> Option<String> {
+        p.reason().map(|r| r.key.clone())
+    }
+
+    fn opened() -> ArchiveSummaryView {
+        ArchiveSummaryView {
+            platform_label: "Facebook".into(),
+            owner_display_name: "Owner".into(),
+            first_at: 0,
+            last_at: 0,
+            media_bytes: 0,
+            archive_bytes: 0,
+            known_audience: 0,
+            unknown_audience: 0,
+        }
+    }
+
+    /// No archive opened blocks the Archive step's Next and the Start; a bad
+    /// range blocks the Scope step's Next and the Start.
+    #[test]
+    fn next_and_start_wait_for_an_archive_and_a_range_that_resolves() {
+        let mut s = ArchiveImportSnapshot::empty();
+        s.step = ArchiveImportStep::Archive;
+        assert_eq!(key(s.next_possibility()), Some(ARCHIVE_NEEDED.into()));
+        assert_eq!(key(s.start_possibility()), Some(ARCHIVE_NEEDED.into()));
+        s.summary = Some(opened());
+        assert!(s.next_possibility().is_possible());
+        s.step = ArchiveImportStep::Scope;
+        s.date_from = "2026-1-1".into();
+        assert_eq!(
+            key(s.next_possibility()),
+            Some("archive_import.scope_date_invalid".into())
+        );
+        s.date_from = "2026-03-02".into();
+        s.date_to = "2026-03-01".into();
+        assert_eq!(
+            key(s.start_possibility()),
+            Some("archive_import.scope_date_range_inverted".into())
+        );
+        s.date_to = "2026-03-03".into();
+        assert!(s.start_possibility().is_possible());
+    }
+
+    /// The FFI face asks Next over the typed drafts (trimmed), on the Scope
+    /// step only.
+    #[test]
+    fn the_next_face_folds_the_typed_drafts_in_on_the_scope_step_only() {
+        let mut s = ArchiveImportSnapshot::empty();
+        s.summary = Some(opened());
+        s.step = ArchiveImportStep::Scope;
+        assert_eq!(
+            key(archive_import_next_possibility(s.clone(), "2026-1-1", "")),
+            Some("archive_import.scope_date_invalid".into())
+        );
+        assert!(archive_import_next_possibility(s.clone(), " 2026-03-01 ", "").is_possible());
+        s.step = ArchiveImportStep::Archive;
+        assert!(archive_import_next_possibility(s.clone(), "nope", "").is_possible());
+        assert!(archive_import_start_possibility(s.clone()).is_possible());
+        assert_eq!(
+            key(archive_import_profile_prefill_possibility(s)),
+            Some("archive_import.profile_prefill_none".into())
+        );
+    }
+
+    /// The prefill is blocked with its reason with no profile, and once applied.
+    #[test]
+    fn the_prefill_is_blocked_without_a_profile_and_once_applied() {
+        let mut s = ArchiveImportSnapshot::empty();
+        assert_eq!(
+            key(s.profile_prefill_possibility()),
+            Some("archive_import.profile_prefill_none".into())
+        );
+        s.archive_profile = Some(ArchiveProfileView {
+            display_name: "Owner".into(),
+            bio: None,
+            links: Vec::new(),
+            has_picture: false,
+        });
+        assert!(s.profile_prefill_possibility().is_possible());
+        s.profile_applied = true;
+        assert_eq!(
+            key(s.profile_prefill_possibility()),
+            Some("archive_import.profile_prefill_applied".into())
+        );
+    }
 }
 
 #[cfg(test)]

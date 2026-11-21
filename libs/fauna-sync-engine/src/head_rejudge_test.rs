@@ -168,6 +168,7 @@ impl NestDouble {
                         true,
                         value_of(&fauna_protocol::sync::SyncChangeRecordReply {
                             seq,
+                            prev_set_seq: None,
                             extra: Default::default(),
                         }),
                     ),

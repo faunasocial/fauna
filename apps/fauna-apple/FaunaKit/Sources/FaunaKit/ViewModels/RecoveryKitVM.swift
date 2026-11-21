@@ -458,12 +458,10 @@ public class RecoveryKitVM {
         onSucceeded: @escaping (String) -> Void
     ) async {
         guard let api, !busy else { return }
-        guard stolenConfirmInput == Self.stolenConfirmWord else {
-            setErrorText(L.settings.recoveryKit.stolenConfirmPlaceholder)
-            return
-        }
-        guard !phraseInput.isEmpty else {
-            setErrorText(L.settings.recoveryKit.kitPhraseRequired)
+        // The press asks what the paint asked: the shared draft answer (kit
+        // first, then the word), refusing with its reason.
+        if let refusal = stolenAnswer.refusal {
+            setErrorText(refusal)
             return
         }
         busy = true
@@ -839,12 +837,6 @@ public class RecoveryKitVM {
 
 
 
-    /// The type-to-confirm token. **Never localized** — only its prompt is
-    /// (`recovery_kit.stolen_confirm_placeholder`), or the gate would differ per
-    /// locale. Every app spells the same literal at its own call site, exactly as
-    /// account deletion spells `"DELETE"`.
-    static let stolenConfirmWord = "SUCCEED"
-
     /// Whether the succession trigger and its type-to-confirm gate render. Per
     /// `settings.md` § Recovery kit the stolen action belongs to "stolen
     /// (any)" — every state — and `allows_stolen` being unconditionally true
@@ -866,12 +858,17 @@ public class RecoveryKitVM {
         status?.allowsStolen != false
     }
 
-    /// Whether `identity-stolen-button` is armed. The confirm gate is a **second**
-    /// condition, not a replacement for the status one — `allowsStolen` is
-    /// unconditionally true, so this gate is the only thing between a stray click
-    /// and a re-pointed account.
-    public var stolenArmed: Bool {
-        stolenConfirmInput == Self.stolenConfirmWord && !busy
+    /// `identity-stolen-button`'s one answer: the shared draft predicate
+    /// (`recovery_stolen_entry_possibility` — a kit pasted, then the
+    /// never-localized confirm word; `docs/goal/ui/README.md` § Offer only
+    /// what is possible, rule 4's form case), then no ceremony in flight. The
+    /// confirm gate is a **second** condition, not a replacement for the
+    /// status one — `allowsStolen` is unconditionally true, so this answer is
+    /// the only thing between a stray click and a re-pointed account; the
+    /// press re-asks it.
+    public var stolenAnswer: Possibility {
+        recoveryStolenEntryPossibility(phrase: phraseInput, confirmWord: stolenConfirmInput)
+            .and(writeAfterReadPossibility(read: .resolved, idle: !busy))
     }
 
     /// The phrase field renders while a ceremony that consumes one is

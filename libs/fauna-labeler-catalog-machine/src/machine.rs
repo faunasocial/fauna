@@ -85,7 +85,9 @@ enum MintOutcome {
     Unwired,
     /// No `mda`-role holder is enrolled on the nest to seal the grant to.
     NoHolder,
-    /// Mail is not enabled for this account (no MSEK) — nothing to license.
+    /// The account has no mailbox — no credential row of any state
+    /// (`MailRows::has_mailbox`; a key alone is no mailbox), or, in the
+    /// connect-time mint's window, no key yet — nothing to license.
     MailNotEnabled,
     /// Minted, recorded, deposited: link the subscription to it.
     Minted { grant_id: [u8; 16] },
@@ -271,6 +273,15 @@ impl LabelerCatalogMachine {
         self.snapshot().subscribe_enabled(index)
     }
 
+    /// The catalog row at `index`'s subscribe answer, with its reason
+    /// ([`LabelerCatalogSnapshot::subscribe_possibility`] over the current
+    /// state) — what every app paints `labeler-catalog-item-subscribe-button`
+    /// from and its press asks again (`docs/goal/ui/settings.md` § Errors &
+    /// edge cases, *Personal form submits paint from their draft*).
+    pub fn subscribe_possibility(&self, index: u32) -> fauna_core::possibility::Possibility {
+        self.snapshot().subscribe_possibility(index)
+    }
+
     // ── Gestures ────────────────────────────────────────────────────────
 
     /// Re-read the full catalog (`fauna.labelers.list`). On a read failure the
@@ -285,36 +296,60 @@ impl LabelerCatalogMachine {
     /// it would undo a subscribe or unsubscribe with nothing left to re-read:
     /// the toggle would never flip.
     pub async fn refresh(&self) {
+        self.reread(None).await;
+    }
+
+    /// [`Self::refresh`], with an honest-degrade `notice` (a subscribe that
+    /// registered without its grant) written in the SAME state write as the
+    /// re-read and announced by the same one tick. Two ticks — the re-read's
+    /// with the slot cleared, then the notice's — let a view paint the flipped
+    /// row with an empty `error-message` in between, which reads as a working
+    /// labeler. A re-read overtaken by a newer one still leaves its notice.
+    async fn reread(&self, notice: Option<&str>) {
         let ticket = {
             let mut s = self.state.lock().unwrap();
             s.reads_started += 1;
             s.reads_started
         };
         let result = self.nest_api.list().await;
-        let failure = {
+        let notice = notice.map(LocalizedText::key);
+        let applied = {
             let mut s = self.state.lock().unwrap();
-            if ticket < s.read_applied {
-                return;
-            }
-            s.read_applied = ticket;
-            match result {
-                Ok(entries) => {
-                    s.entries = entries;
-                    s.error = None;
-                    // The one place the page becomes loaded. Only a read that
-                    // RETURNED may license an empty state; the `Err` arm below
-                    // deliberately leaves this alone (see the field's doc on
-                    // `LabelerCatalogSnapshot`).
-                    s.loaded = true;
-                    None
+            let applied = ticket >= s.read_applied;
+            if applied {
+                s.read_applied = ticket;
+                match result {
+                    Ok(entries) => {
+                        s.entries = entries;
+                        s.error = None;
+                        // The one place the page becomes loaded. Only a read that
+                        // RETURNED may license an empty state; the `Err` arm below
+                        // deliberately leaves this alone (see the field's doc on
+                        // `LabelerCatalogSnapshot`).
+                        s.loaded = true;
+                    }
+                    Err(e) => {
+                        let err = LocalizedText::key_arg(
+                            REFRESH_ERROR_KEY,
+                            "message",
+                            e.detail().to_string(),
+                        );
+                        tracing::warn!(target: "fauna_labeler_catalog", "{}", err.log_line());
+                        s.error = Some(err);
+                    }
                 }
-                Err(e) => Some(e),
             }
+            if let Some(notice) = &notice {
+                s.error = Some(notice.clone());
+            }
+            applied
         };
-        if let Some(e) = failure {
-            self.set_error(REFRESH_ERROR_KEY, e.detail());
+        if let Some(notice) = &notice {
+            tracing::info!(target: "fauna_labeler_catalog", "{}", notice.log_line());
         }
-        self.observer.on_changed();
+        if applied || notice.is_some() {
+            self.observer.on_changed();
+        }
     }
 
     /// Open the inspect-before-subscribe panel for the catalog row at `index`
@@ -413,13 +448,7 @@ impl LabelerCatalogMachine {
             .subscribe(labeler_id.clone(), minted.grant_id())
             .await
         {
-            Ok(()) => {
-                self.refresh().await;
-                if let Some(key) = minted.notice_key() {
-                    self.set_notice(key);
-                    self.observer.on_changed();
-                }
-            }
+            Ok(()) => self.reread(minted.notice_key()).await,
             Err(e) => {
                 if minted.grant_id().is_some()
                     && let Err(revoke_err) = self.revoke_labeler_grant(&labeler_id).await
@@ -519,15 +548,6 @@ impl LabelerCatalogMachine {
         }
     }
 
-    /// Set an honest-degrade notice on the page's one text slot (a subscribe
-    /// that registered without its grant). Logged at the producer like an
-    /// error; cleared by the next successful refresh like one.
-    fn set_notice(&self, key: &str) {
-        let notice = LocalizedText::key(key);
-        tracing::info!(target: "fauna_labeler_catalog", "{}", notice.log_line());
-        self.state.lock().unwrap().error = Some(notice);
-    }
-
     /// Mint, record and deposit the per-labeler grant for `labeler_id` (see
     /// [`Self::subscribe`]). The degrades come back as [`MintOutcome`]s; only
     /// a real failure is an `Err`.
@@ -548,7 +568,16 @@ impl LabelerCatalogMachine {
         else {
             return Ok(MintOutcome::NoHolder);
         };
-        let mail = seams.mail.load().await?;
+        // The mailbox is the credential, never the key: every account holds
+        // its MSEK from its first connect, so "mail not enabled" asks for a
+        // credential row (`mail-credentials.md` § MSEK lifecycle → *Every
+        // account holds the key*, ruling 2). A key with no mailbox has no
+        // mail to license — the same honest degrade, nothing minted.
+        let rows = seams.mail.load_rows().await?;
+        if !rows.has_mailbox() {
+            return Ok(MintOutcome::MailNotEnabled);
+        }
+        let mail = rows.config();
         let now = now_epoch_secs();
         let window_end = now + DEFAULT_GRANT_WINDOW_SECS;
         let grant_id = new_grant_id();
@@ -722,9 +751,10 @@ mod tests {
         }
     }
 
-    /// A grant-wired machine: the owner's mail custody (an MSEK held unless a
-    /// test builds it over another), a real signer, and the fake nest. Returns the
-    /// store and keypair handles the assertions read through.
+    /// A grant-wired machine: the owner's mail custody (an MSEK and a mailbox —
+    /// one credential row — held unless a test builds it over another), a real
+    /// signer, and the fake nest. Returns the store and keypair handles the
+    /// assertions read through.
     fn granting_machine() -> (
         Arc<LabelerCatalogMachine>,
         Arc<FakeLabelerCatalogNestApi>,
@@ -733,8 +763,27 @@ mod tests {
     ) {
         granting_machine_over(FakeMailStore::with(&fauna_core::data::MailConfig {
             msek: Some([0x42u8; 32].into()),
+            credentials: vec![mail_credential()],
             ..Default::default()
         }))
+    }
+
+    /// One live credential row — what makes the account's custody a mailbox
+    /// (`mail-credentials.md` § MSEK lifecycle → *Every account holds the key*,
+    /// ruling 2).
+    fn mail_credential() -> fauna_core::data::MailCredential {
+        fauna_core::data::MailCredential {
+            credential_id: "phone".into(),
+            display_name: "phone".into(),
+            kind: fauna_core::data::MailCredentialKind::Plain,
+            secret: vec![7; 8].into(),
+            created_at: 1,
+            updated_at: Timestamp(1),
+            wrapped_under: None,
+            token_minted_at: None,
+            revoked_at_unix: None,
+            burned: None,
+        }
     }
 
     /// [`granting_machine`] over a caller-supplied mail custody.
@@ -929,6 +978,99 @@ mod tests {
         assert_eq!(
             snapshot_key(&m).as_deref(),
             Some(SUBSCRIBED_WITHOUT_MAIL_KEY)
+        );
+    }
+
+    /// **A key alone is no mailbox** (`mail-credentials.md` § MSEK lifecycle →
+    /// *Every account holds the key*, ruling 2): every account holds its MSEK
+    /// from its first connect, so the degrade asks for a credential row, never
+    /// the key. An account with its key and no mailbox has no mail to label —
+    /// the row registers with no grant and the page says so; nothing is minted.
+    #[tokio::test]
+    async fn a_key_with_no_mailbox_registers_without_a_grant_and_says_so() {
+        let (m, api, store, _kp) =
+            granting_machine_over(FakeMailStore::with(&fauna_core::data::MailConfig {
+                msek: Some([0x42u8; 32].into()),
+                ..Default::default()
+            }));
+        api.set_entries(vec![mail_entry(0xAA, false)]);
+        api.set_holders(vec![mda_holder()]);
+        m.refresh().await;
+
+        m.subscribe(0).await;
+
+        let calls = api.calls();
+        assert!(
+            matches!(
+                calls.last(),
+                Some(crate::nest_api::FakeCall::Subscribe { grant_id: None, .. })
+            ),
+            "{calls:?}"
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, crate::nest_api::FakeCall::MintGrant { .. })),
+            "a key with no mailbox mints nothing: {calls:?}"
+        );
+        assert_eq!(store.merges(), 0);
+        assert_eq!(
+            snapshot_key(&m).as_deref(),
+            Some(SUBSCRIBED_WITHOUT_MAIL_KEY)
+        );
+    }
+
+    /// Records the page error's key at every observer tick, as a view
+    /// repainting off each notification reads it.
+    struct ErrorAtEveryTick {
+        machine: Mutex<std::sync::Weak<LabelerCatalogMachine>>,
+        ticks: Mutex<Vec<Option<String>>>,
+    }
+
+    impl LabelerCatalogObserver for ErrorAtEveryTick {
+        fn on_changed(&self) {
+            if let Some(m) = self.machine.lock().unwrap().upgrade() {
+                let key = m.snapshot().error.map(|t| t.key);
+                self.ticks.lock().unwrap().push(key);
+            }
+        }
+    }
+
+    /// A degraded subscribe's re-read and its notice reach the page as ONE
+    /// tick: a tick between them painted the flipped row with an empty
+    /// `error-message`, and a view (or a test) reading on that tick saw a
+    /// working labeler — the silence the notice exists to prevent.
+    #[tokio::test]
+    async fn a_degraded_subscribe_never_paints_its_reread_without_its_notice() {
+        let kp = ActorKeypair::generate();
+        let store = FakeSuccessionLedgerStore::empty(kp.actor_id());
+        let api = Arc::new(FakeLabelerCatalogNestApi::new());
+        let seams = LabelerGrantSeams {
+            actor_id: kp.actor_id().0,
+            ledger: Arc::new(store),
+            mail: Arc::new(FakeMailStore::empty()),
+            signer: Arc::new(KeypairSigner(ActorKeypair::from_secret(*kp.secret_bytes()))),
+        };
+        let observer = Arc::new(ErrorAtEveryTick {
+            machine: Mutex::new(std::sync::Weak::new()),
+            ticks: Mutex::new(Vec::new()),
+        });
+        let m = LabelerCatalogMachine::with_grant_seams(observer.clone(), api.clone(), seams);
+        *observer.machine.lock().unwrap() = Arc::downgrade(&m);
+        api.set_entries(vec![mail_entry(0xAA, false)]);
+        api.set_holders(vec![mda_holder()]);
+        m.refresh().await;
+        observer.ticks.lock().unwrap().clear();
+
+        m.subscribe(0).await;
+
+        let ticks = observer.ticks.lock().unwrap().clone();
+        assert!(!ticks.is_empty(), "the subscribe notified the page");
+        assert!(
+            ticks
+                .iter()
+                .all(|k| k.as_deref() == Some(SUBSCRIBED_WITHOUT_MAIL_KEY)),
+            "every tick of a degraded subscribe carries its notice: {ticks:?}"
         );
     }
 
@@ -1633,7 +1775,15 @@ mod tests {
                 want,
                 "verified={verified}"
             );
+            // The disabled row says why — the refusal the press would give.
+            let reason = m.subscribe_possibility(0).reason().map(|r| r.key.clone());
+            let expected = (!verified).then(|| SUBSCRIBE_UNVERIFIED_KEY.to_string());
+            assert_eq!(reason, expected, "verified={verified}");
         }
+        assert_eq!(
+            m.subscribe_possibility(2),
+            fauna_core::possibility::Possibility::Absent
+        );
     }
 
     /// A sealed-kind labeler that does not verify is refused before any grant

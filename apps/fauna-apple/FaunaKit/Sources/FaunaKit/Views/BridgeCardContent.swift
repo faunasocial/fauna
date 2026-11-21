@@ -167,27 +167,24 @@ public struct BridgeCardContent: View {
     /// scoped mode is Nostr's `platform: "web"`), and matching it left iOS
     /// answering to NOTHING — a hypothetical `platform: "ios"` mode would have
     /// been dropped by the very app it targets.
+    private var linkPlatform: String { isDesktop ? "macos" : "ios" }
+
     private var applicableModes: [BridgeLinkMode] {
-        bridge.linkModes?.filter {
-            bridgeModeApplies(modePlatform: $0.platform, platform: isDesktop ? "macos" : "ios")
-        } ?? []
+        BridgeManagerVM.applicableModes(bridge, platform: linkPlatform)
     }
 
-    /// Why linking is unavailable (`nil` = it IS), from the shared Rust rule so
-    /// apple cannot drift from the other six apps on what a mode-less bridge
-    /// means (`bridges.md` § Errors & edge cases).
-    private var linkBlock: FfiLinkBlock? {
-        bridgeLinkBlock(
-            linked: bridge.linked,
-            error: bridge.error,
-            applicableModes: UInt32(applicableModes.count)
-        )
+    /// The Link control's one answer, from the shared Rust rule so apple
+    /// cannot drift from the other six apps on what a mode-less bridge means
+    /// (`bridges.md` § Errors & edge cases, rule 4): blocked by the reason
+    /// `bridge-link-blocked-reason` paints, and the Link action refuses with it.
+    private var linkPossibility: Possibility {
+        BridgeManagerVM.linkPossibility(bridge, platform: linkPlatform)
     }
 
     @ViewBuilder
     private var unlinkFields: some View {
         let modes = applicableModes
-        if let block = linkBlock {
+        if let reason = linkPossibility.reasonText {
             // The nest's own explanation when it sent one — verbatim, never
             // swapped for the localized generic, since it is the only account of
             // what actually went wrong. `automationText` (not a bare
@@ -199,12 +196,7 @@ public struct BridgeCardContent: View {
             // registration-baselined, not actually registered, so
             // `wait_for("bridge-link-blocked-reason")` timed out at count=0
             // on both apple targets even though the nest-side override worked).
-            automationText(Ids.bridgeLinkBlockedReason, {
-                switch block {
-                case .providerError(let message): return message
-                case .noApplicableMode: return L.bridges.noLinkMethod
-                }
-            }())
+            automationText(Ids.bridgeLinkBlockedReason, reason)
                 .foregroundStyle(.secondary)
         } else {
             if modes.count > 1 {
@@ -260,14 +252,10 @@ public struct BridgeCardContent: View {
         )
         .buttonStyle(.borderedProminent)
         .modifier(CompactControlSize(compact: compact))
-        // Unlink is always valid; Link is disabled when no mode applies, so the
-        // control is never live-but-inert (it used to swallow the tap in
-        // `BridgeManagerVM.link`'s `guard ... else { return }`).
-        .disabled(!bridge.linked && linkBlock != nil)
         .accessibilityIdentifier(Ids.bridgeActionButton)
         .automationActivate(
             Ids.bridgeActionButton,
-            // Mirrors the `.disabled` predicate above — without it,
+            // Mirrors the `faunaPossible` answer below — without it,
             // `/element/enabled` falls back to "exists ⇒ enabled" (the button's
             // real SwiftUI-level `.disabled` sits INSIDE this automation
             // modifier, so `AutomationRegistry`'s ancestors-only folding never
@@ -276,7 +264,7 @@ public struct BridgeCardContent: View {
             // the in-process driver's own strict-actuation gate would have let a
             // click through on a live-but-inert control, exactly what
             // `bridges.md` § Errors & edge cases rule 3 forbids.
-            isEnabled: { bridge.linked || linkBlock == nil },
+            isEnabled: { linkPossibility.isPossible },
             value: { bridge.linked ? "linked" : "unlinked" },
             perform: performAction
         )
@@ -286,6 +274,9 @@ public struct BridgeCardContent: View {
         // keeps that a fact the table owns rather than one this view assumes.
         // The link *fields* above are buffer and stay live.
         .faunaGate(bridge.linked ? "fauna.bridges.unlink" : "fauna.bridges.link")
+        // Unlink is always possible; Link is blocked by the shared answer's
+        // reason, so the control is never live-but-inert.
+        .faunaPossible(linkPossibility)
     }
 
     private func performAction() {
@@ -293,7 +284,7 @@ public struct BridgeCardContent: View {
             if bridge.linked {
                 await vm.unlink(bridge: bridge)
             } else {
-                await vm.link(bridge: bridge)
+                await vm.link(bridge: bridge, platform: linkPlatform)
             }
         }
     }
@@ -327,13 +318,13 @@ public struct BridgeCardContent: View {
                     Task { await vm.addFollow(bridgeId: bridge.id) }
                 }
                 .modifier(CompactControlSize(compact: compact))
-                .disabled(vm.followId.isEmpty)
                 .accessibilityIdentifier(Ids.bridgeAddFollowButton)
-                .automationActivate(Ids.bridgeAddFollowButton,
-                                    isEnabled: { !vm.followId.isEmpty }) {
+                .automationActivate(Ids.bridgeAddFollowButton) {
                     Task { await vm.addFollow(bridgeId: bridge.id) }
                 }
+                .faunaPossible(vm.followAnswer)
             }
+            FaunaPossibilityReason(vm.followAnswer)
 
             ForEach(bridgeFollows) { follow in
                 HStack {

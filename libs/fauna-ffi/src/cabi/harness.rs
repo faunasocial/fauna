@@ -1619,7 +1619,7 @@ pub unsafe extern "C" fn fauna_harness_create_private_link(
         with_client(call.nest_url, identity.clone_keypair(), |nest| async move {
             let client = fauna_client_share::ShareClient::new(nest);
             match client
-                .create_private_link(&author, &file, manifest, lifetime_secs, now)
+                .create_private_link(&author, &file, manifest, &[], lifetime_secs, now)
                 .await
             {
                 Ok(created) => outcome!(Ok::<_, NestClientError>(created)),

@@ -232,6 +232,18 @@ pub trait DispatchSink: Send + Sync + 'static {
     fn close_without_reply(&self) -> bool {
         false
     }
+
+    /// Test-only (`test-hooks`): queue the rpc-hold hook's park announce — one
+    /// `fauna.test.rpc_held` Push naming `correlation_id` — on this connection,
+    /// through its ordinary push path so it takes the connection's next `seq`
+    /// (`rpc_hold_test_hook` § Announcing the park). `true` iff it was queued.
+    /// The default — `false`, nothing sent — is every plane but the per-actor
+    /// one, where no caller is a UI window.
+    #[cfg(feature = "test-hooks")]
+    fn announce_held(self: Arc<Self>, correlation_id: u64) -> bool {
+        let _ = correlation_id;
+        false
+    }
 }
 
 /// Shared body for a peer-symmetric sink's [`DispatchSink::replay_rebuilt`] —
@@ -466,6 +478,15 @@ pub async fn spawn_dispatch<S: DispatchSink>(
         Value::Map(map) => map.keys().cloned().collect(),
         _ => Vec::new(),
     };
+    // The park's announce (`rpc_hold_test_hook` § Announcing the park): built
+    // for a per-actor request only — the same test as `hold_actor` — and run
+    // by the hook only if the request parks. A federation or principal
+    // request gets none.
+    #[cfg(feature = "test-hooks")]
+    let hold_announce: Option<crate::rpc_hold_test_hook::Announce> = hold_actor.map(|_| {
+        let sink = Arc::clone(&sink);
+        Box::new(move || sink.announce_held(correlation_id)) as crate::rpc_hold_test_hook::Announce
+    });
     // spawn-ok(request-scoped): one RPC, bounded by two named mechanisms — the
     // `MAX_INFLIGHT_HANDLERS` permit moved in above, and the per-kind
     // `tokio::time::timeout` the body wraps itself in. It does hold
@@ -496,6 +517,7 @@ pub async fn spawn_dispatch<S: DispatchSink>(
                 &handler_kind,
                 hold_actor,
                 &hold_fields,
+                hold_announce,
             )
             .await
         {

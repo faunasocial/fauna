@@ -232,10 +232,25 @@ pub fn sync_selection_to_page(list_box: &gtk::ListBox, page: &str) {
 }
 
 /// Show the Admin sidebar row. Call this when admin status is confirmed.
+/// Production paints the row through [`paint_admin_sidebar_row`]; this is the
+/// walk tests' shorthand for "the admin entry is open".
+#[cfg(test)]
 pub fn show_admin_sidebar_row(list_box: &gtk::ListBox) {
+    paint_admin_sidebar_row(list_box, true);
+}
+
+/// Paint the Admin sidebar row (`admin-tab`) from the shared admin-entry
+/// answer (`fauna_client_account::admin_entry_possibility`): absent for a
+/// non-admin, never a disabled row (`docs/goal/ui/README.md` § Offer only
+/// what is possible, rule 2; `admin.md` § Errors & edge cases).
+pub fn paint_admin_sidebar_row(list_box: &gtk::ListBox, is_admin: bool) {
     let admin_index = SidebarItem::ALL.len() as i32; // index 11 (after the 11 standard items)
     if let Some(row) = list_box.row_at_index(admin_index) {
-        row.set_visible(true);
+        crate::possible::paint(
+            &row,
+            None,
+            fauna_client_account::admin_entry_possibility(is_admin),
+        );
     }
 }
 

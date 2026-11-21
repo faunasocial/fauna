@@ -237,6 +237,17 @@ pub struct Tokens {
     /// This principal's row id, hex ([`PRINCIPAL_ID_FIELD`]).
     #[serde(default, rename = "fauna_principal_id")]
     pub principal_id: Option<String>,
+    /// The granted scope, space-separated — what the shell lists by
+    /// (`apps/cli.md` § A tool that cannot run, rule 2); [`Tokens::granted`].
+    #[serde(default)]
+    pub scope: Option<String>,
+}
+
+impl Tokens {
+    /// The granted scope's strings, when the reply named it.
+    pub fn granted(&self) -> Option<Vec<String>> {
+        self.scope.as_deref().map(crate::reach::parse_scope)
+    }
 }
 
 /// One poll's answer.
@@ -425,6 +436,25 @@ mod tests {
 
     fn decode(part: &str) -> Value {
         serde_json::from_slice(&B64.decode(part).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_token_reply_carries_its_granted_scope() {
+        let tokens: Tokens = serde_json::from_value(serde_json::json!({
+            "access_token": "t",
+            "scope": "fauna:feed:read  fauna:admin:rw:users",
+        }))
+        .unwrap();
+        assert_eq!(
+            tokens.granted(),
+            Some(vec![
+                "fauna:feed:read".to_owned(),
+                "fauna:admin:rw:users".to_owned()
+            ])
+        );
+        let bare: Tokens =
+            serde_json::from_value(serde_json::json!({ "access_token": "t" })).unwrap();
+        assert_eq!(bare.granted(), None);
     }
 
     #[test]

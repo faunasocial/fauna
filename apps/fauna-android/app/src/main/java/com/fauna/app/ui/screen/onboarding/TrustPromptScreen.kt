@@ -17,6 +17,8 @@ import com.fauna.ffi.onboarding.WizardOutcome
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.TextButton
 
 /**
  * Stage 3b-ter: the one-tap "trust this box" offer (`onboarding.md` §

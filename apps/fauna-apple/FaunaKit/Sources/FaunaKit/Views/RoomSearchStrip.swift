@@ -86,6 +86,7 @@ public struct RoomSearchResults: View {
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 10)
                                 .contentShape(Rectangle())
+                                .faunaActsOnClick()
                                 .onTapGesture { onOpenHit(row.navigation) }
                                 .accessibilityIdentifier(Ids.roomSearchResultItem)
                                 .automationActivate(

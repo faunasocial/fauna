@@ -51,6 +51,7 @@ import { registerBackupCustodianCommands } from '#lib/backup-custodian-e2e';
 import { registerAtprotoDelegationCommands } from '#lib/atproto-delegation-e2e';
 import { registerTrustClockCommands } from '#lib/trust-clock-e2e';
 import { registerSubscriptionsCommands } from '#lib/subscriptions-e2e';
+import { registerFoldersCustodyCommands } from '#lib/folders-custody-e2e';
 import { registerMailTokenRefreshCommands } from '#lib/mail-token-refresh-e2e';
 import { registerFeedCueCommands } from '#lib/feed-cues-e2e';
 import { registerFamilyNotifyCommands } from '#lib/family-notify-e2e';
@@ -344,6 +345,10 @@ export function installAutomationSurface(): void {
   //   * subscriptions: `subscriptions_hold_author_drain` / `_release_` → the
   //     author pump's drain hold, so a paid request's badge can be read.
   registerSubscriptionsCommands();
+  //   * folders: `folders_hold_custody_reads` / `_release_` → the Folders
+  //     page's mail-custody read hold, so the WebDAV switch's "still loading"
+  //     can be read.
+  registerFoldersCustodyCommands();
   //   * mail: `mail_token_refresh_advance_clock` → the submission-token
   //     refresh's clock (a 7-day cadence — convention 14's fake clock).
   registerMailTokenRefreshCommands();

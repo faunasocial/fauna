@@ -35,7 +35,8 @@
 //! load or at the view's Remove Again is asked the sign-out's own question
 //! first — does another tab serve one of these accounts — and erases nothing
 //! when one does; the probe is [`actors_served_by_another_tab`] (the
-//! conversations-engine role's Web Lock, `fauna_mls::engine_role`), its
+//! conversations-engine role's Web Lock, `fauna_mls::engine_role`, and the
+//! serving-presence lock, `fauna_client_accounts::web_serving_presence`), its
 //! answer the `erase_refused` argument.
 
 #![cfg(target_arch = "wasm32")]
@@ -45,6 +46,9 @@ use std::time::Duration;
 
 use fauna_account_store::indexeddb::IndexedDbBackend;
 use fauna_account_store::root::StoreRoot;
+use fauna_client_accounts::web_serving_presence::{
+    release_serving_presence, serving_presence_held_elsewhere, take_serving_presence,
+};
 use fauna_client_accounts::{
     AccountRegistry, EraseResidueView, SignOutRecord, WebIdentityStore,
     sign_out_residue_retry_blocked_copy, with_web_mutation_lock,
@@ -302,15 +306,19 @@ pub fn sign_out_finish(erase_refused: bool) -> js_sys::Promise {
     future_to_promise(async move { crate::rpc::to_js(&finish_recorded(erase_refused).await) })
 }
 
-/// The accounts among `actor_ids` whose conversations-engine role ANOTHER tab
-/// of this browser profile holds right now — web's leg of *An erase refuses
-/// while a sibling serves the account* (`apps/account-scoping.md` § Concurrent
-/// instances), asked before a sign-out or a load's sweep erases anything. One
-/// probe per account over the role's one name
-/// (`fauna_mls::engine_role::conversations_engine_role_held_elsewhere`, which
-/// owns the posture: this tab's own hold consulted, never probed;
-/// `ifAvailable`, never a wait; degrades OPEN). Duplicate spellings of one
-/// account are probed once.
+/// The accounts among `actor_ids` that ANOTHER tab of this browser profile
+/// serves right now — web's leg of *An erase refuses while a sibling serves the
+/// account* (`apps/account-scoping.md` § Concurrent instances), asked before a
+/// sign-out, a load's sweep or a remove-account erases anything. Two halves per
+/// account, as native asks at its two locks: the conversations-engine role
+/// (`fauna_mls::engine_role::conversations_engine_role_held_elsewhere` — this
+/// tab's own hold consulted, never probed; it stays because a tab from a bundle
+/// older than the serving lock holds the role alone), then the serving-presence
+/// lock (`fauna_client_accounts::web_serving_presence::serving_presence_held_elsewhere`
+/// — a tab that holds the account's identity without its role; this tab's own
+/// shared hold put down for the probe and retaken). Each is `ifAvailable`, never
+/// a wait, and degrades OPEN. Duplicate spellings of one account are probed
+/// once.
 pub(crate) async fn actors_served_elsewhere(actor_ids: &[String]) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut served = Vec::new();
@@ -318,11 +326,35 @@ pub(crate) async fn actors_served_elsewhere(actor_ids: &[String]) -> Vec<String>
         if !seen.insert(fauna_mls::engine_role::web_role_lock_name(actor)) {
             continue;
         }
-        if fauna_mls::engine_role::conversations_engine_role_held_elsewhere(actor).await {
+        if fauna_mls::engine_role::conversations_engine_role_held_elsewhere(actor).await
+            || serving_presence_held_elsewhere(actor).await
+        {
             served.push(actor.clone());
         }
     }
     served
+}
+
+/// Declare that this tab's identity is `actor_id` — the serving-presence lock's
+/// take (`fauna_client_accounts::web_serving_presence`), called by the SPA's
+/// one identity subscription. Queued shared; idempotent; skipped without a lock
+/// manager.
+#[wasm_bindgen(js_name = takeServingPresence)]
+pub fn take_serving_presence_js(actor_id: String) -> js_sys::Promise {
+    future_to_promise(async move {
+        take_serving_presence(&actor_id).await;
+        Ok(JsValue::UNDEFINED)
+    })
+}
+
+/// Withdraw this tab's serving declaration for `actor_id`, or for every account
+/// with none — the identity subscription's release of the departing account.
+#[wasm_bindgen(js_name = releaseServingPresence)]
+pub fn release_serving_presence_js(actor_id: Option<String>) -> js_sys::Promise {
+    future_to_promise(async move {
+        release_serving_presence(actor_id.as_deref()).await;
+        Ok(JsValue::UNDEFINED)
+    })
 }
 
 /// [`actors_served_elsewhere`], for the SPA's sign-out guard and the load's
@@ -342,8 +374,9 @@ pub fn actors_served_by_another_tab(actor_ids: Vec<String>) -> js_sys::Promise {
 /// Remove-account's question, in the order the ruling fixes
 /// (`apps/account-scoping.md` § Concurrent instances → *Remove-account also
 /// refuses the account THIS instance serves*): `'this_tab'` when `actor_id` is
-/// the account this tab serves — its own role says nothing about that, since
-/// the probe skips it — else `'other_tab'` when another tab holds its role,
+/// the account this tab serves — its own holds say nothing about that, since
+/// the probe skips them — else `'other_tab'` when another tab serves it (its
+/// role or its serving-presence lock, [`actors_served_elsewhere`]),
 /// else `'carry_owed'` when it is a retired identity whose undrained outbox
 /// this browser has not carried to its successor yet
 /// (`succession-aftermath.md` § Re-key scope, the device-local outbox row —

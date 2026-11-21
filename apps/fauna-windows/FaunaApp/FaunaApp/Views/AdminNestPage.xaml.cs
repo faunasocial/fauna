@@ -456,25 +456,33 @@ public sealed partial class AdminNestPage : Page
 
     // ── Web-app origin (fauna.admin.web_app_origin.{get,set}) ───────────────
 
-    /// <summary>Paint the section from the VM: radios unmarked and disabled until
-    /// the read lands and whenever <c>can_set</c> is false; the central label and
-    /// the status + scope lines are the shared view's. Guards the programmatic
-    /// <c>IsChecked</c> set so the <c>Checked</c> handlers don't re-select.</summary>
+    /// <summary>Paint the section from the VM's shared answers
+    /// (web-content-hosting.md § Same-origin security model → <i>While the central
+    /// origin is not live, the choice is not offered</i>, rule 5): the whole section
+    /// is collapsed until the read lands and wherever <c>section_possibility</c> is
+    /// absent, the central radio wherever <c>central_possibility</c> is; each radio
+    /// and the save paint from the shared draft predicate (disabled with its reason
+    /// on the tooltip); the central label and the status + scope lines are the
+    /// view's. Guards the programmatic <c>IsChecked</c> set so the <c>Checked</c>
+    /// handlers don't re-select.</summary>
     private void RenderWebAppOrigin()
     {
         if (_vm is null) return;
+        WebAppOriginSection.Visibility = _vm.WebAppOriginSection().Shown ? Visibility.Visible : Visibility.Collapsed;
         _syncingWebAppOrigin = true;
         if (WebAppOriginBundledRadio.IsChecked != _vm.WebAppOriginBundledSelected)
             WebAppOriginBundledRadio.IsChecked = _vm.WebAppOriginBundledSelected;
         if (WebAppOriginCentralRadio.IsChecked != _vm.WebAppOriginCentralSelected)
             WebAppOriginCentralRadio.IsChecked = _vm.WebAppOriginCentralSelected;
         _syncingWebAppOrigin = false;
-        WebAppOriginBundledRadio.IsEnabled = _vm.WebAppOriginCanSet;
-        WebAppOriginCentralRadio.IsEnabled = _vm.WebAppOriginCanSet;
+        WebAppOriginBundledRadio.ApplyPossibility(_vm.WebAppOriginBundledRadio());
+        WebAppOriginCentralRadio.ApplyPossibility(_vm.WebAppOriginCentralRadio());
         WebAppOriginCentralRadio.Content = _vm.WebAppOriginCentralLabel;
         WebAppOriginStatusText.Text = _vm.WebAppOriginStatus;
         WebAppOriginScopeText.Text = _vm.WebAppOriginScope;
-        WebAppOriginSaveButton.IsEnabled = _vm.WebAppOriginCanSave;
+        // The save's own answer, enabled only with a radio marked and no save in
+        // flight (a possible answer with nothing marked has nothing to commit).
+        WebAppOriginSaveButton.ApplyPossibility(_vm.WebAppOriginSave() with { Enabled = _vm.WebAppOriginCanSave });
     }
 
     private void WebAppOriginBundledRadio_Checked(object sender, RoutedEventArgs e)

@@ -26,10 +26,19 @@ import com.fauna.app.R
 import com.fauna.app.ui.components.CopyButton
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.navigation.LocalAppMessages
+import com.fauna.app.ui.util.faunaFormGate
 import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.mailQuotaText
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.viewmodel.MailSettingsVM
+import com.fauna.app.ui.viewmodel.MailUsableVM
+import com.fauna.app.ui.util.blockedReason
+import com.fauna.app.ui.util.isPossible
+import com.fauna.app.ui.util.isShown
+import com.fauna.app.ui.util.localized
+import com.fauna.app.ui.util.pressAsked
+import androidx.compose.ui.graphics.Color
+import uniffi.fauna_core.Possibility
 import uniffi.fauna_client_mail_settings.CredentialKind
 import uniffi.fauna_client_mail_settings.MailCredentialSummary
 import uniffi.fauna_client_mail_settings.MuaInstructions
@@ -37,11 +46,19 @@ import uniffi.fauna_client_mail_settings.PendingRotationStatus
 import uniffi.fauna_client_mail_settings.SettingsStatus
 import uniffi.fauna_client_mail_settings.forwardPerHourHint
 import uniffi.fauna_client_mail_settings.mailOverQuotaNoticeOf
+import uniffi.fauna_client_mail_settings.mailSettingsCredentialManagementPossibility
+import uniffi.fauna_client_mail_settings.mailSettingsEnableTogglePossibility
+import uniffi.fauna_client_mail_settings.mailSettingsRotateKeysPossibility
 import uniffi.fauna_client_mail_settings.mailQuotaDisplayOf
 import uniffi.fauna_client_mail_settings.mailSubmissionQuotaDisplayOf
 import uniffi.fauna_client_mail_settings.passwordStrengthLabel
 import uniffi.fauna_client_mail_settings.settingsStatusLabel
 import social.fauna.generated.Ids
+import com.fauna.app.ui.controls.AlertDialog
+import com.fauna.app.ui.controls.Button
+import com.fauna.app.ui.controls.OutlinedButton
+import com.fauna.app.ui.controls.OutlinedTextField
+import com.fauna.app.ui.controls.TextButton
 
 /**
  * The `mail-settings` hub (`mail-settings.md`): the user's single touchpoint for
@@ -62,8 +79,10 @@ import social.fauna.generated.Ids
 fun MailSettingsScreen(
     navController: NavController,
     vm: MailSettingsVM = hiltViewModel(),
+    usableVm: MailUsableVM = hiltViewModel(),
 ) {
     val snapshot by vm.snapshot.collectAsState()
+    val mailUsable by usableVm.answer.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
     val nestEncrypted by vm.nestEncrypted.collectAsState()
     val generatedPassword by vm.generatedPassword.collectAsState()
@@ -75,6 +94,9 @@ fun MailSettingsScreen(
     val autorespond by vm.autorespond.collectAsState()
     val autorespondMessage by vm.autorespondMessage.collectAsState()
     val quotas by vm.quotas.collectAsState()
+    val forwardAllAnswer by vm.forwardAllAnswer.collectAsState()
+    val forwardPerHourAnswer by vm.forwardPerHourAnswer.collectAsState()
+    val autorespondAnswer by vm.autorespondAnswer.collectAsState()
     val appMessages = LocalAppMessages.current
     val context = LocalContext.current
 
@@ -82,11 +104,30 @@ fun MailSettingsScreen(
 
     MailSettingsContent(
         enabled = snapshot.enabled,
+        mailUsable = mailUsable,
         mailUnavailableHere = snapshot.mailUnavailableHere,
         caldavEnabled = snapshot.caldavEnabled,
         carddavEnabled = snapshot.carddavEnabled,
         servesWebdavSet = snapshot.servesWebdavSet,
-        credentialManagementReachable = snapshot.credentialManagementReachable,
+        // The credential section's shared answer
+        // (`mail_settings_credential_management_possibility`, over the
+        // `credential_management_reachable` field — read, never re-derived);
+        // FFI lives here, off the testable Content.
+        credentialAnswer = mailSettingsCredentialManagementPossibility(snapshot),
+        // The enable toggle's shared answer
+        // (`mail_settings_enable_toggle_possibility`): still loading before
+        // the first hydrate, then the unavailable notice for a turn-on on a
+        // box that cannot serve mail (mail-settings.md § Errors & edge cases,
+        // *Controls wait for their reads*).
+        enableAnswer = mailSettingsEnableTogglePossibility(snapshot),
+        forwardAllAnswer = forwardAllAnswer,
+        forwardPerHourAnswer = forwardPerHourAnswer,
+        autorespondAnswer = autorespondAnswer,
+        // Rotate keys' and its confirm's shared answer
+        // (`mail_settings_rotate_keys_possibility`): a rotation waiting for
+        // the banner's Resume, or this app's own in flight; FFI off the Content.
+        rotateAnswer = { inFlight -> mailSettingsRotateKeysPossibility(snapshot, inFlight) },
+        onRefuse = { appMessages.showError(it) },
         servingEnabled = snapshot.servingEnabled,
         credentials = snapshot.credentials,
         mua = snapshot.mua,
@@ -160,6 +201,10 @@ private sealed interface CredForm {
 @Composable
 fun MailSettingsContent(
     enabled: Boolean,
+    // The shared mail-usable answer (`mail_settings_mail_usable` off the
+    // session's one mail machine, read by [MailUsableVM]) gating the sub-page
+    // nav rows — never re-derived here from `enabled`.
+    mailUsable: Possibility,
     // `MailSettingsSnapshot.mailUnavailableHere` — this box cannot enable mail (no
     // content scanners). Read from the shared machine, never re-derived; while
     // mail is off the toggle is disabled with state `unavailable` and the notice
@@ -172,12 +217,15 @@ fun MailSettingsContent(
     // `fauna.folders.list`, NOT the deployment-wide `webdav_enabled` toggle.
     // Gates the `mail-settings-mua-webdav-url` row.
     servesWebdavSet: Boolean,
-    // The credential-management reachability predicate, computed once in shared
-    // Rust (priority #2/#4: `MailSettingsSnapshot::credential_management_reachable`
-    // = `enabled || caldavEnabled || carddavEnabled || servesWebdavSet`) instead
-    // of re-derived here. Drives the credential-management section, serve-here
-    // toggle, and MUA-instructions block.
-    credentialManagementReachable: Boolean,
+    // The credential-management section's shared answer
+    // (`MailSettingsSnapshot::credential_management_possibility`, the answer over
+    // `credential_management_reachable` = `enabled || caldavEnabled ||
+    // carddavEnabled || servesWebdavSet`, computed once in shared Rust —
+    // priority #2/#4, `ui/README.md` § Offer only what is possible, rule 6):
+    // absent → no section; blocked → Add password shown disabled with the
+    // reason naming the enable toggle, the rest of the section hidden;
+    // possible → the whole section.
+    credentialAnswer: Possibility,
     servingEnabled: Boolean,
     credentials: List<MailCredentialSummary>,
     mua: MuaInstructions,
@@ -238,13 +286,35 @@ fun MailSettingsContent(
     quotaText: String? = null,
     submissionQuotaText: String? = null,
     overQuotaNotice: String? = null,
+    // Controls wait for their reads (mail-settings.md § Errors & edge cases,
+    // *Controls wait for their reads*): the enable toggle's shared answer
+    // (`MailSettingsSnapshot::enable_toggle_possibility`), and the forward-all
+    // and automatic-reply reads' answers (`Possibility::from_read` over the
+    // VM's read states). Blocked paints the control disabled with its reason;
+    // the VM's handlers ask the same answers. Defaults keep the pre-existing
+    // Content tests compiling.
+    enableAnswer: Possibility = Possibility.Possible,
+    forwardAllAnswer: Possibility = Possibility.Possible,
+    // The forwarding limit waits for the read that brings its ceiling.
+    forwardPerHourAnswer: Possibility = Possibility.Possible,
+    autorespondAnswer: Possibility = Possibility.Possible,
+    // `mail-settings-rotate-keys-button`'s and the rotate confirm's answer
+    // (`MailSettingsSnapshot::rotate_keys_possibility`) given whether this
+    // page's own rotation is in flight; each press asks it again and a refusal
+    // says why on [onRefuse] (`mail-settings.md` § Errors & edge cases, *The
+    // in-page predicates*).
+    rotateAnswer: (Boolean) -> Possibility = { Possibility.Possible },
+    onRefuse: (String) -> Unit = {},
 ) {
+    val context = LocalContext.current
     var form by remember { mutableStateOf<CredForm>(CredForm.Closed) }
     var showRotate by remember { mutableStateOf(false) }
     // `Some(credentials to re-wrap)` while a confirmed rotation runs: the form
     // holds open, progress painted, controls disabled, until its dispatch
     // returns (mail-settings.md § Element visibility) — the tui/web/linux shape.
     var rotationInFlight by remember { mutableStateOf<ULong?>(null) }
+    // Rotate keys' answer now, painted on the button and on its confirm.
+    val rotate = rotateAnswer(rotationInFlight != null)
     var showDisableConfirm by remember { mutableStateOf(false) }
 
     Scaffold(
@@ -288,11 +358,17 @@ fun MailSettingsContent(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = if (unavailable) Modifier.testTag(Ids.MAIL_SETTINGS_UNAVAILABLE_NOTICE) else Modifier,
                     )
+                    // The toggle waits for the first hydrate: before it the
+                    // never-read "off" is not the nest's answer, so the enable
+                    // form never opens on it. The unavailable case's reason is
+                    // the notice above, painted once.
+                    if (!unavailable) DisabledControlReasonText(localized(enableAnswer.blockedReason))
                 }
                 Switch(
                     checked = enabled,
-                    enabled = !unavailable,
+                    enabled = !unavailable && enableAnswer.isPossible,
                     onCheckedChange = { on ->
+                        if (!enableAnswer.isPossible) return@Switch
                         // Off-path opens the destructive confirm dialog (the real
                         // decision point); the toggle stays rendering `enabled`
                         // until DisableMail lands. mail-settings.md § Disable mail.
@@ -398,13 +474,25 @@ fun MailSettingsContent(
             // on `enabled`. Mirrors the linux lead
             // (apps/fauna-linux/src/settings/mail.rs:1173);
             // mail-settings.md § CalDAV-only mailbox.
-            val mailbox = credentialManagementReachable
+            //
+            // Painted from the shared answer (mail-settings.md § Errors & edge
+            // cases, *The in-page predicates*): blocked keeps Add password in
+            // sight, disabled with its reason (rule 2) — the tui shape.
+            val mailbox = credentialAnswer.isPossible
             if (!mailbox) {
                 Text(
                     stringResource(R.string.settings_mail_section_description),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                if (credentialAnswer.isShown) {
+                    Button(
+                        onClick = {},
+                        enabled = false,
+                        modifier = Modifier.testTag(Ids.MAIL_SETTINGS_ADD_CREDENTIAL_BUTTON),
+                    ) { Text(stringResource(R.string.settings_mail_add_credential)) }
+                    DisabledControlReasonText(localized(credentialAnswer.blockedReason))
+                }
             } else {
                 // The app passwords themselves are rows of the Connected apps page
                 // (connected-apps.md § Architectural rules; mail-settings.md § Where
@@ -424,11 +512,18 @@ fun MailSettingsContent(
                         modifier = Modifier.testTag(Ids.MAIL_SETTINGS_ADD_CREDENTIAL_BUTTON),
                     ) { Text(stringResource(R.string.settings_mail_add_credential)) }
                     OutlinedButton(
-                        onClick = { showRotate = true },
-                        enabled = credentials.isNotEmpty() && pendingRotation == null,
+                        onClick = {
+                            pressAsked(context, rotateAnswer(rotationInFlight != null), onRefuse) {
+                                showRotate = true
+                            }
+                        },
+                        enabled = credentials.isNotEmpty() && rotate.isPossible,
                         modifier = Modifier.testTag(Ids.MAIL_SETTINGS_ROTATE_KEYS_BUTTON),
                     ) { Text(stringResource(R.string.settings_mail_rotate_keys)) }
                 }
+                // Why rotate keys waits (rule 2): a rotation to resume from the
+                // banner, or this page's own still running.
+                if (credentials.isNotEmpty()) DisabledControlReasonText(localized(rotate.blockedReason))
 
                 // keys-info explainer (i)
                 Text(
@@ -503,6 +598,7 @@ fun MailSettingsContent(
                         onAutorespondMessageChange = onAutorespondMessageChange,
                         onToggleAutorespond = onToggleAutorespond,
                         onCommitAutorespondMessage = onCommitAutorespondMessage,
+                        autorespondAnswer = autorespondAnswer,
                         quotaText = quotaText,
                         submissionQuotaText = submissionQuotaText,
                         overQuotaNotice = overQuotaNotice,
@@ -513,20 +609,27 @@ fun MailSettingsContent(
                         forwardPerHourHint = forwardPerHourHint,
                         onCommitForwardAllTo = onCommitForwardAllTo,
                         onCommitForwardPerHour = onCommitForwardPerHour,
+                        forwardAllAnswer = forwardAllAnswer,
+                        forwardPerHourAnswer = forwardPerHourAnswer,
                     )
                 }
+            }
 
-                // ── Sub-page nav rows (Aliases / Lists / Export / Spam) ──
-                // All email-feature sub-pages, so they stay gated on `enabled`
-                // (a CalDAV-only mailbox has no email aliases/lists/export/spam).
-                if (enabled) {
-                    HorizontalDivider()
-                    NavRow(stringResource(R.string.mail_aliases_title), onNavAliases)
-                    NavRow(stringResource(R.string.mail_lists_title), onNavLists)
-                    NavRow(stringResource(R.string.mail_export_title), onNavExport)
-                    NavRow(stringResource(R.string.mail_import_title), onNavImport)
-                    NavRow(stringResource(R.string.mail_spam_title), onNavSpam)
-                }
+            // ── Sub-page nav rows (Aliases / Lists / Export / Import / Spam) ──
+            // Gated on the shared mail-usable answer (mail-settings.md § Errors
+            // & edge cases, the mail-usable gate), never on `enabled` read by
+            // hand: absent → not composed; blocked → shown disabled with the
+            // shared reason (the enable toggle above is the one live step);
+            // possible → live.
+            if (mailUsable.isShown) {
+                val live = mailUsable.isPossible
+                HorizontalDivider()
+                NavRow(stringResource(R.string.mail_aliases_title), onNavAliases, live)
+                NavRow(stringResource(R.string.mail_lists_title), onNavLists, live)
+                NavRow(stringResource(R.string.mail_export_title), onNavExport, live)
+                NavRow(stringResource(R.string.mail_import_title), onNavImport, live)
+                NavRow(stringResource(R.string.mail_spam_title), onNavSpam, live)
+                DisabledControlReasonText(localized(mailUsable.blockedReason))
             }
 
             // ── Add / enable credential form (inline reveal) ──
@@ -554,11 +657,13 @@ fun MailSettingsContent(
                     credentials = credentials,
                     status = status,
                     inFlight = rotationInFlight,
+                    answer = rotate,
+                    onRefuse = onRefuse,
                     progressLabel = { remaining ->
                         statusLabel(SettingsStatus.RotationInProgress(remaining), true)
                     },
                     onConfirm = { excluded ->
-                        if (rotationInFlight == null) {
+                        pressAsked(context, rotateAnswer(rotationInFlight != null), onRefuse) {
                             // The credentials the rotation re-wraps: the live ones not excluded.
                             rotationInFlight = credentials
                                 .count { !it.revoked && it.credentialId !in excluded }
@@ -597,6 +702,7 @@ private fun AccountControlsSection(
     onAutorespondMessageChange: (String) -> Unit,
     onToggleAutorespond: () -> Unit,
     onCommitAutorespondMessage: () -> Unit,
+    autorespondAnswer: Possibility,
     quotaText: String?,
     submissionQuotaText: String?,
     overQuotaNotice: String?,
@@ -648,9 +754,13 @@ private fun AccountControlsSection(
             )
         }
         Text(stringResource(R.string.mail_settings_autorespond_message_label), style = MaterialTheme.typography.bodyLarge)
+        // The message waits for the reply's read, so an empty pre-read draft
+        // never writes a reply filter; the label above stays the prompt, so
+        // the reason is a line of its own.
         OutlinedTextField(
             value = autorespondMessage,
             onValueChange = onAutorespondMessageChange,
+            enabled = autorespondAnswer.isPossible,
             keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
                 imeAction = androidx.compose.ui.text.input.ImeAction.Done,
             ),
@@ -661,6 +771,7 @@ private fun AccountControlsSection(
                 .fillMaxWidth()
                 .testTag(Ids.MAIL_SETTINGS_AUTORESPOND_MESSAGE_INPUT),
         )
+        DisabledControlReasonText(localized(autorespondAnswer.blockedReason))
         if (quotaText != null) {
             Text(
                 quotaText,
@@ -725,11 +836,23 @@ private fun ForwardingSection(
     forwardPerHourHint: String,
     onCommitForwardAllTo: (String) -> Unit,
     onCommitForwardPerHour: (String) -> Unit,
+    forwardAllAnswer: Possibility,
+    forwardPerHourAnswer: Possibility,
 ) {
     // A disabled Material text field still renders its current value, so the
     // persisted values stay readable with no nest — only editing-to-commit closes.
-    val allToGate = faunaGate("fauna.bridges.set_forward_all_to")
-    val perHourGate = faunaGate("fauna.bridges.set_forward_per_hour")
+    // The forward-all address also waits for its own read (an empty pre-read
+    // draft never clears a forward): the read's reason wins over the gate's.
+    val allToGate = faunaFormGate(
+        forwardAllAnswer,
+        faunaGate("fauna.bridges.set_forward_all_to", enabled = forwardAllAnswer.isPossible),
+    )
+    // The limit waits for the read that brings its ceiling: the read's reason
+    // wins over the gate's.
+    val perHourGate = faunaFormGate(
+        forwardPerHourAnswer,
+        faunaGate("fauna.bridges.set_forward_per_hour", enabled = forwardPerHourAnswer.isPossible),
+    )
     var allToInput by remember(forwardAllTo) { mutableStateOf(forwardAllTo) }
     var perHourInput by remember(forwardPerHour) { mutableStateOf(forwardPerHour) }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -786,10 +909,16 @@ private fun ForwardingSection(
 }
 
 @Composable
-private fun NavRow(label: String, onClick: () -> Unit) {
+private fun NavRow(label: String, onClick: () -> Unit, enabled: Boolean = true) {
     ListItem(
-        headlineContent = { Text(label) },
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+        headlineContent = {
+            Text(
+                label,
+                color = if (enabled) Color.Unspecified
+                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+            )
+        },
+        modifier = Modifier.fillMaxWidth().clickable(enabled = enabled, onClick = onClick),
     )
 }
 
@@ -983,6 +1112,9 @@ private fun RotateKeysForm(
     credentials: List<MailCredentialSummary>,
     status: SettingsStatus,
     inFlight: ULong?,
+    // The confirm paints from the same answer as the rotate button.
+    answer: Possibility,
+    onRefuse: (String) -> Unit,
     progressLabel: (ULong) -> String,
     onConfirm: (List<String>) -> Unit,
     onCancel: () -> Unit,
@@ -1039,7 +1171,7 @@ private fun RotateKeysForm(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = { onConfirm(excluded.filterValues { it }.keys.toList()) },
-                    enabled = rotateGate.enabled && inFlight == null,
+                    enabled = rotateGate.enabled && answer.isPossible,
                     modifier = Modifier.testTag(Ids.MAIL_ROTATE_KEYS_CONFIRM_BUTTON),
                 ) { Text(stringResource(R.string.settings_mail_rotate_confirm)) }
                 OutlinedButton(
@@ -1048,7 +1180,7 @@ private fun RotateKeysForm(
                     modifier = Modifier.testTag(Ids.MAIL_ROTATE_KEYS_CANCEL_BUTTON),
                 ) { Text(stringResource(R.string.settings_mail_cancel)) }
             }
-            DisabledControlReasonText(rotateGate.reason)
+            DisabledControlReasonText(rotateGate.reason ?: localized(answer.blockedReason))
         }
     }
 }

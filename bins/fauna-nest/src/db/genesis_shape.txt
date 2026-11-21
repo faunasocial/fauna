@@ -2660,6 +2660,18 @@ table materialize_in_flight
   item segment_ids BLOB NOT NULL
   item set_name TEXT NOT NULL
   item started_at INTEGER NOT NULL
+table materialize_receipts
+  col actor_id BLOB notnull=1 default=- pk=1 hidden=0
+  col set_name TEXT notnull=1 default=- pk=2 hidden=0
+  col ledger_generation INTEGER notnull=1 default=- pk=0 hidden=0
+  col manifest_anchor BLOB notnull=1 default=- pk=0 hidden=0
+  col materialized_at INTEGER notnull=1 default=- pk=0 hidden=0
+  item PRIMARY KEY (actor_id, set_name)
+  item actor_id BLOB NOT NULL
+  item ledger_generation INTEGER NOT NULL
+  item manifest_anchor BLOB NOT NULL
+  item materialized_at INTEGER NOT NULL
+  item set_name TEXT NOT NULL
 table media_ticket_secret
   col id INTEGER notnull=0 default=- pk=1 hidden=0
   col secret_wrapped BLOB notnull=1 default=- pk=0 hidden=0

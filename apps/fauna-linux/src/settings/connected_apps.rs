@@ -71,6 +71,9 @@ struct Widgets {
     code_entry: adw::EntryRow,
     connect_btn: gtk::Button,
     external_apps_toggle: adw::SwitchRow,
+    /// The switch's reason line: painted by the possibility seam while the
+    /// switch is not live (still loading before the read).
+    external_apps_reason: gtk::Label,
     roster_box: gtk::Box,
     blocked_group: adw::PreferencesGroup,
     blocked_box: gtk::Box,
@@ -202,11 +205,29 @@ pub fn build_connected_apps_page() -> (adw::PreferencesPage, impl Fn() + 'static
         .build();
     set_test_id(&external_apps_toggle, ids::ATPROTO_EXTERNAL_APPS_ENABLE);
     set_test_attr(&external_apps_toggle, "state", "on");
+    // Not live before the read: unread, the switch holds only the flag's
+    // default, which must never be written back as a choice
+    // (`connected-apps.md` § Errors & edge cases; `ui/README.md` § Offer only
+    // what is possible, rule 5). Painted before the offline gate records the
+    // page's intent.
+    let external_apps_reason = gtk::Label::builder()
+        .visible(false)
+        .wrap(true)
+        .xalign(0.0)
+        .halign(gtk::Align::Start)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    crate::possible::paint(
+        &external_apps_toggle,
+        Some(&external_apps_reason),
+        fauna_client_connected_apps::external_apps_possibility(None),
+    );
     crate::offline_gate::declare_wire_kind(
         &external_apps_toggle,
         "fauna.bridges.atproto.set_external_apps_enabled",
     );
     roster_group.add(&external_apps_toggle);
+    roster_group.add(&external_apps_reason);
     let roster_box = vertical_box();
     roster_group.add(&roster_box);
     page.add(&roster_group);
@@ -228,6 +249,7 @@ pub fn build_connected_apps_page() -> (adw::PreferencesPage, impl Fn() + 'static
         code_entry,
         connect_btn,
         external_apps_toggle,
+        external_apps_reason,
         roster_box,
         blocked_group,
         blocked_box,
@@ -271,25 +293,31 @@ fn wire(widgets: Widgets) -> Option<impl Fn()> {
     });
     CURRENT.with(|c| *c.borrow_mut() = Rc::downgrade(&ctx));
 
+    paint_connect(&ctx);
     {
         let ctx_changed = Rc::clone(&ctx);
-        ctx.w.code_entry.connect_changed(move |entry| {
-            ctx_changed
-                .w
-                .connect_btn
-                .set_sensitive(!entry.text().trim().is_empty());
-        });
+        ctx.w
+            .code_entry
+            .connect_changed(move |_| paint_connect(&ctx_changed));
     }
     {
         let ctx = Rc::clone(&ctx);
         ctx.w
             .external_apps_toggle
             .clone()
-            .connect_active_notify(move |sw| {
+            .connect_active_notify(move |_| {
                 if ctx.guard.get() {
                     return;
                 }
-                run(&ctx, Gesture::SetExternalApps(sw.is_active()));
+                // The switch's answer, asked again: before the read it refuses
+                // on `error-message` and the repaint puts the switch back; read,
+                // it writes the flip of the nest-confirmed value.
+                let enabled =
+                    external_apps_press(ctx.snapshot.borrow().as_ref(), &ctx.w.error_label);
+                match enabled {
+                    Some(enabled) => run(&ctx, Gesture::SetExternalApps(enabled)),
+                    None => paint_external_apps(&ctx),
+                }
             });
     }
     {
@@ -384,11 +412,24 @@ fn visit(ctx: &Rc<Ctx>) {
     }
 }
 
+/// `connected-apps-connect-submit`'s answer (`docs/goal/ui/connected-apps.md`
+/// § Errors & edge cases): the shared `connect_code_possibility` over the
+/// typed code — painted on the button, asked again by the press and Enter.
+fn connect_answer(ctx: &Ctx) -> fauna_core::possibility::Possibility {
+    fauna_client_connected_apps::connect_code_possibility(&ctx.w.code_entry.text())
+}
+
+/// Paint Connect from [`connect_answer`].
+fn paint_connect(ctx: &Ctx) {
+    crate::form_gate::paint_submit(&ctx.w.connect_btn, &connect_answer(ctx), None);
+}
+
 fn submit_code(ctx: &Rc<Ctx>) {
-    let code = ctx.w.code_entry.text().trim().to_string();
-    if code.is_empty() {
+    // Asked before the lookup, so a blank code is never sent.
+    if crate::form_gate::refuse(&connect_answer(ctx), &ctx.w.error_label) {
         return;
     }
+    let code = ctx.w.code_entry.text().trim().to_string();
     ctx.w.code_entry.set_text("");
     run(ctx, Gesture::SubmitCode(code));
 }
@@ -438,17 +479,7 @@ fn paint(ctx: &Rc<Ctx>) {
         w.requests_box.append(&request_card(ctx, request));
     }
 
-    // The switch paints what the last read said, never a local guess: a refused
-    // write leaves the snapshot where it was and this puts the switch back.
-    let external_apps_on = !snap.is_some_and(|s| s.external_apps_off);
-    ctx.guard.set(true);
-    w.external_apps_toggle.set_active(external_apps_on);
-    ctx.guard.set(false);
-    set_test_attr(
-        &w.external_apps_toggle,
-        "state",
-        if external_apps_on { "on" } else { "off" },
-    );
+    paint_external_apps(ctx);
 
     // The three-state list: nothing until the roster read has returned, then
     // either rows or the empty state (`ui/README.md` § List pages).
@@ -475,6 +506,45 @@ fn paint(ctx: &Rc<Ctx>) {
     }
 }
 
+/// The external-apps switch press: asks the switch's answer
+/// (`external_apps_possibility` over the page's snapshot) again. Possible →
+/// `Some(the flip of the nest-confirmed value)`. Otherwise its reason goes on
+/// `error_label` and `None` comes back — the unread default is never written.
+fn external_apps_press(
+    snapshot: Option<&ConnectedAppsSnapshot>,
+    error_label: &gtk::Label,
+) -> Option<bool> {
+    let answer = fauna_client_connected_apps::external_apps_possibility(snapshot);
+    if crate::possible::refused_at_press(&answer, error_label) {
+        return None;
+    }
+    // Possible means the read answered, so the snapshot is there.
+    snapshot.map(|s| s.external_apps_off)
+}
+
+/// The switch paints what the last read said, never a local guess (a refused
+/// write leaves the snapshot where it was and this puts the switch back), and
+/// is live only once that read answered.
+fn paint_external_apps(ctx: &Rc<Ctx>) {
+    let w = &ctx.w;
+    let snapshot = ctx.snapshot.borrow();
+    let snap = snapshot.as_ref();
+    let external_apps_on = !snap.is_some_and(|s| s.external_apps_off);
+    ctx.guard.set(true);
+    w.external_apps_toggle.set_active(external_apps_on);
+    ctx.guard.set(false);
+    set_test_attr(
+        &w.external_apps_toggle,
+        "state",
+        if external_apps_on { "on" } else { "off" },
+    );
+    crate::possible::paint(
+        &w.external_apps_toggle,
+        Some(&w.external_apps_reason),
+        fauna_client_connected_apps::external_apps_possibility(snap),
+    );
+}
+
 fn clear(container: &gtk::Box) {
     while let Some(child) = container.first_child() {
         container.remove(&child);
@@ -498,7 +568,6 @@ fn text_label(text: &str) -> gtk::Label {
     label.set_halign(gtk::Align::Start);
     label.set_xalign(0.0);
     label.set_wrap(true);
-    label.set_selectable(false);
     label
 }
 
@@ -1033,9 +1102,14 @@ fn append_install_section(card: &gtk::Box, consent: &ConsentCardRow) {
 /// prompt — the shape every no-default linux select takes (`linked_nests.rs`'s
 /// scope picker): a `gtk::DropDown` holding a model still shows, and reads
 /// back, its first item after `set_selected(INVALID_LIST_POSITION)`, so the
-/// card would show a folder the machine does not hold.
+/// card would show a folder the machine does not hold. A picker with no
+/// eligible folder holds no item at all — not even the prompt, which would
+/// read back as the one option offered (as web's select, which paints only
+/// folders): nothing can be chosen, and the card's text says why.
 fn folder_dropdown(picker: &FolderPicker) -> gtk::DropDown {
-    let keys: Vec<String> = std::iter::once(String::new())
+    let prompt = (!picker.options.is_empty()).then(String::new);
+    let keys: Vec<String> = prompt
+        .into_iter()
         .chain(picker.options.iter().map(|o| o.id.to_string()))
         .collect();
     let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
@@ -1064,7 +1138,11 @@ fn folder_dropdown(picker: &FolderPicker) -> gtk::DropDown {
     let chosen = picker
         .chosen
         .and_then(|id| picker.options.iter().position(|o| o.id == id));
-    dropdown.set_selected(chosen.map_or(0, |i| i as u32 + 1));
+    dropdown.set_selected(match (chosen, picker.options.is_empty()) {
+        (_, true) => gtk::INVALID_LIST_POSITION,
+        (Some(i), false) => i as u32 + 1,
+        (None, false) => 0,
+    });
     dropdown
 }
 
@@ -1141,8 +1219,6 @@ fn request_card(ctx: &Rc<Ctx>, consent: &ConsentCardRow) -> gtk::Box {
 
     append_install_section(&card, consent);
     append_folder_picker(ctx, &card, consent);
-    // A bare folder card is approvable only once a folder is chosen.
-    let approvable = picker.is_none_or(|p| p.chosen.is_some());
 
     // The code carries the raw value in a `code` attr as well as inside its
     // prose: the label is localized and may be reworded; the value is not, and
@@ -1174,9 +1250,11 @@ fn request_card(ctx: &Rc<Ctx>, consent: &ConsentCardRow) -> gtk::Box {
         let btn = gtk::Button::builder().label(label).build();
         if approved {
             btn.add_css_class("suggested-action");
-            // Before the gate's declaration, so it reads as the page's own
-            // intent and a reconnect never re-enables it.
-            btn.set_sensitive(approvable);
+            // The shared `ConsentCardRow::approve_possibility`: a folder card
+            // approves once a folder is chosen, else it is disabled with the
+            // picker's reason. Before the gate's declaration, so it reads as
+            // the page's own intent and a reconnect never re-enables it.
+            crate::form_gate::paint_submit(&btn, &consent.approve_possibility(), None);
         }
         set_test_id(&btn, id);
         // A decline is a nest call exactly like an approval (the waiting
@@ -1184,7 +1262,28 @@ fn request_card(ctx: &Rc<Ctx>, consent: &ConsentCardRow) -> gtk::Box {
         crate::offline_gate::declare_wire_kind(&btn, "fauna.bridges.atproto.resolve_consent");
         let ctx = Rc::clone(ctx);
         let consent_id_hex = consent.consent_id_hex.clone();
+        let painted = consent.clone();
         btn.connect_clicked(move |_| {
+            // Approve asks the card's answer again, over the freshest
+            // snapshot, and refuses with the same reason; Decline is never
+            // gated.
+            if approved {
+                let answer = ctx
+                    .snapshot
+                    .borrow()
+                    .as_ref()
+                    .and_then(|s| {
+                        s.requests
+                            .iter()
+                            .find(|r| r.consent_id_hex == consent_id_hex)
+                            .cloned()
+                    })
+                    .unwrap_or_else(|| painted.clone())
+                    .approve_possibility();
+                if crate::form_gate::refuse(&answer, &ctx.w.error_label) {
+                    return;
+                }
+            }
             run(
                 &ctx,
                 Gesture::Resolve {
@@ -1349,6 +1448,44 @@ mod tests {
         );
     }
 
+    /// A card no folder is eligible on paints a picker holding NO item — the
+    /// `options` read (`automation::agent`, a walk of this model) answers `[]`,
+    /// as web's select does; the no-choice prompt stays only beside real
+    /// folders, where a `gtk::DropDown` needs it to show nothing chosen.
+    #[test]
+    fn a_picker_with_no_eligible_folder_holds_no_item() {
+        use fauna_atproto_settings_machine::FolderOption;
+        let items = |options: Vec<FolderOption>| {
+            let picker = FolderPicker {
+                options,
+                chosen: None,
+                none_eligible: None,
+            };
+            crate::testid::run_on_gtk_thread(move || {
+                let _ = adw::init();
+                let dropdown = folder_dropdown(&picker);
+                (
+                    dropdown.model().map_or(0, |m| m.n_items()),
+                    dropdown.selected(),
+                )
+            })
+        };
+        assert_eq!(
+            items(vec![]),
+            (0, gtk::INVALID_LIST_POSITION),
+            "no eligible folder: no item, the prompt included, and nothing selected"
+        );
+        let one = FolderOption {
+            id: 20,
+            name: "picker-drop".into(),
+        };
+        assert_eq!(
+            items(vec![one]),
+            (2, 0),
+            "a folder: the prompt then the folder"
+        );
+    }
+
     /// The page exposes every static (page-level) ui.yaml ID with no registered
     /// client. The per-row IDs (`connected-apps-item` + children, the request
     /// cards, the blocked rows) render only after an async read, so they are
@@ -1370,6 +1507,49 @@ mod tests {
                     "missing widget id {id:?}; have {names:?}"
                 );
             }
+        });
+    }
+
+    /// Rules 5 and 7 on the external-apps switch (`connected-apps.md`): built
+    /// unread it is disabled with "still loading" beside it, and a press
+    /// before the read refuses on `error-message` instead of writing the
+    /// flag's default back; once read, it writes the flip of the nest's value.
+    #[test]
+    fn the_external_apps_switch_waits_for_the_read() {
+        crate::testid::run_on_gtk_thread(|| {
+            let _ = adw::init();
+            let (page, _refresh) = build_connected_apps_page();
+            let switch = crate::testid::find_by_test_id(&page, ids::ATPROTO_EXTERNAL_APPS_ENABLE)
+                .expect("the switch is built");
+            assert!(switch.is_visible() && !switch.is_sensitive());
+            assert_eq!(
+                crate::possible::painted_answer(&switch)
+                    .and_then(|a| a.reason().map(|r| r.key.clone())),
+                Some("common.still_loading".to_string())
+            );
+
+            let error = gtk::Label::new(None);
+            assert_eq!(external_apps_press(None, &error), None);
+            assert!(error.is_visible());
+            assert_eq!(
+                error.text().as_str(),
+                crate::i18n::strings::common::STILL_LOADING
+            );
+            let unread = ConnectedAppsSnapshot::default();
+            assert_eq!(external_apps_press(Some(&unread), &error), None);
+
+            let read_on = ConnectedAppsSnapshot {
+                loaded: true,
+                external_apps_off: false,
+                ..Default::default()
+            };
+            assert_eq!(external_apps_press(Some(&read_on), &error), Some(false));
+            let read_off = ConnectedAppsSnapshot {
+                loaded: true,
+                external_apps_off: true,
+                ..Default::default()
+            };
+            assert_eq!(external_apps_press(Some(&read_off), &error), Some(true));
         });
     }
 }

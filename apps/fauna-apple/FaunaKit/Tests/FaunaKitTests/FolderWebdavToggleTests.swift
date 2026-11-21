@@ -10,21 +10,26 @@ import Testing
 // + `libs/fauna-ffi`), and the rendering / index behavior is proven by the cross-app
 // e2e (`test_folder_webdav_toggle.py`, run for macos/ios via the macOS e2e harness).
 // These in-process guards cover the two thin Swift seams neither reaches: the hint-text
-// swap and the fail-closed capability gate.
+// swap and the fail-closed capability gate. The read-state cases of the toggle's shared
+// answer are `OwnTierAndMailGateTests.swift`'s.
 
 // MARK: - The hint swap (6b-2c)
 
-// The toggle's hint is REPLACED (not supplemented) by "set up mail first" while the
-// actor holds no MSEK. Serving seals the keys blob under the mail encryption key, so
-// the flip cannot succeed without mail.
+// The toggle's hint is REPLACED (not supplemented) by its blocked answer's reason —
+// "set up mail first" when the custody read answered no MSEK. Serving seals the keys
+// blob under the mail encryption key, so the flip cannot succeed without mail.
 @Test func webdavHintExplainsServingWhenTheActorCanServe() {
-    #expect(serveWebdavHintText(canServe: true) == L.devices.serveWebdavHint)
+    let answer = folderWebdavServePossibility(read: .resolved, holdsMsek: true)
+    #expect(serveWebdavHintText(answer) == L.devices.serveWebdavHint)
 }
 
-@Test func webdavHintTellsTheActorToSetUpMailFirstWithoutAnMsek() {
-    #expect(serveWebdavHintText(canServe: false) == L.devices.serveWebdavNeedsMail)
+@Test func webdavHintSaysStillLoadingWithoutAnMsek() {
+    // The switch waits on the mail key alone (folders.md): an answered read with no
+    // key reads "still loading", never a separate set-up-mail-first arm.
+    let answer = folderWebdavServePossibility(read: .resolved, holdsMsek: false)
+    #expect(serveWebdavHintText(answer) == L.common.stillLoading)
     // It must REPLACE the usual hint, never read as both.
-    #expect(serveWebdavHintText(canServe: false) != L.devices.serveWebdavHint)
+    #expect(serveWebdavHintText(answer) != L.devices.serveWebdavHint)
 }
 
 // MARK: - The capability gate is FAIL-CLOSED
@@ -47,10 +52,11 @@ import Testing
 @Test @MainActor func serveWebdavIsSafeBeforeConfigure() async {
     let vm = DevicesMachineVM()
 
-    // A flip with no `api` bails before touching the FFI, and does not blank the page
-    // with a glue error (the same seam `sharingGesturesAreSafeBeforeConfigure` guards).
+    // A flip with no `api` bails before touching the FFI: the custody read has not
+    // answered, so the press is refused with the toggle's own still-loading reason —
+    // never a glue error, never a silent return.
     await vm.serveFolderWebdav(name: "photos", mlsGroupIdHex: nil, enable: true)
-    #expect(vm.sharingError == nil)
+    #expect(vm.sharingError == vm.webdavAnswer.refusal)
 }
 
 // MARK: - Mail-settings reachability is READ, never re-derived (6b-2a)

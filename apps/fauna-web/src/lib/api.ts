@@ -1122,9 +1122,11 @@ function nowSecs(): number {
   return Math.floor(Date.now() / 1000);
 }
 
-export async function listCalendars(secretHex: string): Promise<Calendar[]> {
-  const { calendars } = await rpc.caldavListCalendars(secretHex);
-  return calendars as Calendar[];
+/** The Events page's four-answer calendar read (events.md § Errors & edge cases
+ *  → *No calendar to hold an event*, ruling 2); its `calendars` rows, when
+ *  loaded, are `Calendar`s. */
+export function readCalendars(secretHex: string): Promise<rpc.CalendarsRead> {
+  return rpc.caldavReadCalendars(secretHex);
 }
 
 export async function createCalendar(secretHex: string, name: string): Promise<{ id: string }> {
@@ -1250,8 +1252,8 @@ export async function getSpamPreferences(secretHex: string): Promise<{
 export async function updateSpamPreferences(
   secretHex: string,
   prefs: Partial<{ spam_threshold: number; phishing_threshold: number }>,
-): Promise<void> {
-  await rpc.spamSetPreferences(secretHex, prefs);
+): Promise<{ spam_threshold: number; phishing_threshold: number }> {
+  return rpc.spamSetPreferences(secretHex, prefs);
 }
 
 // Calendar `.ics` import/export on the encrypted CalDAV store (events.md

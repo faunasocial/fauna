@@ -22,6 +22,7 @@ import re
 import stat
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -146,6 +147,17 @@ def test_authorize_replaces_an_earlier_venue_line_and_keeps_the_rest(tmp_path):
     lines = path.read_text().splitlines()
     assert lines == ["ssh-ed25519 AAAAown owner", V.authorized_keys_line(_KEY, _ADDR)]
     assert reading.startswith("C6: 1 line(s)")
+
+
+# The file's mode is a POSIX fact: Windows keeps no owner-only bits, so the mode
+# is observable on linux (the dev VM, whose file this is) and macOS alone
+# (convention 7, the fourth skip kind).
+@pytest.mark.host_platform("linux", "macos")
+def test_authorize_leaves_the_file_owner_only(tmp_path):
+    path = tmp_path / ".ssh" / "authorized_keys"
+    path.parent.mkdir()
+    path.write_text(f"old {V.TUNNEL_KEY_COMMENT}\n")
+    V.authorize(_KEY, _ADDR, str(path))
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
@@ -244,7 +256,9 @@ def test_no_block_starts_an_adb_server_or_carries_a_private_key(venue_pub):
 
 def _run_write(text: str, tmp_path) -> bytes:
     out = tmp_path / "written"
-    script = "\n".join([f"t={out}", *V._write_file("t", text)])
+    # `as_posix`: sh reads a backslash as an escape, so a Windows path is
+    # handed over with forward slashes (the same file; no-op on POSIX).
+    script = "\n".join([f"t={out.as_posix()}", *V._write_file("t", text)])
     subprocess.run(["sh", "-c", script], check=True)
     return out.read_bytes()
 
@@ -450,10 +464,12 @@ def _stub(path, body):
 @pytest.fixture
 def play_host(tmp_path):
     """The emulator setup account's machine as the Play block sees it: a scratch home,
-    every outside program a stub that logs its call."""
+    every outside program a stub that logs its call. Every path the block or a
+    stub reads goes to sh with forward slashes (`as_posix`, a no-op on POSIX):
+    sh reads a Windows path's backslashes as escapes."""
     bin_dir, home = tmp_path / "bin", tmp_path / "home"
     bin_dir.mkdir()
-    log = tmp_path / "calls"
+    log = (tmp_path / "calls").as_posix()
     _stub(bin_dir / "id", f"echo {V.VENUE_ACCOUNT}\n")
     _stub(bin_dir / "pgrep", "exit 1\n")
     _stub(bin_dir / "curl", f'echo curl >> {log}\nwhile [ "$1" != --output ]; do shift; done\n'
@@ -467,10 +483,10 @@ def play_host(tmp_path):
     (home / ".android" / "avd" / f"{V.PLAY_AVD_NAME}.ini").write_text("")
     _stub(sdk / "emulator" / "emulator", f"echo emulator >> {log}\n")
     # The block names the SDK by its absolute path in the emulator setup account.
-    block = V.play_setup().replace(V.SDK, str(sdk))
+    block = V.play_setup().replace(V.SDK, sdk.as_posix())
     env = {**os.environ, "HOME": str(home), "SHA": V.PLAY_IMAGE_SHA1,
            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
-    return block, env, log
+    return block, env, Path(log)
 
 
 def test_the_play_setup_downloads_verifies_unpacks_then_boots(play_host):
@@ -501,13 +517,35 @@ def test_the_unit_runs_the_venue_server_on_its_port_with_the_venue_key_alone():
 
 # ── the probe: is the emulator setup up, from the dev VM ─────────────────────────────
 
-_FAKE_ADB = """#!/bin/sh
-printf '%s\\n' "$*" >> "$FAKE_ADB_LOG"
-case "$*" in
-  *" connect "*) cat "$FAKE_ADB_CONNECT"; exit "$FAKE_ADB_RC" ;;
-  *) cat "$FAKE_ADB_DEVICES"; exit "$FAKE_ADB_RC" ;;
-esac
+_FAKE_ADB = """import os, sys
+argv = " ".join(sys.argv[1:])
+with open(os.environ["FAKE_ADB_LOG"], "a", encoding="utf-8") as fh:
+    fh.write(argv + "\\n")
+reply = "FAKE_ADB_CONNECT" if " connect " in argv else "FAKE_ADB_DEVICES"
+with open(os.environ[reply], encoding="utf-8") as fh:
+    sys.stdout.write(fh.read())
+sys.exit(int(os.environ["FAKE_ADB_RC"]))
 """
+
+#: The probe's own timeout, raised to a hang guard: the fake answers at once, so
+#: a slow process start on a loaded box must not read as a down server
+#: (convention 14).
+_HANG_GUARD_S = 120
+
+
+def _fake_program(bin_dir, name: str, source: str) -> None:
+    """A fake `name` on PATH that runs Python `source` under this interpreter:
+    a shebang wrapper on POSIX, a `.cmd` wrapper on Windows, where
+    CreateProcess runs no shebang and `android_device.adb_argv` resolves a
+    PATHEXT wrapper through `shutil.which`. The script's own name is no PATHEXT
+    match, so the lookup finds only the wrapper."""
+    script = bin_dir / f"{name}-fake.py"
+    script.write_text(source, encoding="utf-8")
+    if os.name == "nt":
+        (bin_dir / f"{name}.cmd").write_text(
+            f'@"{sys.executable}" "{script}" %*\n@exit /b %errorlevel%\n')
+    else:
+        _stub(bin_dir / name, f'exec "{sys.executable}" "{script}" "$@"\n')
 
 
 @pytest.fixture
@@ -516,7 +554,7 @@ def probe_adb(tmp_path, monkeypatch):
     prints per subcommand, `issued()` reads the recorded argv lines."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    _stub(bin_dir / "adb", _FAKE_ADB.removeprefix("#!/bin/sh\n"))
+    _fake_program(bin_dir, "adb", _FAKE_ADB)
     log, conn, devs = tmp_path / "adb.log", tmp_path / "connect", tmp_path / "devices"
     monkeypatch.setenv("FAKE_ADB_LOG", str(log))
     monkeypatch.setenv("FAKE_ADB_CONNECT", str(conn))
@@ -542,7 +580,7 @@ def _devices(*rows):
 def test_the_probe_connects_each_leg_then_lists_on_the_venue_server(probe_adb):
     answer, issued = probe_adb
     answer(devices=_devices((V.VENUE_SERIAL, "device")))
-    V.probe_venue()
+    V.probe_venue(_HANG_GUARD_S)
     spec = V.ADB_SERVER_SPEC
     assert issued() == [f"-L {spec} connect {V.VENUE_SERIAL}",
                         f"-L {spec} connect {V.PLAY_SERIAL}", f"-L {spec} devices"]
@@ -552,14 +590,14 @@ def test_a_down_server_names_the_server_unit(probe_adb):
     answer, _ = probe_adb
     answer(connect="* cannot start server on remote host\nerror: cannot connect to daemon",
            rc=1)
-    up, line = V.probe_venue()
+    up, line = V.probe_venue(_HANG_GUARD_S)
     assert not up and V.VENUE_ADB_UNIT in line and "adb server" in line
 
 
 def test_a_refused_leg_names_the_tunnel_leg(probe_adb):
     answer, _ = probe_adb
     answer(connect="failed to connect to '127.0.0.1:18509': Connection refused")
-    up, line = V.probe_venue()
+    up, line = V.probe_venue(_HANG_GUARD_S)
     assert not up and "tunnel leg refused" in line and f"{V.VENUE_SERIAL} (fauna-e2e)" in line
 
 
@@ -567,30 +605,32 @@ def test_an_unauthorized_device_names_the_venue_key_fingerprint(probe_adb, monke
     answer, _ = probe_adb
     monkeypatch.setattr(V, "venue_key_fingerprint", lambda *a: "AA:BB")
     answer(devices=_devices((V.VENUE_SERIAL, "unauthorized")))
-    up, line = V.probe_venue()
+    up, line = V.probe_venue(_HANG_GUARD_S)
     assert not up and "unauthorized" in line and "AA:BB" in line
 
 
 def test_a_booting_device_reads_down_and_says_so(probe_adb):
     answer, _ = probe_adb
     answer(devices=_devices((V.VENUE_SERIAL, "offline")))
-    up, line = V.probe_venue()
+    up, line = V.probe_venue(_HANG_GUARD_S)
     assert not up and f"{V.VENUE_SERIAL} (fauna-e2e) offline" in line and "booting" in line
 
 
 def test_a_ready_device_reads_up_and_names_it(probe_adb):
     answer, _ = probe_adb
     answer(devices=_devices((V.VENUE_SERIAL, "device")))
-    assert V.probe_venue() == (True, f"emulator up: {V.ADB_SERVER_SPEC} serves {V.VENUE_SERIAL}")
+    assert V.probe_venue(_HANG_GUARD_S) == (
+        True, f"emulator up: {V.ADB_SERVER_SPEC} serves {V.VENUE_SERIAL}")
 
 
 def test_the_play_probe_names_the_play_serial_not_just_the_venue(probe_adb):
     answer, _ = probe_adb
     answer(devices=_devices((V.VENUE_SERIAL, "device")))
-    up, line = V.probe_play()
+    up, line = V.probe_play(_HANG_GUARD_S)
     assert not up and V.PLAY_SERIAL in line and V.VENUE_SERIAL in line
     answer(devices=_devices((V.VENUE_SERIAL, "device"), (V.PLAY_SERIAL, "device")))
-    assert V.probe_play() == (True, f"Play emulator up: {V.ADB_SERVER_SPEC} serves {V.PLAY_SERIAL}")
+    assert V.probe_play(_HANG_GUARD_S) == (
+        True, f"Play emulator up: {V.ADB_SERVER_SPEC} serves {V.PLAY_SERIAL}")
 
 
 def test_no_adb_at_all_reads_unknown_never_raises(tmp_path, monkeypatch):

@@ -37,6 +37,7 @@ and [`docs/goal/behavior/mail-bridge-lifecycle.md`](../../docs/goal/behavior/mai
 ## Layout
 
 - `cmd/fauna-mail-bridge/` — main; `cmd/fauna-supervisor/` — the s6 sidekick
+- `cmd/fauna-atproto-bridge/` — the AT Protocol PDS bridge (role `atproto.pds`)
 - `internal/mta/` — SMTP receive/submit/relay, spam/virus scan gate
 - `internal/mda/` — IMAP, CalDAV/CardDAV/WebDAV serving
 - `third_party/` — vendored protocol libraries

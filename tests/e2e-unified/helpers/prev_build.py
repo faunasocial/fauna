@@ -27,9 +27,10 @@ box's image was built from (`org-nests.md` § fauna.build → *Disposable*, rule
 (`nest=False`, `--client-only`): those drives run no local nest. `reports-pass` is one
 more cargo client in the table (`bins/fauna-reports-pass`, the headless reports pass), and
 a client whose source directory the commit's tree does not have is refused before
-anything is extracted (`client_absent_reason`). The tui's sync agent travels with it
-(`CLIENT_COMPANIONS`): the tui resolves `fauna-sync-agent` beside itself, so a cached tui
-without one would run agentless.
+anything is extracted (`client_absent_reason`). The sync agent travels with the tui, the
+linux app and the macOS app (`CLIENT_COMPANIONS`): the first two resolve
+`fauna-sync-agent` beside themselves, and a hand start of a cached macOS app runs it in
+the version's profile, so a cached client without one would run agentless.
 
 Layout (under a per-platform root — see `_tmp_root()`):
 
@@ -249,9 +250,20 @@ CLIENT_SOURCE_DIR = {
 # (`agent_spawner::agent_binary_absolute`; the tui driver pins `FAUNA_E2E_SYNC_AGENT_BIN`
 # to that sibling), exactly as `just tui-debug` builds the two together — a cached tui
 # without its agent runs agentless, which reads as "connected but syncing nothing".
+# The linux app resolves its agent the same way (`target/debug/{fauna-desktop,
+# fauna-sync-agent}`): without it a cached linux build — a by-hand start of a
+# given version included — reports the agent "Not running". The macOS app is built by its
+# own recipe (`mac-debug`/`mac-release`), so `_build_client`'s macos branch builds its
+# companions in a cargo call of their own, from the same tree into the same target; a hand
+# start of a cached macOS version runs that agent in the version's profile. windows
+# is built by its own recipe and its agent endpoint is per user, not per profile, so it
+# takes no entry here.
+_SYNC_AGENT = ("fauna-sync-agent",
+               "fauna-sync-agent.exe" if sys.platform == "win32" else "fauna-sync-agent")
 CLIENT_COMPANIONS = {
-    "tui": (("fauna-sync-agent",
-             "fauna-sync-agent.exe" if sys.platform == "win32" else "fauna-sync-agent"),),
+    "tui": (_SYNC_AGENT,),
+    "linux": (_SYNC_AGENT,),
+    "macos": (_SYNC_AGENT,),
 }
 
 
@@ -997,6 +1009,14 @@ def _build_client(
         # The apple toolchain is slow from cold: a full FFI cdylib build for the darwin
         # slice, then the Swift compile of FaunaKit + the app.
         _run(["just", recipe], cwd=src, env=env, timeout=5400)
+        # The companions (the sync agent) are cargo binaries the recipe does not build:
+        # one cargo call of their own, from the same tree into the same target, which
+        # `build_prev`'s companion loop then caches beside the app.
+        companions = [a for package, _ in CLIENT_COMPANIONS["macos"] for a in ("-p", package)]
+        _run(
+            _cargo_cmd(["build", *companions, *(["--release"] if profile == "release" else [])]),
+            cwd=src, env=env, timeout=5400,
+        )
         # SwiftPM's `.build/<profile>` symlink resolves under either build system.
         return src / "apps/fauna-apple/.build" / profile / "FaunaMacOS"
 

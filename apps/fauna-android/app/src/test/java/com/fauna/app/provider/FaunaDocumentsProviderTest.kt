@@ -495,6 +495,9 @@ class FaunaDocumentsProviderTest {
             return OnDemandAck(acked = true, contentChanged = false, excluded = false)
         }
         override suspend fun refresh() = false
+        override suspend fun hydratedRels() = remote.keys.filter { File(cacheRoot, it).isFile }
+        override suspend fun lookupBody(rel: String) =
+            listOf(File(keptRoot, rel), File(cacheRoot, rel)).firstOrNull { it.isFile }?.absolutePath
         override suspend fun sweepKeptRoot(): OnDemandSweep {
             sweeps++
             return OnDemandSweep(emptyList(), emptyList(), emptyList())

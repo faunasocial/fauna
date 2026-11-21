@@ -58,8 +58,6 @@ async fn submit_handle_check_continue_routes_unclaimed_nest_to_claim_code() {
         outcome: HandleCheckOutcome::UnregisteredUnclaimedNest,
         message: LocalizedText::default(),
         continue_enabled: true,
-        control_checkbox_visible: false,
-        control_checkbox_checked: false,
         ..Default::default()
     });
 
@@ -178,6 +176,33 @@ async fn wizard_submit_claim_code_threads_handle_local_part() {
         fake.claim_admin_args(),
         vec![("alice".to_string(), Some("example.com".to_string()))],
         "claim must thread the bare local part as `handle` and the domain as `mail_domain`",
+    );
+}
+
+/// The draft predicate Claim is painted from, asked again by the submit
+/// (`ui/README.md` § Offer only what is possible, rule 4's form case): a blank
+/// code never reaches the nest, and the status row says the predicate's own
+/// reason — the same answer `claim_code_submit_possibility` gave the page.
+#[tokio::test]
+async fn wizard_submit_claim_code_refuses_a_blank_code_with_the_draft_reason() {
+    let (m, fake) = machine_with_fake();
+    m.seed_identity(fixture_secret_hex());
+    m.set_current_handle("admin@example.com".into());
+    m.set_nest_url("https://example.com".into());
+    m.set_step_for_test(OnboardingStep::ClaimCode);
+
+    let painted = m.claim_code_submit_possibility("  ".into());
+    let next = m.wizard_submit_claim_code("  ".into()).await;
+
+    assert_eq!(next, OnboardingStep::ClaimCode);
+    let snap = m.claim_code_snapshot();
+    assert_eq!(snap.state, ClaimCodeState::Idle);
+    assert_eq!(Some(&snap.message), painted.reason());
+    assert_eq!(snap.message.key, "onboarding.claim_code.idle");
+    assert!(!fake.calls().contains(&"claim_admin".to_string()));
+    assert!(
+        m.claim_code_submit_possibility("ABC123".into())
+            .is_possible()
     );
 }
 
@@ -395,8 +420,6 @@ async fn re_entering_claim_code_after_a_successful_claim_reseeds_the_snapshot() 
         outcome: HandleCheckOutcome::UnregisteredUnclaimedNest,
         message: LocalizedText::default(),
         continue_enabled: true,
-        control_checkbox_visible: false,
-        control_checkbox_checked: false,
         ..Default::default()
     });
     assert_eq!(

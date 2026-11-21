@@ -21,7 +21,8 @@
   import { sharedRpcPort } from '#lib/rpc';
   import { ensureWasm, textModelNeedsNewerApp } from '#lib/wasm';
   import LabelerInspectPanel from '#lib/components/LabelerInspectPanel.svelte';
-  import { createLabelerCatalogMachine } from '#lib/wasm-labeler-catalog';
+  import { createLabelerCatalogMachine, subscribePossibility } from '#lib/wasm-labeler-catalog';
+  import { askPossibility, formGate, formRefusal, type FormGate } from '#lib/form-gate';
   import { resolveLocalized } from '#lib/i18n/localized';
   import { onMount, onDestroy } from 'svelte';
   import { t } from '#lib/i18n/strings';
@@ -33,10 +34,11 @@
 
   let machine: LabelerCatalogMachine | null = null;
   let snap = $state<LabelerCatalogSnapshot | null>(null);
-  /** Per-row subscribe-enable, read from the shared machine on every tick
-   *  (`subscribeEnabled` — false while the inspected row fails the shared
-   *  `subscribable` gate), never a `verified` check of the SPA's own. */
-  let subscribeEnabled = $state<boolean[]>([]);
+  /** Per-row subscribe paint, read from the shared machine on every tick
+   *  (`subscribePossibility` — blocked with the refusal's reason while the
+   *  inspected row fails the shared `subscribable` gate), never a `verified`
+   *  check of the SPA's own. */
+  let subscribeGates = $state<FormGate[]>([]);
   let ready = $state(false);
   let timer: ReturnType<typeof setInterval> | null = null;
 
@@ -45,7 +47,7 @@
     const raw = machine.snapshotJson();
     snap = raw ? (JSON.parse(raw) as LabelerCatalogSnapshot) : null;
     const m = machine;
-    subscribeEnabled = (snap?.entries ?? []).map((_, i) => m.subscribeEnabled(i));
+    subscribeGates = (snap?.entries ?? []).map((_, i) => formGate(subscribePossibility(m, i)));
     error = snap?.error ? resolveLocalized(snap.error) : '';
   }
 
@@ -100,7 +102,16 @@
   }
 
   async function subscribe(index: number): Promise<void> {
-    await machine?.subscribe(index);
+    const m = machine;
+    if (!m) return;
+    // The row's answer, asked again: a labeler whose inspect already failed
+    // refuses with that reason on `error-message`, never a silent re-try.
+    const refusal = formRefusal(askPossibility(() => subscribePossibility(m, index)));
+    if (refusal !== null) {
+      error = refusal;
+      return;
+    }
+    await m.subscribe(index);
     applySnapshot();
   }
 
@@ -144,7 +155,7 @@
                 {t.labeler_catalog.inspect}
               </button>
               {#if !entry.subscribed}
-                <button class="btn btn-small btn-primary" data-testid={IDS.LABELER_CATALOG_ITEM_SUBSCRIBE_BUTTON} disabled={!subscribeEnabled[i]} onclick={() => subscribe(i)}>
+                <button class="btn btn-small btn-primary" data-testid={IDS.LABELER_CATALOG_ITEM_SUBSCRIBE_BUTTON} disabled={subscribeGates[i]?.disabled ?? true} title={subscribeGates[i]?.reason || undefined} onclick={() => subscribe(i)}>
                   {t.labeler_catalog.subscribe}
                 </button>
               {:else}

@@ -17,7 +17,8 @@
   // callback props.
   import { hasNip07, nip07LinkFields } from '#lib/nostr';
   import { identity } from '#lib/store';
-  import { bridgeCardTitle, bridgeLinkBlock, bridgeModeApplies, followDisplay, shortId } from '#lib/wasm';
+  import { bridgeCardTitle, bridgeLinkPossibility, bridgeModeApplies, followDisplay, shortId, bridgeFollowPossibility } from '#lib/wasm';
+  import { askPossibility, formGate, formRefusal } from '#lib/form-gate';
   import BridgeSettingRows from '#lib/components/BridgeSettingRows.svelte';
   import { onMount } from 'svelte';
   import { t } from '#lib/i18n/strings';
@@ -88,7 +89,11 @@
   // `modes` is already platform- AND extension-filtered above; the nip07 half is
   // a runtime browser capability no shared crate could observe, which is why the
   // count crosses rather than the list.
-  let linkBlock = $derived(bridgeLinkBlock(bridge.linked, bridge.error, modes.length));
+  // The Link button's shared answer (`bridge_link_possibility`; `bridges.md`
+  // § Errors & edge cases, rule 4): blocked by the reason painted on
+  // `bridge-link-blocked-reason`, and the press asks it again.
+  const linkAnswer = () => bridgeLinkPossibility(bridge.linked, bridge.error, modes.length);
+  let linkGate = $derived(formGate(askPossibility(linkAnswer)));
 
   function getSelectedMode(): BridgeLinkMode | undefined {
     if (modes.length === 0) return undefined;
@@ -96,6 +101,7 @@
   }
 
   async function handleLink(): Promise<void> {
+    if (formRefusal(askPossibility(linkAnswer)) !== null) return;
     const mode = getSelectedMode();
     if (!mode) return;
     let fields: Record<string, string> = { ...linkFieldValues };
@@ -116,8 +122,13 @@
     return shown === follow.id ? shortId(follow.id) : shown;
   }
 
+  // `bridge-add-follow-button` paints from the shared
+  // `bridge_follow_possibility` (`behavior/bridges.md` § Errors & edge cases):
+  // disabled with its reason on `title` while the id is blank; the press asks
+  // the same answer again before anything is sent.
+  const followGate = $derived(formGate(askPossibility(() => bridgeFollowPossibility(followId))));
   async function handleAddFollow(): Promise<void> {
-    if (!followId) return;
+    if (formRefusal(askPossibility(() => bridgeFollowPossibility(followId))) !== null) return;
     await onAddFollow(followId, followPetname || undefined);
     followId = '';
     followPetname = '';
@@ -147,7 +158,7 @@
       <div class="follow-form">
         <input data-testid={IDS.BRIDGE_FOLLOW_ID_INPUT} type="text" bind:value={followId} placeholder={t.bridges.id_to_follow} class="input" />
         <input data-testid={IDS.BRIDGE_FOLLOW_PETNAME_INPUT} type="text" bind:value={followPetname} placeholder={t.bridges.petname_optional} class="input small" />
-        <button data-testid={IDS.BRIDGE_ADD_FOLLOW_BUTTON} onclick={handleAddFollow} class="btn">{t.bridges.add_follow}</button>
+        <button data-testid={IDS.BRIDGE_ADD_FOLLOW_BUTTON} onclick={handleAddFollow} disabled={followGate.disabled} title={followGate.reason || undefined} class="btn">{t.bridges.add_follow}</button>
       </div>
       <div data-testid={IDS.BRIDGE_FOLLOWS_LIST}>
         {#if follows.length > 0}
@@ -228,16 +239,14 @@
         />
       {/each}
     {/if}
-    {#if linkBlock}
-      <p class="muted" data-testid={IDS.BRIDGE_LINK_BLOCKED_REASON}>
-        {linkBlock.kind === 'provider_error' ? linkBlock.message : t.bridges.no_link_method}
-      </p>
+    {#if linkGate.reason}
+      <p class="muted" data-testid={IDS.BRIDGE_LINK_BLOCKED_REASON}>{linkGate.reason}</p>
     {/if}
 
     <button
       data-testid={IDS.BRIDGE_ACTION_BUTTON}
       class="btn primary"
-      disabled={linkBlock !== null}
+      disabled={linkGate.disabled}
       onclick={handleLink}>{t.bridges.link({ name: bridge.name })}</button>
   {/if}
 

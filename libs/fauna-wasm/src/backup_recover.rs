@@ -115,6 +115,19 @@ impl BlobPushSink for PageBytePlane {
         let hash = ContentHash::from_digest_raw(*blake3::hash(manifest_bytes).as_bytes());
         Self::verify_filed_under(&reply, &hash, "manifest")
     }
+
+    async fn put_manifest_page(&self, page_bytes: &[u8]) -> anyhow::Result<()> {
+        let reply = fauna_rpc_wasm::post_octets_keyed(
+            &self.nest,
+            fauna_rpc_wasm::MANIFEST_PAGES_UPLOAD_PATH,
+            None,
+            page_bytes,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("manifest page upload: {e}"))?;
+        let hash = ContentHash::from_digest_raw(*blake3::hash(page_bytes).as_bytes());
+        Self::verify_filed_under(&reply, &hash, "manifest page")
+    }
 }
 
 /// The `backup-audit-recover-result` view's content, for JS: the shared

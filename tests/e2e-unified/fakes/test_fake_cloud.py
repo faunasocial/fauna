@@ -302,3 +302,119 @@ def test_namecheap_lists_domains_once_the_source_is_allowlisted(fake_cloud) -> N
     resp = requests.get(nc.base_url(), params={"Command": "namecheap.domains.getList"})
     assert 'Status="OK"' in resp.text
     assert '<Domain ID="0" Name="example.test" />' in resp.text
+
+
+def _hetzner_dns(fake_cloud) -> str:
+    return fake_cloud.dns_base_for("hetzner")
+
+
+def test_hetzner_dns_zone_create_assigns_nameservers_and_lists_the_zone(fake_cloud) -> None:
+    hz = fake_cloud.hetzner_dns
+    auth = {"Authorization": "Bearer t"}
+    resp = requests.post(f"{_hetzner_dns(fake_cloud)}/zones",
+                         json={"name": "bought.test", "mode": "primary"}, headers=auth)
+    assert resp.status_code == 201
+    zone = resp.json()["zone"]
+    assert zone["name"] == "bought.test" and isinstance(zone["id"], int)
+    assert zone["authoritative_nameservers"]["assigned"] == hz.ASSIGNED_NAMESERVERS
+    assert hz.created_zones == [{"name": "bought.test", "mode": "primary"}]
+    # verify() now lists it, nameservers and all.
+    listed = requests.get(f"{_hetzner_dns(fake_cloud)}/zones?per_page=50", headers=auth).json()
+    assert zone in listed["zones"]
+    # A second create of the same name is refused, as the Cloud API does.
+    again = requests.post(f"{_hetzner_dns(fake_cloud)}/zones",
+                          json={"name": "bought.test", "mode": "primary"}, headers=auth)
+    assert again.status_code == 409
+    assert len(hz.created_zones) == 1
+
+
+def test_hetzner_dns_zone_create_refused_once_then_served(fake_cloud) -> None:
+    hz = fake_cloud.hetzner_dns
+    hz.refuse_zone_creates = 1
+    url = f"{_hetzner_dns(fake_cloud)}/zones"
+    refused = requests.post(url, json={"name": "bought.test"}, headers={"Authorization": "Bearer t"})
+    assert refused.status_code == 422
+    assert refused.json()["error"]["message"] == hz.ZONE_CREATE_REFUSAL
+    assert hz.zone_named("bought.test") is None and hz.created_zones == []
+    served = requests.post(url, json={"name": "bought.test"}, headers={"Authorization": "Bearer t"})
+    assert served.status_code == 201
+    assert hz.zone_named("bought.test") is not None
+
+
+def test_hetzner_dns_created_rrsets_reads_back_what_was_published(fake_cloud) -> None:
+    hz = fake_cloud.hetzner_dns
+    base = _hetzner_dns(fake_cloud)
+    zone = requests.post(f"{base}/zones", json={"name": "bought.test"},
+                         headers={"Authorization": "Bearer t"}).json()["zone"]
+    rrset = {"name": "@", "type": "A", "ttl": 300, "records": [{"value": "203.0.113.5"}]}
+    requests.post(f"{base}/zones/{zone['id']}/rrsets", json=rrset,
+                  headers={"Authorization": "Bearer t"})
+    assert hz.created_rrsets(zone["id"]) == [rrset]
+    assert hz.created_rrsets(42) == []
+
+
+def test_hetzner_dns_creates_and_adds_land_in_the_zone(fake_cloud) -> None:
+    """An RRset create and an ``add_records`` both join the store, so
+    ``records()`` reads the zone a run leaves behind, removals included."""
+    hz = fake_cloud.hetzner_dns
+    base = _hetzner_dns(fake_cloud)
+    auth = {"Authorization": "Bearer t"}
+    hz.seed_record("@", "A", "198.51.100.7")
+    requests.post(f"{base}/zones/42/rrsets", headers=auth, json={
+        "name": "mail", "type": "A", "ttl": 300, "records": [{"value": "203.0.113.5"}],
+    })
+    requests.post(f"{base}/zones/42/rrsets/@/A/actions/add_records", headers=auth,
+                  json={"records": [{"value": "203.0.113.5"}]})
+    requests.post(f"{base}/zones/42/rrsets/@/A/actions/remove_records", headers=auth,
+                  json={"records": [{"value": "198.51.100.7"}]})
+    assert sorted(hz.records()) == [("@", "A", "203.0.113.5"), ("mail", "A", "203.0.113.5")]
+    assert hz.added_records == [("@", "A", "203.0.113.5")]
+
+
+_PORKBUN_KEYS = {"apikey": "pk1_e2e", "secretapikey": "sk1_e2e"}
+
+
+def test_porkbun_registers_once_at_the_quoted_price(fake_cloud) -> None:
+    pb = fake_cloud.porkbun
+    base = pb.base_url()
+    assert requests.post(f"{base}/ping", json=_PORKBUN_KEYS).json()["status"] == "SUCCESS"
+    check = requests.post(f"{base}/domain/checkDomain/bought.test", json=_PORKBUN_KEYS).json()
+    assert check["response"]["avail"] == "yes"
+    assert check["response"]["price"] == pb.REGISTRATION
+    # A cost other than the quote is refused and buys nothing.
+    wrong = requests.post(f"{base}/domain/create/bought.test",
+                          json={**_PORKBUN_KEYS, "cost": 1, "agreeToTerms": "yes"})
+    assert wrong.json()["status"] == "ERROR" and pb.registered == []
+    ok = requests.post(f"{base}/domain/create/bought.test",
+                       json={**_PORKBUN_KEYS, "cost": pb.registration_cents, "agreeToTerms": "yes"})
+    assert ok.json()["status"] == "SUCCESS"
+    assert pb.registered == [{"domain": "bought.test", "cost": pb.registration_cents}]
+    # Sold once: a second create is refused, and the quote now says taken.
+    twice = requests.post(f"{base}/domain/create/bought.test",
+                          json={**_PORKBUN_KEYS, "cost": pb.registration_cents})
+    assert twice.json()["status"] == "ERROR" and len(pb.registered) == 1
+    check = requests.post(f"{base}/domain/checkDomain/bought.test", json=_PORKBUN_KEYS).json()
+    assert check["response"]["avail"] == "no"
+
+
+def test_porkbun_update_ns_records_what_was_set_on_a_held_domain(fake_cloud) -> None:
+    pb = fake_cloud.porkbun
+    base = pb.base_url()
+    ns = ["ns1.zone-door.test", "ns2.zone-door.test"]
+    refused = requests.post(f"{base}/domain/updateNs/bought.test", json={**_PORKBUN_KEYS, "ns": ns})
+    assert refused.json()["status"] == "ERROR", "not this account's domain yet"
+    assert pb.nameservers_of("bought.test") is None
+    requests.post(f"{base}/domain/create/bought.test",
+                  json={**_PORKBUN_KEYS, "cost": pb.registration_cents})
+    ok = requests.post(f"{base}/domain/updateNs/bought.test", json={**_PORKBUN_KEYS, "ns": ns})
+    assert ok.json()["status"] == "SUCCESS"
+    assert pb.nameserver_updates == [("bought.test", ns)]
+    assert pb.nameservers_of("bought.test") == ns
+
+
+def test_porkbun_refuses_a_call_without_its_keys(fake_cloud) -> None:
+    resp = requests.post(f"{fake_cloud.porkbun.base_url()}/ping", json={})
+    assert resp.status_code == 400 and resp.json()["status"] == "ERROR"
+    # The public pricing endpoint needs no keys.
+    pricing = requests.post(f"{fake_cloud.porkbun.base_url()}/pricing/get").json()
+    assert pricing["pricing"]["test"]["registration"] == fake_cloud.porkbun.REGISTRATION

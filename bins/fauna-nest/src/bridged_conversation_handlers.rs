@@ -30,16 +30,16 @@
 use std::time::Duration;
 
 use fauna_protocol::bridged_conversations::{
-    BRIDGED_PAGE_DEFAULT, BRIDGED_PAGE_MAX, BridgedAck, BridgedMessageInfo, BridgedRoomInfo,
-    ConversationChangedPush, DepositReply, DepositRequest, InboxFetchReply, InboxFetchRequest,
-    KIND_DEPOSIT, KIND_INBOX_FETCH, KIND_MESSAGES_REMOVE, KIND_OUTBOX_ACK, KIND_OUTBOX_FETCH,
-    KIND_RECEIPT, KIND_ROOM_MEMBERS, KIND_ROOM_UPSERT, KIND_ROOMS_LIST, KIND_ROOMS_OPEN,
-    KIND_ROOMS_REMOVE, KIND_SEND, MAX_BRIDGED_FAR_ID_BYTES, MAX_BRIDGED_PARTICIPANTS,
-    MAX_BRIDGED_SEALED_BYTES, MessagesRemoveRequest, OutboxAckReply, OutboxAckRequest,
-    OutboxFetchReply, OutboxFetchRequest, OutboxItem, RECEIPT_DELIVERED, RECEIPT_READ,
-    ReceiptRequest, RemoveReply, RoomMembersRequest, RoomUpsertReply, RoomUpsertRequest,
-    RoomsListReply, RoomsListRequest, RoomsOpenReply, RoomsOpenRequest, RoomsRemoveRequest,
-    SendReply, SendRequest,
+    AddressAdmitReply, AddressAdmitRequest, BRIDGED_PAGE_DEFAULT, BRIDGED_PAGE_MAX, BridgedAck,
+    BridgedMessageInfo, BridgedRoomInfo, ConversationChangedPush, DepositReply, DepositRequest,
+    InboxFetchReply, InboxFetchRequest, KIND_ADDRESS_ADMIT, KIND_DEPOSIT, KIND_INBOX_FETCH,
+    KIND_MESSAGES_REMOVE, KIND_OUTBOX_ACK, KIND_OUTBOX_FETCH, KIND_RECEIPT, KIND_ROOM_MEMBERS,
+    KIND_ROOM_UPSERT, KIND_ROOMS_LIST, KIND_ROOMS_OPEN, KIND_ROOMS_REMOVE, KIND_SEND,
+    MAX_BRIDGED_FAR_ID_BYTES, MAX_BRIDGED_PARTICIPANTS, MAX_BRIDGED_SEALED_BYTES,
+    MessagesRemoveRequest, OutboxAckReply, OutboxAckRequest, OutboxFetchReply, OutboxFetchRequest,
+    OutboxItem, RECEIPT_DELIVERED, RECEIPT_READ, ReceiptRequest, RemoveReply, RoomMembersRequest,
+    RoomUpsertReply, RoomUpsertRequest, RoomsListReply, RoomsListRequest, RoomsOpenReply,
+    RoomsOpenRequest, RoomsRemoveRequest, SendReply, SendRequest,
 };
 use fauna_protocol::kind_manifest::{BridgeBlock, BridgeCapabilityValue};
 use fauna_protocol::{RpcError, decode_strict as decode};
@@ -506,6 +506,57 @@ fn rooms_open_handler() -> RpcHandler {
     })
 }
 
+/// The one serving bridge whose declared grammar admits `address` (on
+/// `bridge_id` when one is named) — `None` when none, or more than one, does.
+/// The grammar match `rooms.open` and `address.admit` share.
+fn sole_admitting_bridge<'a>(
+    bridges: &'a [ServingBridge],
+    bridge_id: Option<&str>,
+    address: &str,
+) -> Option<&'a ServingBridge> {
+    let mut admitting = bridges.iter().filter(|b| {
+        bridge_id.is_none_or(|id| id == b.block.id) && b.block.address_matches(address)
+    });
+    match (admitting.next(), admitting.next()) {
+        (Some(bridge), None) => Some(bridge),
+        _ => None,
+    }
+}
+
+fn address_admit_handler() -> RpcHandler {
+    Box::new(|state, actor_id, payload| {
+        Box::pin(async move {
+            require_permission(&state, &actor_id, KIND_ADDRESS_ADMIT).await?;
+            let req: AddressAdmitRequest = decode(&payload).map_err(malformed)?;
+            encode_reply(&address_admit(&state, &actor_id, &req).await?)
+        })
+    })
+}
+
+/// `conversation.address.admit` past its permission check: the declared
+/// grammars of the bridges serving the account are matched against the
+/// spelling, and nothing else happens — no far lookup, no row, no push
+/// (`docs/goal/ui/conversations.md` § Errors & edge cases → *The picker tells
+/// the truth*, rule 4). Text `rooms.open` would refuse as malformed answers
+/// "no bridge" too: the picker asks on every keystroke, and unfinished text is
+/// not an error.
+async fn address_admit(
+    state: &AppState,
+    actor_id: &[u8; 32],
+    req: &AddressAdmitRequest,
+) -> Result<AddressAdmitReply, RpcError> {
+    let bridge_id = if far_id("address", &req.address).is_err() {
+        None
+    } else {
+        let bridges = serving_bridges(state, actor_id).await?;
+        sole_admitting_bridge(&bridges, None, &req.address).map(|b| b.block.id.clone())
+    };
+    Ok(AddressAdmitReply {
+        bridge_id,
+        extra: Default::default(),
+    })
+}
+
 /// `conversation.rooms.open` past its permission check: the one place a
 /// declared grammar is matched, and — on a first-party leg — where a human
 /// spelling resolves through `far` to the stable id the room keys on.
@@ -517,11 +568,8 @@ async fn rooms_open(
 ) -> Result<RoomsOpenReply, RpcError> {
     far_id("address", &req.address)?;
     let bridges = serving_bridges(state, actor_id).await?;
-    let mut admitting = bridges.iter().filter(|b| {
-        req.bridge_id.as_deref().is_none_or(|id| id == b.block.id)
-            && b.block.address_matches(&req.address)
-    });
-    let (Some(bridge), None) = (admitting.next(), admitting.next()) else {
+    let Some(bridge) = sole_admitting_bridge(&bridges, req.bridge_id.as_deref(), &req.address)
+    else {
         return Err(coded_ns(
             NS,
             "address_refused",
@@ -794,6 +842,7 @@ pub fn register_bridged_conversation_handlers(b: &mut RpcRouterBuilder) {
     for (kind, forbid_replay, handler) in [
         (KIND_ROOMS_LIST, false, rooms_list_handler()),
         (KIND_ROOMS_OPEN, false, rooms_open_handler()),
+        (KIND_ADDRESS_ADMIT, false, address_admit_handler()),
         (KIND_INBOX_FETCH, false, inbox_fetch_handler()),
         (KIND_SEND, true, send_handler()),
         (KIND_MESSAGES_REMOVE, false, messages_remove_handler()),
@@ -1023,6 +1072,47 @@ mod tests {
         };
         let reply = rooms_open_handler()(state.clone(), ACCOUNT, enc(&req)).await?;
         Ok(decode::<RoomsOpenReply>(&reply).unwrap().room)
+    }
+
+    async fn admit(state: &Arc<AppState>, address: &str) -> Option<String> {
+        let req = AddressAdmitRequest {
+            address: address.into(),
+            extra: Default::default(),
+        };
+        let reply = address_admit_handler()(state.clone(), ACCOUNT, enc(&req))
+            .await
+            .unwrap();
+        decode::<AddressAdmitReply>(&reply).unwrap().bridge_id
+    }
+
+    /// `conversations.md` § *The picker tells the truth*, rule 4 (a): the
+    /// keystroke question names the one admitting bridge and writes nothing —
+    /// no room lists afterwards; an unadmitted, empty or overlong spelling is
+    /// an ordinary `None`, never a refusal; two admitting bridges answer
+    /// `None` too.
+    #[tokio::test]
+    async fn address_admit_names_the_one_bridge_and_opens_no_room() {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        crate::bridge_legs::test_support::init_leg_tables(&db).await;
+        db.create_user(&ACCOUNT, "free", "test").await.unwrap();
+        consent(&db, b"family-1", CLIENT, [1; 32]).await;
+        let state = Arc::new(AppState::for_test(db.clone()));
+
+        assert_eq!(
+            admit(&state, "@bob:example.org").await.as_deref(),
+            Some("matrix")
+        );
+        assert_eq!(admit(&state, "@bob").await, None);
+        assert_eq!(admit(&state, "").await, None);
+        assert_eq!(
+            admit(&state, &"x".repeat(MAX_BRIDGED_FAR_ID_BYTES + 1)).await,
+            None
+        );
+        assert!(list(&state).await.is_empty(), "admit wrote a room");
+
+        consent_as(&db, b"family-2", OTHER, [2; 32], "matrix-2").await;
+        assert_eq!(admit(&state, "@bob:example.org").await, None);
+        assert!(list(&state).await.is_empty());
     }
 
     /// `apps/bridges.md` § Phase G → *When the bridge stops serving*, as the

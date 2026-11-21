@@ -133,6 +133,8 @@ pub trait CaldavPolicyNest: MaybeSendSync {
 pub struct CaldavPolicyMachine {
     nest: Arc<dyn CaldavPolicyNest>,
     inner: Mutex<CaldavPolicySnapshot>,
+    /// Where the page's `get_mail_config` read stands (rule 5).
+    read: Mutex<fauna_core::possibility::ReadState>,
 }
 
 impl CaldavPolicyMachine {
@@ -140,6 +142,26 @@ impl CaldavPolicyMachine {
         Self {
             nest,
             inner: Mutex::new(CaldavPolicySnapshot::defaults()),
+            read: Mutex::new(fauna_core::possibility::ReadState::Pending),
+        }
+    }
+
+    /// Whether `admin-calendar-caldav-port-save-button` can send its draft: a
+    /// listener port in `[1, 65535]` (`fauna_core::format::parse_port`). The
+    /// app folds it with [`Self::toggle_possibility`] (the read gate). On a
+    /// nest whose CalDAV is served behind its domain the port is inert but the
+    /// save still succeeds — a stored choice that governs the direct listener
+    /// whenever the nest serves one — so it is not blocked there (`admin.md`
+    /// § 8 Calendar; the help text says the field governs only that listener).
+    pub fn port_draft_possibility(draft: &str) -> fauna_core::possibility::Possibility {
+        if fauna_core::format::parse_port(draft).is_some() {
+            fauna_core::possibility::Possibility::Possible
+        } else {
+            fauna_core::possibility::Possibility::blocked(
+                fauna_core::localized::LocalizedText::key(
+                    "admin.calendar_page.caldav_port_invalid",
+                ),
+            )
         }
     }
 
@@ -149,7 +171,10 @@ impl CaldavPolicyMachine {
 
     async fn refresh(&self) -> Result<(), DispatchError> {
         self.set_status(CaldavPolicyStatus::Loading);
-        let reply = self.nest.get_mail_config().await?;
+        let reply = self.nest.get_mail_config().await.inspect_err(|_| {
+            crate::bool_toggle_policy::note_read_failed(&self.read);
+        })?;
+        *self.read.lock().expect("read mutex") = fauna_core::possibility::ReadState::Resolved;
         let mut snap = self.inner.lock().expect("snapshot mutex");
         *snap = CaldavPolicySnapshot::from_config(&reply);
         snap.status = CaldavPolicyStatus::Idle;
@@ -175,6 +200,23 @@ impl CaldavPolicyMachine {
 impl CaldavPolicyMachine {
     pub fn snapshot(&self) -> CaldavPolicySnapshot {
         fauna_core::clone_locked(&self.inner, |s| s)
+    }
+
+    /// Where the `get_mail_config` read stands — whether the page has an answer to keep,
+    /// or one still to ask for when the nest connection comes back
+    /// (`docs/goal/behavior/admin.md` § Errors & edge cases, *Controls wait
+    /// for their read*).
+    pub fn read_state(&self) -> fauna_core::possibility::ReadState {
+        *self.read.lock().expect("read mutex")
+    }
+
+    /// Whether `admin-calendar-enabled-toggle` and the port save are live: the
+    /// read resolved and no change is on its way (`docs/goal/ui/README.md`
+    /// § Offer only what is possible, rule 5). The press asks the same answer.
+    pub fn toggle_possibility(&self) -> fauna_core::possibility::Possibility {
+        let idle = self.inner.lock().expect("snapshot mutex").status == CaldavPolicyStatus::Idle;
+        let read = *self.read.lock().expect("read mutex");
+        crate::bool_toggle_policy::toggle_possibility(read, idle)
     }
 }
 
@@ -205,6 +247,19 @@ impl CaldavPolicyMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_port_draft_must_be_a_listener_port() {
+        assert!(CaldavPolicyMachine::port_draft_possibility(" 9443 ").is_possible());
+        for bad in ["", "0", "65536", "port", "-1"] {
+            let p = CaldavPolicyMachine::port_draft_possibility(bad);
+            assert_eq!(
+                p.reason().map(|r| r.key.as_str()),
+                Some("admin.calendar_page.caldav_port_invalid"),
+                "{bad:?}"
+            );
+        }
+    }
     use std::sync::Mutex as StdMutex;
 
     /// In-memory nest modelling the `caldav_enabled` / `mail_enabled` toggles
@@ -254,6 +309,36 @@ mod tests {
             self.cfg.lock().unwrap().caldav_port = port;
             Ok(())
         }
+    }
+
+    struct Down;
+
+    #[async_trait]
+    impl CaldavPolicyNest for Down {
+        async fn get_mail_config(&self) -> Result<FetchConfigReply, NestError> {
+            Err(NestError::Rejected("down".into()))
+        }
+        async fn set_caldav_enabled(&self, _: bool) -> Result<(), NestError> {
+            Ok(())
+        }
+        async fn set_caldav_port(&self, _: u16) -> Result<(), NestError> {
+            Ok(())
+        }
+    }
+
+    /// Rule 5: before the read the toggle is still loading, after a failed
+    /// read it says so, and only a resolved read makes it live.
+    #[tokio::test]
+    async fn the_toggle_waits_for_the_read() {
+        let key = |m: &CaldavPolicyMachine| m.toggle_possibility().reason().map(|r| r.key.clone());
+        let m = CaldavPolicyMachine::new(Arc::new(FakeNest::new()));
+        assert_eq!(key(&m), Some("common.still_loading".to_string()));
+        m.hydrate().await.unwrap();
+        assert!(m.toggle_possibility().is_possible());
+
+        let m = CaldavPolicyMachine::new(Arc::new(Down));
+        assert!(m.hydrate().await.is_err());
+        assert_eq!(key(&m), Some("common.load_failed".to_string()));
     }
 
     #[tokio::test]

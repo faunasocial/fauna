@@ -19,6 +19,7 @@ import {
   type OverlayFace,
   type SaveAnswer,
 } from './contact-overlay.ts';
+import { t } from './i18n/strings.ts';
 
 function assert(cond: boolean, msg: string) {
   if (!cond) throw new Error(msg);
@@ -42,6 +43,7 @@ function fakeFace(tag: string, answer: SaveAnswer): OverlayFace {
     reset: () => {
       staged = false;
     },
+    savePossibility: () => ({ state: 'possible' }),
     save: () => {
       if (answer.kind === 'saved') staged = false;
       return Promise.resolve(answer);
@@ -122,4 +124,24 @@ Deno.test('a Save that answers no text, or throws, still paints a refusal', asyn
   };
   const thrown = await savePrivateSection(throwing);
   assert(!!thrown && thrown.includes('the face is gone'), `a thrown Save names its cause, got ${JSON.stringify(thrown)}`);
+});
+
+Deno.test('Save asks the answer its button is painted from and refuses before saving', async () => {
+  for (const [key, text] of [
+    ['common.still_loading', t.common.still_loading],
+    ['profile.private_save_elsewhere', t.profile.private_save_elsewhere],
+  ] as const) {
+    let saved = false;
+    const editor: OverlayEditorFace = {
+      ...fakeFace('m', { kind: 'saved', text: null }).editor('x'),
+      savePossibility: () => ({ state: 'blocked', reason: { key } }),
+      save: () => {
+        saved = true;
+        return Promise.resolve({ kind: 'saved', text: null });
+      },
+    };
+    const shown = await savePrivateSection(editor);
+    assert(shown === text, `${key}: the refusal is the painted reason, got ${JSON.stringify(shown)}`);
+    assert(!saved, `${key}: nothing is sent`);
+  }
 });

@@ -272,6 +272,21 @@ pub fn pan(mode: &str, year: i32, month: u32, day: u32, forward: bool) -> Result
     )))
 }
 
+/// `fauna_core::caltime::pan_possibility` — whether the pan pair can do
+/// anything in view `mode`, in `Possibility`'s serde form for
+/// `#lib/possibility`'s `paintPossibility`: blocked with
+/// `events.pan_none_in_agenda` in agenda, possible otherwise (`events.md`
+/// § User actions; `ui/README.md` § Offer only what is possible, rules 2 and
+/// 6). The SPA paints both buttons from it and its pan handler asks it before
+/// calling [`pan`]. Unlike `pan_step` this is no walk to re-implement, so it
+/// has a wasm twin (the UniFFI one is `calendar_pan_possibility`).
+#[wasm_bindgen(js_name = panPossibility)]
+pub fn pan_possibility(mode: &str) -> Result<JsValue, JsValue> {
+    to_js(&fauna_core::caltime::pan_possibility(parse_view_mode(
+        mode,
+    )?))
+}
+
 /// `fauna_core::caltime::visible_days` — the dates view `mode` shows for the
 /// anchor `(year, month, day)`: the month grid's 42 cells, the week's 7
 /// day-columns, the single day, or an empty array for the date-unfiltered

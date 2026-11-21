@@ -95,7 +95,8 @@ async fn manifest_is_e2ee(state: &AppState, manifest_hash: &[u8; 32]) -> Option<
     let bytes = crate::backup::decode_blob(&blob, svc.encryption_key()).ok()?;
     let manifest =
         fauna_core::encoding::canonical_decode::<fauna_core::chunk::ChunkManifest>(&bytes).ok()?;
-    Some(manifest.stored_hashes.is_some())
+    // A paged root carries no store keys of its own; a sealed one is sealed.
+    Some(manifest.stored_hashes.is_some() || manifest.is_sealed())
 }
 
 // ── fauna.share.create ──────────────────────────────────────────────────────

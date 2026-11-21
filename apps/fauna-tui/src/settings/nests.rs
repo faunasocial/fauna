@@ -151,6 +151,20 @@ pub(crate) fn blessing_door(
     )
 }
 
+/// The Nests page's pairing-mark door — the account plane's
+/// `fauna.state.pairing-mark`, through the shared impl every runtime-hosting
+/// app wires beside the blessing door, over this app's slot: a link or an
+/// unlink here repaints a sibling seat's open Nests page.
+pub(crate) fn pairing_mark_door(
+    runtime: super::AccountRuntimeSlot,
+) -> Arc<dyn fauna_client_pair::PairingMarkStore> {
+    Arc::new(
+        fauna_client_account_runtime::pairing_marks::PlanePairingMarks::new(move || {
+            runtime.lock().ok().and_then(|handle| handle.clone())
+        }),
+    )
+}
+
 /// The succession-ledger door — the account plane's
 /// `fauna.state.succession-ledger` (the grant log and its marks) over the same
 /// slot, resolved at every call: a machine built before the runtime lands
@@ -194,6 +208,7 @@ impl NestsState {
         runtime: super::AccountRuntimeSlot,
         mail: Arc<dyn fauna_client_config::MailStore>,
     ) -> Self {
+        let marks = pairing_mark_door(runtime.clone());
         let machine = match crate::mail_glue::build_linked_nests_machine_with_trust(
             Arc::clone(&nest),
             secret_hex,
@@ -209,7 +224,8 @@ impl NestsState {
                 tracing::error!("[settings/nests] build trust machine: {e}");
                 fauna_client_pair::build_linked_nests_machine(nest)
             }
-        };
+        }
+        .with_pairing_marks(marks);
         NestsState {
             machine: Some(Arc::new(machine)),
             ..Default::default()
@@ -244,7 +260,7 @@ impl NestsState {
     pub fn mint_action(&self) -> Option<LinkedNestsAction> {
         let form = self.mint.as_ref()?;
         let option = self.mint_option(form)?;
-        let holder = derive_holder(option, form.holder.as_deref())?;
+        let holder = fauna_client_pair::mint_holder(option, form.holder.clone())?;
         Some(LinkedNestsAction::Mint {
             nest_id: form.nest_id.clone(),
             holder_bridge_id: holder,
@@ -252,6 +268,17 @@ impl NestsState {
             // Named explicitly, so what confirm mints is what the select shows.
             duration: Some(self.mint_duration(form)?),
         })
+    }
+
+    /// The open mint form's confirm answer: the shared
+    /// `mint_draft_possibility` (a use picked, and its holder when several
+    /// services can hold it) — `None` with no form open.
+    pub fn mint_answer(&self) -> Option<fauna_core::possibility::Possibility> {
+        let form = self.mint.as_ref()?;
+        Some(fauna_client_pair::mint_draft_possibility(
+            self.mint_option(form).cloned(),
+            form.holder.clone(),
+        ))
     }
 
     /// The duration the open form mints: the user's pick, else the row's
@@ -279,23 +306,6 @@ fn option_default_duration(row: &LinkedNestRow, scope: Option<usize>) -> TrustGr
         Some(o) => fauna_client_pair::mint_option_default_duration(o, row.mint_default_duration),
         None => row.mint_default_duration,
     }
-}
-
-/// The holder a mint targets: the single candidate when an option derives
-/// exactly one (every option today), else the explicit pick from
-/// `nest-trust-mint-holder-select`. `None` means "not confirmable yet" — an
-/// ambiguous option with nothing picked, or a catalog entry with no candidate at
-/// all (which the shared builder does not emit, but which must not mint blind).
-fn derive_holder(option: &TrustMintOption, picked: Option<&str>) -> Option<String> {
-    if option.holder_candidates.len() > 1 {
-        let picked = picked?;
-        return option
-            .holder_candidates
-            .iter()
-            .find(|c| c.as_str() == picked)
-            .cloned();
-    }
-    option.holder_candidates.first().cloned()
 }
 
 /// The ordered ui.yaml `nests` element list: the page heading, the add-a-nest
@@ -331,12 +341,17 @@ pub(super) fn nests_elements(
             )
             .labelled(t::NEST_TO_LINK),
         );
-        els.push(Element::gesture_button(
-            ids::NESTS_ADD_SUBMIT_BUTTON,
-            t::ADD_SUBMIT,
-            !state.add_input.trim().is_empty(),
-            Gesture::Settings(Action::NestsSubmitAdd),
-        ));
+        // The draft answer paints the submit with its reason (rule 4).
+        let answer = fauna_client_pair::link_input_possibility(&state.add_input);
+        els.push(
+            Element::gesture_button(
+                ids::NESTS_ADD_SUBMIT_BUTTON,
+                t::ADD_SUBMIT,
+                answer.is_possible(),
+                Gesture::Settings(Action::NestsSubmitAdd),
+            )
+            .possible(answer),
+        );
         els.push(Element::gesture_button(
             ids::NESTS_ADD_CANCEL_BUTTON,
             t::ADD_CANCEL,
@@ -1133,13 +1148,17 @@ fn push_mint_flow(els: &mut Vec<Element>, state: &NestsState, row: &LinkedNestRo
         );
     }
 
+    let answer = state
+        .mint_answer()
+        .unwrap_or(fauna_core::possibility::Possibility::Absent);
     els.push(
         Element::gesture_button(
             ids::NEST_TRUST_MINT_CONFIRM_BUTTON,
             t::MINT_CONFIRM,
-            state.mint_action().is_some(),
+            answer.is_possible() && state.mint_action().is_some(),
             Gesture::Settings(Action::NestsConfirmMint),
         )
+        .possible(answer)
         .within(ids::NESTS_ITEM, i),
     );
 }
@@ -1217,6 +1236,7 @@ mod tests {
             class: class.to_string(),
             kind: kind.map(str::to_string),
             tier: tier.map(str::to_string),
+            folder: None,
         }
     }
 

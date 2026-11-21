@@ -69,6 +69,19 @@ pub fn wire_connected_apps_consent_grant(
     }
 }
 
+/// `atproto-external-apps-enable`'s answer — the FFI face of
+/// [`fauna_client_connected_apps::external_apps_possibility`]: still loading
+/// until the page's read has returned (`None` = no machine built yet), so the
+/// switch never writes the flip of an unread default
+/// (`docs/goal/ui/connected-apps.md` § Errors & edge cases). Painted on the
+/// switch and asked again by the press.
+#[uniffi::export]
+pub fn connected_apps_external_apps_possibility(
+    snapshot: Option<ConnectedAppsSnapshot>,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_connected_apps::external_apps_possibility(snapshot.as_ref())
+}
+
 /// A roster row's text, composed once in shared Rust
 /// (`fauna_client_connected_apps::compose`; `docs/goal/ui/connected-apps.md`
 /// § Where logic lives): the lines top to bottom, then the facts the app joins
@@ -121,4 +134,25 @@ pub fn connected_apps_line_separator() -> String {
 #[uniffi::export]
 pub fn connected_apps_facts_separator() -> String {
     fauna_client_connected_apps::compose::FACTS_SEPARATOR.to_string()
+}
+
+/// `connected-apps-connect-submit` and the code input's Enter:
+/// [`fauna_client_connected_apps::connect_code_possibility`] — asked before
+/// the lookup, so a blank code is never sent (`docs/goal/ui/connected-apps.md`
+/// § Errors & edge cases).
+#[uniffi::export]
+pub fn connected_apps_connect_code_possibility(
+    code: String,
+) -> fauna_core::possibility::Possibility {
+    fauna_client_connected_apps::connect_code_possibility(&code)
+}
+
+/// `connected-apps-request-approve`: [`ConsentCardRow::approve_possibility`] —
+/// a folder card approves once a folder is chosen; Decline and Block are never
+/// gated.
+#[uniffi::export]
+pub fn connected_apps_request_approve_possibility(
+    consent: ConsentCardRow,
+) -> fauna_core::possibility::Possibility {
+    consent.approve_possibility()
 }

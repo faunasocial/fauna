@@ -255,8 +255,18 @@ where
 }
 
 /// A mail-machine failure as this page's error. The text is the
-/// `DispatchError`'s own — it never contains a secret.
+/// `DispatchError`'s own — it never contains a secret — save for an account
+/// store that has not listed the account yet, which crosses as
+/// [`ConnectedAppsApiError::NotReady`] carrying the seam's reason key, so the
+/// page waits it out instead of painting the store's raw text.
 fn map_mail_err(e: DispatchError) -> ConnectedAppsApiError {
+    if let DispatchError::Store(s) = &e
+        && let Some(reason) = s.not_ready_reason_key()
+    {
+        return ConnectedAppsApiError::NotReady {
+            detail: reason.into(),
+        };
+    }
     let detail = e.to_string();
     match e {
         DispatchError::UnknownCredential(_) => ConnectedAppsApiError::NotFound { detail },
@@ -532,6 +542,30 @@ pub use wasm::build_connected_apps_machine;
 mod tests {
     use super::*;
     use fauna_client_testkit::{CapturingRequester, block_on};
+
+    /// The mail machine's not-ready store refusal crosses as `NotReady` with
+    /// the seam's reason key — never `Transient` with the store's raw text,
+    /// which the page painted as a refresh error right after sign-in.
+    #[test]
+    fn a_not_ready_mail_store_is_not_ready_with_its_reason_key() {
+        use fauna_client_config::{
+            LEDGER_AWAITING_SIBLING, LEDGER_NOT_READY, NEEDS_NEST_KEY, NEEDS_OTHER_DEVICE_KEY,
+            StoreError,
+        };
+        for (raw, key) in [
+            (LEDGER_NOT_READY, NEEDS_NEST_KEY),
+            (LEDGER_AWAITING_SIBLING, NEEDS_OTHER_DEVICE_KEY),
+        ] {
+            assert_eq!(
+                map_mail_err(DispatchError::Store(StoreError::Load(raw.into()))),
+                ConnectedAppsApiError::NotReady { detail: key.into() }
+            );
+        }
+        assert!(matches!(
+            map_mail_err(DispatchError::Store(StoreError::Load("disk".into()))),
+            ConnectedAppsApiError::Transient { .. }
+        ));
+    }
 
     #[test]
     fn a_roster_unknown_kind_is_a_surfaced_error() {

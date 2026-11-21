@@ -3,7 +3,7 @@
 This connects two nests you have already set up, so that **your email arrives at
 home** instead of living on a rented server.
 
-The internet nest becomes a doorway. Mail from the outside world arrives there; the doorway checks it as it comes in and stores it encrypted, the machine in your home collects it within seconds, and the doorway then deletes its copy. It keeps no readable copy of the mail you receive — only delivery details, such as who sent it, when, and how big it is. Mail you send leaves through the doorway too, and it handles that in readable form while delivering it, as any mail server must.
+The internet nest becomes a doorway. Mail from the outside world arrives there; the doorway checks it as it comes in and stores it encrypted, the machine in your home collects it within seconds, and the doorway then deletes its copy. It keeps no readable copy of the mail you receive — only delivery details, such as who sent it, who it is for, when, how big it is, and the results of its spam and sender checks. Mail you send leaves through the doorway too, and it handles that in readable form while delivering it, as any mail server must.
 
 ```
    the internet                 your home
@@ -87,6 +87,10 @@ servers**.
 | **Username** | the one shown on its row under **Settings → Connected apps**, on each nest |
 | **Password** | the mail password from the internet nest — the home nest uses the same one |
 
+Only your first mail password carries over to the home nest: the oldest one you
+still have on the internet nest. A password you added after it signs in only
+there.
+
 Your calendar and contacts also come from the home nest, at
 `https://192.168.1.50:8443`.
 
@@ -97,7 +101,7 @@ issues its own. Accept it once.
 
 1. **Send yourself mail from outside** — from a Gmail account, say. It should
    appear in your mail app shortly, readable; the home nest collects new mail
-   every few seconds.
+   about every 10 seconds.
 2. **Send a message out** and confirm it arrives, and that a copy shows up in
    your Sent folder at home.
 
@@ -111,8 +115,8 @@ There is nothing to check on the doorway itself. It deletes its encrypted copy a
   waits indefinitely, so don't leave it off for weeks.
 - **Back up the home machine.** It holds the only copy of your mail. Relaying is not backing up — the internet nest deliberately deletes what passes through it once your home nest has it. You can, however, add
   that same nest as a **backup destination**, which is a separate and deliberate
-  choice: it then holds encrypted chunks it still cannot read, apart from a folder you have made public. That is the
-  recommended way to protect the home machine — see
+  choice: it then holds encrypted chunks it still cannot read, apart from a folder you have made public. That gives
+  you a copy to restore the home machine from — see
   [Backup with Fauna](cloud-backup.md).
 - **Check the reverse name** for your internet nest, set in
   [its guide](nest-internet-setup.md). Mail providers are strict about it and a
@@ -137,11 +141,12 @@ confirm it lists the other; if either doesn't, redo Step 1.
 **Mail stays readable on the internet nest.** Step 2 didn't take. Re-check that **Serve my mail & calendar over IMAP/CalDAV on this nest** is off there.
 
 **Your posts don't show up on the internet nest.** Open **Settings → Nests** on
-the home nest. If posts are waiting to reach your internet nest, it says so at the top of the page — the page calls the internet nest your *relay* — with the reason the last attempt failed. The usual cause is that
-the internet nest hasn't been told it may forward your posts — redo Step 1,
-which grants that, then press **Retry now** on the home nest's page rather
+the home nest. If posts are waiting to reach your internet nest, it says so above the list of nests — the page calls the internet nest your *relay* — with the reason the last attempt failed. The usual cause is that
+the internet nest hasn't been told it may forward your posts. Link it again from
+this page — press **Link a nest**, type the internet nest's address,
+`https://example.com`, and press **Link** — which grants that, then press **Retry now** here rather
 than waiting for the next automatic attempt. **Stop forwarding these** drops the waiting posts from the list to send; they stay on the home nest.
 
 **Everything works but mail is slow to appear.** The home nest checks for new
-mail on a short cycle, so a few seconds is normal. Minutes usually means the
+mail about every 10 seconds, so a short wait is normal. Minutes usually means the
 home machine dropped off the network.

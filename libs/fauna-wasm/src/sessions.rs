@@ -208,3 +208,25 @@ pub fn sessions_lockout(client: &WsRpcClient, input: JsValue, confirm_word: Stri
 pub fn sessions_lockout_confirm_word() -> String {
     fauna_client_recovery::ceremony::LOCKOUT_CONFIRM_WORD.to_string()
 }
+
+/// `sessions-revoke-others-button`'s answer —
+/// `sessions_view::revoke_others_possibility` over the page the SPA painted
+/// last (`null` before the first load resolved) and whether an act is in
+/// flight (`docs/goal/ui/sessions.md` § Errors & edge cases). The button
+/// paints from it and the arm and confirm ask it again. The wasm twin of the
+/// native `sessions_revoke_others_possibility`.
+#[wasm_bindgen(js_name = sessionsRevokeOthersPossibility)]
+pub fn sessions_revoke_others_possibility(
+    snapshot: JsValue,
+    busy: bool,
+) -> Result<JsValue, JsValue> {
+    let snapshot: Option<Snapshot> = from_js(snapshot)?;
+    let snapshot = snapshot.map(|p| SessionsSnapshot {
+        rows: p.rows.into_iter().map(SessionRowView::from).collect(),
+        error: p.error,
+    });
+    to_js(&sessions_view::revoke_others_possibility(
+        snapshot.as_ref(),
+        busy,
+    ))
+}

@@ -61,6 +61,42 @@
                                Visibility="{x:Bind local:NestProvisioningView.BoolToVisibility(ViewModel.ProvisioningBomVpsLineVisible), Mode=OneWay}" />
                 </StackPanel>
 
+                <!-- The DNS plan (onboarding-provisioning.md § 6 The DNS plan):
+                     every record the run will keep, add, change or remove in
+                     the domain's zone, between the price recap and Buy and set
+                     up. The heading and each row's sentence come resolved from
+                     the shared OnboardingMachine::dns_plan() snapshot, which the
+                     machine fills itself as it enters the page — pure render,
+                     no row derived here. Collapsed while the snapshot is not
+                     visible (the manual path, a bought domain's fresh zone).
+                     The container's Name is the heading line, so it reads as
+                     the region's text and is hoisted into the UIA content view;
+                     the text is read-only, so it is selectable. Mirrors tui's
+                     wizard/nest_provisioning.rs and FaunaKit's
+                     ProvisioningDnsPlan. -->
+                <StackPanel AutomationProperties.AutomationId="{x:Bind ids:Ids.ProvisioningDnsPlan}"
+                            AutomationProperties.Name="{x:Bind ViewModel.ProvisioningDnsPlanHeadingText, Mode=OneWay}"
+                            Spacing="2"
+                            Margin="0,4"
+                            Visibility="{x:Bind local:NestProvisioningView.BoolToVisibility(ViewModel.ProvisioningDnsPlanVisible), Mode=OneWay}">
+                    <TextBlock Text="{x:Bind ViewModel.ProvisioningDnsPlanHeadingText, Mode=OneWay}"
+                               Style="{StaticResource BodyStrongTextBlockStyle}"
+                               IsTextSelectionEnabled="True"
+                               TextWrapping="Wrap" />
+                    <ItemsControl AutomationProperties.Name=" "
+                                  ItemsSource="{x:Bind ViewModel.ProvisioningDnsPlanRows, Mode=OneWay}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:ProvisioningDnsPlanRowItem">
+                                <TextBlock AutomationProperties.AutomationId="{x:Bind local:NestProvisioningView.DnsPlanRowId(Key)}"
+                                           Text="{x:Bind Text}"
+                                           FontFamily="Consolas"
+                                           IsTextSelectionEnabled="True"
+                                           TextWrapping="Wrap" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+
                 <!-- By-continuing terms notice: below the price recap, before the
                      Buy and set up CTA (terms-and-content-guidelines.md item 3). -->
                 <controls:TermsNotice />

@@ -10,7 +10,7 @@
 //! no custodian store, so a browser runs it as a native app does.
 //!
 //! The order and the verdict are the shared driver's
-//! ([`fauna_client_backup::reseed::run_reseed`]), the leg the shared
+//! ([`fauna_client_backup::reseed::run_reseed_with_recovery`]), the leg the shared
 //! [`fauna_client_sync::reseed_pull::NestPullBack`], the post-ceremony duty
 //! [`fauna_client_config::reenroll_nest_destination_after_reseed`]. Web
 //! supplies only what a browser has — the same four seams the lived-in
@@ -33,9 +33,12 @@
 
 use std::sync::Arc;
 
+use fauna_client_backup::recover_leg::{
+    NoAcceptedRegressionRecord, RecoveryDelivery, RecoveryDestination, RecoverySource,
+};
 use fauna_client_backup::reseed::{
     DeliveredCorpus, DeliveredSet, DevicePins, FolderRehome, HostedLegs, PullBackPreflight,
-    ReseedDeliveryLeg, preflight_lines, result_lines, run_reseed,
+    ReseedDeliveryLeg, preflight_lines, result_lines, run_reseed_with_recovery,
 };
 use fauna_client_sync::reseed_pull::{
     NestPullBack, PullBackDestination, PullBackTarget, folder_names_from_coverage, preflight,
@@ -395,7 +398,7 @@ async fn pull_back_from_destination(
         PullBackTarget {
             bytes: &sink,
             nest: &target,
-            device_id: device_hex,
+            device_id: device_hex.clone(),
         },
         keypair.actor_id().0,
         FileDownloadKeys::owner(NestBackupKey::derive(&secret)),
@@ -413,10 +416,37 @@ async fn pull_back_from_destination(
     let leg = WasmPullBackLeg(pull);
 
     let nest_key = NestBackupKey::derive(&secret);
-    let outcome = run_reseed(
+    // A lived-in segment set goes to the nest end of the recovery leg in the
+    // same run (`backup-destinations.md` § Third destination kind → *A
+    // lived-in segment set is completed by record in the same gesture*, rule
+    // (1)): the same destination connection and byte routes, the same target
+    // and grant, composed as the door's own recovery gesture
+    // (`crate::backup_recover`) and the native host compose it. No notice
+    // record stands for a restore, so none is cleared.
+    let dest_records = fauna_client_sync::SyncClient::new(&dest);
+    let target_records = fauna_client_sync::SyncClient::new(&target);
+    let recovery = RecoveryDelivery::new(
+        RecoveryDestination {
+            seam: &seam,
+            bytes: &fetcher,
+            records: &dest_records,
+            device_id: device_hex.clone(),
+        },
+        RecoverySource {
+            bytes: &sink,
+            nest: &target,
+            records: &target_records,
+            device_id: device_hex,
+        },
+        keypair.actor_id().0,
+        &nest_key,
+        &NoAcceptedRegressionRecord,
+    );
+    let outcome = run_reseed_with_recovery(
         &fauna_client_backup::BackupClient::new(target.clone()),
         nest_key.to_bytes().to_vec(),
         &leg,
+        Some(&recovery),
     )
     .await
     .map_err(|e| e.to_string())?;
